@@ -9,7 +9,8 @@ This repository is at the specification stage. It contains the agreed domain
 model, engineering conventions, decision records, and interface evidence.
 Cloning it does not install a Tern plugin or a client executor.
 
-The product specification and subsequent implementation tickets are tracked in
+The agreed product specification is [Issue #1: Native Tern client bridge for OMP](https://github.com/jiwangyihao/tern-omp-client-bridge/issues/1).
+Subsequent implementation tickets are tracked in
 [GitHub Issues](https://github.com/jiwangyihao/tern-omp-client-bridge/issues).
 
 ## Intended behavior
