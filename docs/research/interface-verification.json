@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "versions": {
+    "tern": "0.8.3 (e2b8656)",
+    "ompInstalled": "18.10.4-1.1.61",
+    "draftPipelineSource": "18.10.1"
+  },
+  "platformsExercised": [
+    "macOS arm64"
+  ],
+  "windowsNativeBridgeExercised": false,
+  "tern": {
+    "pasteCommandOverrideConsumed": true,
+    "localInput": {
+      "exact_match": true,
+      "length": 37,
+      "expected_length": 37
+    },
+    "remoteLoopbackInput": {
+      "exact_match": true,
+      "length": 37,
+      "expected_length": 37
+    },
+    "hookAvailability": {
+      "pasteEventRegistered": false,
+      "editPasteOverrideRegistered": false,
+      "sessionPasteMethod": "nil",
+      "agentsAttachMethod": "nil"
+    }
+  },
+  "computer": {
+    "installedStatus": "passed",
+    "installedAssertions": [
+      "installed_loader_registered_same_name_eval",
+      "js_ordinary_state_survives_proxy_bootstrap",
+      "js_proxy_and_state_persist_across_calls",
+      "js_reset_reinstalls_proxy",
+      "py_ordinary_state_survives_proxy_bootstrap",
+      "py_proxy_and_state_persist_across_calls",
+      "py_reset_reinstalls_proxy"
+    ],
+    "nativePreludeEnabled": true,
+    "nativeDesktopExecuted": false,
+    "fullApprovalFlowTested": false,
+    "realNetworkControllerTested": false
+  },
+  "draft": {
+    "installedInteractive": {
+      "status": "passed",
+      "hasUI": true,
+      "supportsEditor": true,
+      "idle": true,
+      "returnType": "undefined"
+    },
+    "sourcePipelineVersion": "18.10.1",
+    "sourcePipelineStatus": "PASS",
+    "syntheticImageSha256": "8e546007599fa6df13786602a501cc2933ae498bb8ed8ff0fa4664f551cad2be",
+    "sourceCases": [
+      {
+        "mode": "extension-ui",
+        "imageCount": 1,
+        "submitCalls": 0,
+        "clipboardCalls": 0,
+        "fetchCalls": 0
+      },
+      {
+        "mode": "raw-bracketed",
+        "imageCount": 1,
+        "submitCalls": 0,
+        "clipboardCalls": 0,
+        "fetchCalls": 0
+      },
+      {
+        "mode": "plain-pasteText",
+        "imageCount": 0,
+        "submitCalls": 0,
+        "clipboardCalls": 0,
+        "fetchCalls": 0
+      }
+    ]
+  },
+  "notExercised": [
+    "ordinary native Cmd/Ctrl+V with real clipboard",
+    "Windows-native end-to-end bridge",
+    "browser-use bridge",
+    "real remote desktop operation",
+    "real public-network file transfer in this experiment"
+  ],
+  "scope": {
+    "existingTernGuiModified": false,
+    "userClipboardRead": false,
+    "modelPromptSubmitted": false,
+    "realRemoteTransferTested": false,
+    "ordinaryNativeCmdVPasteTested": false,
+    "isolatedHeadlessTernExited": true
+  }
+}
