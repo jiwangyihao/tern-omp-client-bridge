@@ -33,9 +33,9 @@ Machine-readable, redacted observations are in
   operations rather than silently changing devices or profiles.
 - No Windows-native client bridge was exercised. A macOS run, a loopback route,
   or the older source harness is not Windows acceptance evidence.
-- The former temporary probes were removed after their results were captured.
-  This repository does not contain a runnable regression suite yet; implementation
-  tickets must add tests at the approved behavioral seams.
+- The initial temporary probes were removed after their observations were captured;
+  they were not a runnable regression suite. Later implementation and acceptance
+  evidence is tracked in [Compatibility](../compatibility.md).
 
 ## Reusable interfaces and design limits
 
@@ -53,6 +53,16 @@ An agent-host process cannot identify which of several Tern clients initiated a
 binding action by examining the shared server account. Local UI origin and OMP
 session identity must be associated explicitly. A shared root account is also
 not a per-person security boundary.
+
+## Follow-up: native pane identifiers
+
+A read-only Tern 0.8.4 WindowCx probe connected to an actual Linux Tern 0.8.3
+service. Its 58 exposed Lua pane aliases were distinct and within the exact
+integer range; numeric lookup and `@focused` resolved the same current pane.
+The controller's diagnostic JSON used a different, larger identifier namespace.
+Converting those diagnostic IDs to floating-point numbers does not demonstrate
+precision loss in the plugin's Lua identifiers. This probe sent no remote input
+and does not establish native paste or remote file-upload acceptance.
 
 ## Primary sources
 

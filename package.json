@@ -1,0 +1,39 @@
+{
+  "name": "@jiwangyihao/tern-omp-client-bridge",
+  "version": "0.1.0",
+  "description": "Client capabilities and human transfers for Tern's native remote OMP GUI",
+  "license": "MPL-2.0",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.4.3"
+  },
+  "bin": {
+    "tern-omp-bridge": "src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./omp": "./src/omp/extension.ts"
+  },
+  "files": ["src", "scripts", "tern", "docs", "README.md", "LICENSE", "bun.lock", "tsconfig.json"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests scripts/packaging.test.ts",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "build": "bun scripts/build.ts",
+    "bridge": "bun src/cli.ts",
+    "test:packaging": "bun test scripts/packaging.test.ts",
+    "test:platform": "bun test tests/integration/runtime-native.test.ts scripts/packaging.test.ts"
+  },
+  "dependencies": {
+    "@oh-my-pi/omptype": "18.10.4",
+    "@oh-my-pi/pi-agent-core": "18.10.4",
+    "@oh-my-pi/pi-coding-agent": "18.10.4",
+    "@oh-my-pi/pi-natives": "18.10.4",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "typescript": "5.9.3"
+  }
+}

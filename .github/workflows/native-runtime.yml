@@ -1,0 +1,43 @@
+name: Native platform runtime
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-runtime:
+    name: Native runtime (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      PI_CODING_AGENT_DIR: ${{ runner.temp }}/tern-bridge-native-agent
+      TERN_OMP_BRIDGE_HOME: ${{ runner.temp }}/tern-bridge-state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Native execution, routing, storage and installation regressions
+        run: bun run test
+      - name: Build source-preserving runtime package
+        run: bun run build
+      - name: Exercise built CLI help
+        run: bun dist/src/cli.ts --help
+      # These runners exercise real native SDK execution and filesystem/ACL behavior.
+      # They do not claim Tern GUI, real clipboard, desktop/browser or remote-device acceptance.

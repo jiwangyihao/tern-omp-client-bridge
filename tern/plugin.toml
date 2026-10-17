@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MPL-2.0
+schema = 1
+id = "omp-client-bridge"
+name = "OMP Client Bridge"
+version = "0.1.0"
+description = "Explicit client selection and local-human transfers for remote OMP drafts"
+window = "window.luau"
+styles = ["bridge.css"]

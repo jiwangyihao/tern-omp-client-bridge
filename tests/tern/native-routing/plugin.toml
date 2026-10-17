@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: MPL-2.0
+schema = 1
+id = "bridge-input-probe"
+name = "Bridge Native Input Probe"
+version = "0.1.0"
+window = "window.luau"
