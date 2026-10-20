@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { UploadStore } from "../../src/uploads.ts";
+import { INBOX_README } from "../../src/inbox-guidance.ts";
 
 const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 
@@ -16,12 +17,21 @@ test("verified multi-chunk Unicode files and an empty file are published intact 
 		for (let index = 0; index < data.length; index++) data[index] = index % 251;
 		const upload = await store.begin("client-a", { viewId: "view-a", sessionId: "session", draftToken: "draft", files: [{ name: "图片 with spaces.bin", size: data.length }, { name: "empty.txt", size: 0 }] });
 		for (let offset = 0; offset < data.length; offset += 262144) await store.chunk("client-a", { id: upload.id, index: 0, offset, data: data.subarray(offset, offset + 262144).toString("base64") });
+		expect(await readdir(directory)).toEqual([upload.id + ".partial"]);
+		expect(await readdir(join(directory, upload.id + ".partial"))).not.toContain("README");
 		const result = await store.finish("client-a", upload.id, [digest(data), digest(Buffer.alloc(0))]);
 		expect(result.files[0]!.name).toBe("图片 with spaces.bin");
 		expect(await readFile(result.files[0]!.path)).toEqual(data);
 		expect(await readFile(result.files[1]!.path)).toEqual(Buffer.alloc(0));
+		const inbox = dirname(result.files[0]!.path);
+		expect(await readdir(directory)).toEqual([upload.id]);
+		expect(await readFile(join(inbox, "README"), "utf8")).toBe(INBOX_README);
+		expect((await stat(inbox)).mode & 0o777).toBe(0o700);
+		expect((await stat(join(inbox, "README"))).mode & 0o777).toBe(0o600);
+		await store.cancel("client-a", upload.id);
 		await store.close();
 		expect(await readFile(result.files[0]!.path)).toEqual(data);
+		expect(await readFile(join(inbox, "README"), "utf8")).toBe(INBOX_README);
 	} finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -68,7 +78,43 @@ test("checksum mismatch never becomes attachable and cancellation removes only o
 		await store.chunk("client-a", { id: upload.id, index: 0, offset: 0, data: "YWJj" });
 		await expect(store.finish("client-a", upload.id, ["0".repeat(64)])).rejects.toMatchObject({ code: "UPLOAD_CHECKSUM" });
 		expect(() => store.completed("client-a", upload.id)).toThrow("checksum-verified");
+		expect(await readdir(directory)).toEqual([upload.id + ".partial"]);
+		expect(await readdir(join(directory, upload.id + ".partial"))).not.toContain("README");
 		await Promise.all([store.cancel("client-a", upload.id), store.cancelClient("client-a")]);
 		expect(await readdir(directory)).toEqual([]);
+	} finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("inbox README does not collide with an uploaded README and publication failure cleans both", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "bridge-inbox-"));
+	const root = join(directory, "imports");
+	const store = new UploadStore(root);
+	try {
+		const source = join(directory, "README");
+		const bytes = Buffer.from("Original user README, not bridge instructions.\n");
+		await writeFile(source, bytes);
+		const input = { viewId: "view", sessionId: "session", draftToken: "draft", files: [{ name: "README", size: bytes.length }] };
+		const upload = await store.begin("client-a", input);
+		await store.chunk("client-a", { id: upload.id, index: 0, offset: 0, data: bytes.toString("base64") });
+		const complete = await store.finish("client-a", upload.id, [digest(bytes)]);
+		expect(complete.files).toHaveLength(1);
+		expect(basename(complete.files[0]!.path)).toBe("0-README");
+		expect(await readFile(complete.files[0]!.path)).toEqual(bytes);
+		expect(await readFile(source)).toEqual(bytes);
+		expect(await readFile(join(root, upload.id, "README"), "utf8")).toBe(INBOX_README);
+
+		const failing = await store.begin("client-a", input);
+		await store.chunk("client-a", { id: failing.id, index: 0, offset: 0, data: bytes.toString("base64") });
+		// A conflicting final path forces failure after README creation, before publication.
+		const collision = join(root, failing.id);
+		await writeFile(collision, "unrelated destination");
+		await expect(store.finish("client-a", failing.id, [digest(bytes)])).rejects.toBeDefined();
+		expect(() => store.completed("client-a", failing.id)).toThrow("checksum-verified");
+		expect(await readFile(join(root, failing.id + ".partial", "README"), "utf8")).toBe(INBOX_README);
+		await store.cancel("client-a", failing.id);
+		expect((await readdir(root)).sort()).toEqual([upload.id, failing.id].sort());
+		expect(await readFile(collision, "utf8")).toBe("unrelated destination");
+		expect(await readFile(complete.files[0]!.path)).toEqual(bytes);
+		expect(await readFile(source)).toEqual(bytes);
 	} finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });

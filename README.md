@@ -22,17 +22,18 @@ Windows GUI, native paste/drop, desktop, or attached-Android acceptance.
 - Client JS/Python, shell, browser, desktop, and ADB usage retain their native
   prerequisites, permissions, and device/context ownership. These are not
   interchangeable backends or a sandbox for arbitrary execution.
-- Plain text uses native Tern paste unchanged: no bridge override, clipboard
-  read/classification, asynchronous preflight, or replay. Native file/bitmap paste
-  and fail-closed image rejection across all native routes remain blocked gates.
-- Bridge-managed ordinary-file transfers originate on **this device**,
-  independently of the agent binding, and append quoted real agent-host file
-  paths to the original unsent draft. They do not submit a prompt.
-- **The bridge rejects human images on its own transfer path.** Native paste
-  routes can bypass that path; end-to-end image rejection remains incomplete.
-  Same-Mac loopback observations do not establish actual remote-server upload.
-  Image file reads and browser/computer screenshot results remain supported.
-  No OMP host patch is used.
+- Native text/image paste remains unchanged: no bridge override, asynchronous
+  classification or replay. Native input does not need bridge validation.
+- **OMP: Paste image to remote** is an explicit local command/status action.
+  After local confirmation, one clipboard image is snapshotted and uploaded;
+  native Cmd/Ctrl+V remains untouched. No agent clipboard tool or watcher is added.
+- Local file drops originate on **this device**, independently of agent binding.
+  Uploaded images enter OMP's native image-paste handling. Ordinary files become
+  quoted paths into a private temporary inbox, with a README, draft reminder and
+  user notice to archive/copy them into project storage before working on them.
+  Existing drafts remain unsent; referenced uploads are not automatically deleted.
+- PNG/JPEG/GIF/WebP image paths use native attachment handling. Native preview
+  completion remains the host's responsibility. No OMP host patch is used.
 - Disconnects never select another device or replay a side-effecting operation.
 
 ## Start here
@@ -60,8 +61,8 @@ separately authorized code can access the OS account's resources.
 
 The product specification is
 [Issue #1: Native Tern client bridge for OMP](https://github.com/jiwangyihao/tern-omp-client-bridge/issues/1).
-The approved image-scope reduction requires fail-closed rejection instead of
-image-paste success; enforcing that requirement at every native entry remains open.
+The latest approved scope preserves native paste and permits an explicit image
+command, image/file drops, and ordinary-file inboxes with archival guidance.
 Implementation work is tracked in
 [GitHub Issues](https://github.com/jiwangyihao/tern-omp-client-bridge/issues).
 Source: [tern-omp-client-bridge](https://github.com/jiwangyihao/tern-omp-client-bridge).

@@ -41,6 +41,35 @@ describe("human transfer snapshots", () => {
 		await expect(readFile(files[0]!.path)).rejects.toThrow();
 		expect(() => source.files(captured.id)).toThrow("released");
 	});
+	test("image bytes become an immutable PNG snapshot with the same claim and release ownership", async () => {
+		const { source } = await setup();
+		const bytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+		const controller = new AbortController();
+		const pending = source.captureImage(bytes, controller.signal);
+		bytes.fill(0);
+		const captured = await pending;
+		expect(captured).toMatchObject({ kind: "files", names: ["clipboard.png"] });
+		const files = source.claim(captured.id);
+		controller.abort(new Error("request ended after upload claim"));
+		expect(await readFile(files[0]!.path)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+		expect(source.files(captured.id)).toBe(files);
+		await source.release(captured.id);
+		expect(() => source.files(captured.id)).toThrow("released");
+		await expect(stat(files[0]!.path)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+	test("abandoned image captures clean up and cancelled or empty images create nothing", async () => {
+		const { root, source } = await setup();
+		await expect(source.captureImage(new Uint8Array())).rejects.toThrow("empty");
+		await expect(source.captureImage(new Uint8Array([1]), AbortSignal.abort(new Error("cancelled image")))).rejects.toThrow("cancelled image");
+		await expect(stat(join(root, "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+		const controller = new AbortController();
+		const captured = await source.captureImage(new Uint8Array([1, 2, 3]), controller.signal);
+		const file = source.files(captured.id)[0]!;
+		controller.abort();
+		expect(() => source.claim(captured.id)).toThrow("released");
+		await source.release(captured.id);
+		await expect(stat(file.path)).rejects.toMatchObject({ code: "ENOENT" });
+	});
 	test("cancelled selected-file capture leaves no unreachable snapshot and preserves live captures", async () => {
 		const { root, source } = await setup();
 		const original = join(root, "selected 图.bin");

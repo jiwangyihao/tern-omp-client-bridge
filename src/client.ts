@@ -2,6 +2,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { open, rm } from "node:fs/promises";
 import path from "node:path";
+import { readImageFromClipboard, type ClipboardImage } from "@oh-my-pi/pi-natives/clipboard";
 import { z } from "zod";
 import type { InteractionDecision, InteractionRequest, LocalUiState, ResolvedView, TransferStatus } from "./api.ts";
 import { assertSupportedRuntime, authorized, defaultStateDir, readEndpoint, signIdentity, writePrivateJson, type ClientIdentity, type Endpoint } from "./config.ts";
@@ -10,7 +11,6 @@ import { BridgeError, type ExecuteRequest, type ToolResult } from "./protocol.ts
 import { ClientIdentitySchema, DeviceDescriptorSchema, ExecuteRequestSchema, IdentifierSchema, ImportedFileSchema, ResolvedViewSchema, ServerStateSchema, UiIntentReceiptSchema as ReceiptSchema, UiIntentSchema } from "./schemas.ts";
 import { OmpRuntime } from "./runtime/index.ts";
 import { HumanTransferSource } from "./transfers/source.ts";
-import { isImageAttachment } from "./transfers/policy.ts";
 import { RpcPeer, type RpcContext } from "./wire.ts";
 
 const ChallengeSchema = z.object({ nonce: z.string().min(16).max(1024) });
@@ -19,6 +19,7 @@ const StateEventSchema = z.object({ sessionId: IdentifierSchema, state: ServerSt
 const FinishedEventSchema = z.object({ id: IdentifierSchema, viewId: IdentifierSchema, kind: z.enum(["resolve", "bind", "attach"]), error: z.string().optional() });
 const ContextCloseSchema = z.object({ contextId: IdentifierSchema });
 const CaptureSchema = z.object({ kind: z.literal("files"), paths: z.array(z.string().min(1).max(32768)).min(1).max(256) }).strict();
+const ImageCaptureSchema = z.object({ kind: z.literal("image"), requestId: IdentifierSchema.optional() }).strict();
 const TransferSchema = z.object({ viewId: IdentifierSchema, captureId: IdentifierSchema, expectedSessionId: IdentifierSchema, expectedDraftToken: IdentifierSchema, expectedResolveIntentId: IdentifierSchema }).strict();
 const IdSchema = z.object({ id: IdentifierSchema }).strict();
 const ReplySchema = z.object({ id: IdentifierSchema, choice: IdentifierSchema.nullable() }).strict();
@@ -38,6 +39,8 @@ export interface ClientServiceOptions {
 	cwd?: string;
 	port?: number;
 	connection: ClientConnection;
+	/** Local native boundary; never accepted from HTTP or remote execution parameters. */
+	readClipboardImage?: typeof readImageFromClipboard;
 }
 export interface ClientService {
 	readonly endpoint: Endpoint;
@@ -104,6 +107,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	const capturesInUse = new Map<string, TransferJob>();
 	const attachIntents = new Map<string, TransferJob>();
 	const interactions = new Map<string, Interaction>();
+	const imageRequests = new Set<AbortController>();
 	const seenCalls = new Set<string>();
 	const tasks = new Set<Promise<unknown>>();
 	const responseDeliveries = new WeakMap<object, ResultDelivery>();
@@ -157,7 +161,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	function denyInteractions(): void {
 		for (const interaction of [...interactions.values()]) interaction.finish(null);
 	}
-	const runtime = new OmpRuntime({ stateDir, cwd: options.cwd, capabilities: identity.device.capabilities, onInteraction: (request, signal) => {
+	function requestInteraction(request: InteractionRequest, signal?: AbortSignal): Promise<InteractionDecision> {
 		if (closed || !connected || signal?.aborted || Date.now() - lastUiSeen > 10000 || interactions.size >= 128 || interactions.has(request.id)) return Promise.resolve({ choice: null });
 		const decision = Promise.withResolvers<InteractionDecision>();
 		const abort = () => finish(null);
@@ -171,7 +175,8 @@ export async function startClientService(options: ClientServiceOptions): Promise
 		signal?.addEventListener("abort", abort, { once: true });
 		if (signal?.aborted) finish(null);
 		return decision.promise;
-	} });
+	}
+	const runtime = new OmpRuntime({ stateDir, cwd: options.cwd, capabilities: identity.device.capabilities, onInteraction: requestInteraction });
 
 	function update(job: TransferJob, change: Partial<TransferStatus>): void {
 		if (job.status) job.status = { ...job.status, ...change };
@@ -385,6 +390,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 			if (peer !== owner) return;
 			clearTimeout(handshake); connected = false; peer = undefined; transport = undefined;
 			resolveIntents.clear(); denyInteractions();
+			for (const controller of imageRequests) controller.abort(error);
 			for (const job of transfers.values()) if (["uploading", "ready"].includes(job.status?.phase ?? "")) {
 				job.controller.abort(error);
 				if (job.intentId) attachIntents.delete(job.intentId);
@@ -410,7 +416,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	}
 
 	const token = randomBytes(32).toString("hex");
-	const server = Bun.serve({ hostname: "127.0.0.1", port: options.port ?? 0, maxRequestBodySize: MAX_HTTP_BYTES, idleTimeout: 30, fetch: request => track((async () => {
+	const server = Bun.serve({ hostname: "127.0.0.1", port: options.port ?? 0, maxRequestBodySize: MAX_HTTP_BYTES, idleTimeout: 30, fetch: (request, server) => track((async () => {
 		if (!authorized(request, token)) return Response.json({ error: "Local UI authorization is required", code: "UNAUTHORIZED" }, { status: 401 });
 		if (closed) return Response.json({ error: "Client service is closing", code: "CLIENT_CLOSED" }, { status: 503 });
 		try {
@@ -432,6 +438,33 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				return Response.json(receipt);
 			}
 			if (route === "/v1/captures") return Response.json(await source.capture(CaptureSchema.parse(body), request.signal));
+			if (route === "/v1/captures/image") {
+				const input = ImageCaptureSchema.parse(body);
+				server.timeout(request, 120);
+				const owner = requestPeer();
+				const controller = new AbortController();
+				imageRequests.add(controller);
+				const signal = AbortSignal.any([request.signal, controller.signal, AbortSignal.timeout(75000)]);
+				try {
+					const decision = await requestInteraction({ id: input.requestId ?? crypto.randomUUID(), contextId: "local-human-image", title: "Paste clipboard image to remote OMP?", message: "Read one image from this device's clipboard and upload it to the originally selected remote OMP draft. Nothing is submitted. Reject to leave the clipboard unread.", choices: [{ id: "capture-image", label: "Read image once and upload" }] }, signal);
+					signal.throwIfAborted();
+					if (decision.choice !== "capture-image") throw new BridgeError("CAPTURE_DENIED", "Clipboard image capture was refused, expired, or has no active local approval UI; nothing was read");
+					if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original image transfer connection was lost");
+					const reading = Promise.withResolvers<ClipboardImage | null | undefined>();
+					const abort = () => reading.reject(signal.reason);
+					signal.addEventListener("abort", abort, { once: true });
+					let image;
+					try {
+						void (options.readClipboardImage ?? readImageFromClipboard)().then(reading.resolve, reading.reject);
+						image = await reading.promise;
+					} finally { signal.removeEventListener("abort", abort); }
+					signal.throwIfAborted();
+					if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original image transfer connection was lost");
+					if (!image || image.data.byteLength === 0) throw new BridgeError("NO_CLIPBOARD_IMAGE", "This device's clipboard contains no image; nothing was uploaded");
+					if (image.mimeType !== "image/png") throw new BridgeError("CLIPBOARD_IMAGE_FORMAT", "Native clipboard reader did not return PNG image bytes");
+					return Response.json(await source.captureImage(image.data, signal));
+				} finally { imageRequests.delete(controller); }
+			}
 			if (route === "/v1/captures/release") {
 				const { id } = IdSchema.parse(body);
 				const job = capturesInUse.get(id);
@@ -444,7 +477,6 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				const view = views.get(input.viewId);
 				if (!view || view.sessionId !== input.expectedSessionId || view.draftToken !== input.expectedDraftToken || view.resolveIntentId !== input.expectedResolveIntentId || resolveIntents.get(view.viewId) !== view.resolveIntentId) throw new BridgeError("DESTINATION_CHANGED", "The captured destination handshake no longer matches this view");
 				if (capturesInUse.has(input.captureId)) throw new BridgeError("CAPTURE_BUSY", "This snapshot is already being transferred");
-				if (source.files(input.captureId).some(file => isImageAttachment(file.name) || isImageAttachment(file.path))) throw new BridgeError("IMAGE_ATTACHMENT_UNSUPPORTED", "Image attachment is disabled in pure-plugin mode: the native host cannot atomically confirm the original draft. No upload or editor mutation was started.");
 				const ready = Promise.withResolvers<TransferStatus>();
 				const job: TransferJob = { captureId: input.captureId, view: Object.freeze({ ...view }), peer: owner, controller: new AbortController(), done: Promise.resolve() };
 				source.claim(input.captureId);
@@ -478,6 +510,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	function close(): Promise<void> {
 		return closing ??= (async () => {
 			closed = true; connected = false; clearTimeout(reconnect); clearTimeout(handshake); denyInteractions();
+			for (const controller of imageRequests) controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
 			for (const waiter of [...connectionWaiters]) waiter.reject(new BridgeError("CLIENT_CLOSED", "The client service closed before a connection became ready"));
 			for (const job of capturesInUse.values()) job.controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
 			peer?.close();

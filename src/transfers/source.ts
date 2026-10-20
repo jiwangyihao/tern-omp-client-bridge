@@ -39,6 +39,49 @@ export class HumanTransferSource {
 		return pending;
 	}
 
+	/** Snapshot already-approved PNG bytes; this source never reads the clipboard itself. */
+	captureImage(bytes: Uint8Array, signal?: AbortSignal): Promise<CaptureResult> {
+		if (this.#closed) return Promise.reject(new BridgeError("SOURCE_CLOSED", "Transfer source is closed"));
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		if (bytes.byteLength === 0) return Promise.reject(new BridgeError("NO_CLIPBOARD_IMAGE", "The clipboard image is empty"));
+		// Own the bytes before the first yield; later clipboard or caller mutations cannot change them.
+		const pending = this.#captureImage(Buffer.from(bytes), signal);
+		this.#pending.add(pending);
+		void pending.finally(() => this.#pending.delete(pending)).catch(() => {});
+		return pending;
+	}
+
+	async #captureImage(bytes: Buffer, signal?: AbortSignal): Promise<CaptureResult> {
+		const id = randomUUID();
+		const directory = join(this.#root, id);
+		const check = () => {
+			signal?.throwIfAborted();
+			if (this.#closed) throw new BridgeError("SOURCE_CLOSED", "Transfer source closed during capture");
+		};
+		try {
+			check();
+			await mkdir(directory, { recursive: true, mode: 0o700 });
+			await protectPrivatePath(directory, true);
+			check();
+			const path = join(directory, "0.png");
+			const file = await open(path, "wx", 0o600);
+			try { await file.writeFile(bytes, { signal }); } finally { await file.close(); }
+			check();
+			return this.#publish(id, { directory, files: Object.freeze([Object.freeze({ name: "clipboard.png", path, size: bytes.length, owned: true })]) }, signal);
+		} catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
+	}
+
+	#publish(id: string, capture: Capture, signal?: AbortSignal): CaptureResult {
+		this.#captures.set(id, capture);
+		if (signal) {
+			// Keep abandonment cleanup until an upload synchronously claims ownership.
+			const abort = () => { void this.release(id).catch(() => {}); };
+			signal.addEventListener("abort", abort, { once: true });
+			capture.detach = () => signal.removeEventListener("abort", abort);
+		}
+		return { id, kind: "files", names: capture.files.map(file => file.name) };
+	}
+
 	async #capture(input: { kind: "files"; paths: string[] }, signal?: AbortSignal): Promise<CaptureResult> {
 		const check = () => {
 			signal?.throwIfAborted();
@@ -96,14 +139,7 @@ export class HumanTransferSource {
 			}
 			check();
 			const capture: Capture = { directory, files: Object.freeze(files.map(file => Object.freeze(file))) };
-			this.#captures.set(id, capture);
-			if (signal) {
-				// Keep abandonment cleanup alive across completion and response delivery, until upload claims ownership.
-				const abort = () => { void this.release(id).catch(() => {}); };
-				signal.addEventListener("abort", abort, { once: true });
-				capture.detach = () => signal.removeEventListener("abort", abort);
-			}
-			return { id, kind: "files", names: files.map(file => file.name) };
+			return this.#publish(id, capture, signal);
 		} catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
 	}
 

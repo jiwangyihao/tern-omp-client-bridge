@@ -23,8 +23,8 @@ Machine-readable, redacted observations are in
 ## What this does not prove
 
 - The hook checks do **not** prove that standard Cmd/Ctrl+V cannot be implemented
-  using available interfaces. Its actual native editing states still require
-  targeted testing. Standard paste has not been downgraded to a dedicated key.
+  using available interfaces. The user's later clarification permits a separate
+  image command/button while preserving native paste; see the current usage guide.
 - The facade experiment used a clearly synthetic capabilities response. It did
   not perform real remote computer operations or validate the full approval,
   handle, screenshot, and cancellation lifecycle.

@@ -86,38 +86,40 @@ protect against arbitrary code already running as the same OS user or a maliciou
 server that the operator has authorized for broad execution. Screen/page/file
 content is data, not user authorization for further side effects.
 
-## Human transfers and image restriction
+## Human transfers and local image consent
 
-The local capture endpoint accepts only explicit selected-file paths; malformed or
-programmatic clipboard requests are rejected before capture. No bridge-owned path
-reads or classifies the ambient clipboard. The Paste override and its asynchronous
-native-command replay have been removed: a command invocation was not proof of a
-local user gesture, and classification could race the later native clipboard read.
-Plain text now stays entirely in native Tern input. Native text-field paste already
-bypassed that override; removing it does not create a universal clipboard barrier.
-The remote execution RPC exposes native tools and context disposal, not clipboard
-capture. There is no clipboard reader, clipboard URI, watcher, or automatic sync
-product feature. Separately authorized Bash/Eval retains its broad account authority.
-Path-looking plain text is not interpreted by the bridge as a file upload.
+Selected-file capture accepts explicit local paths. Clipboard image capture is a
+separate authenticated local endpoint with a pending local approval before the
+native reader is called. A command invocation, correlation ID, or remote
+`approved` flag is not approval. Rejection, missing active local UI, cancellation,
+expiry or disconnect prevents capture or discards a late read. Only a confirmed
+image is snapshotted; no clipboard watcher or automatic synchronization runs.
+The remote execution RPC exposes native tools/context disposal, not clipboard
+capture. Separately authorized Bash/Eval retains its broad OS-account authority.
+Local UI bearer access is not a sandbox against malicious same-account software.
+
+Native text/image paste is neither intercepted nor required to pass through the
+bridge. The explicit image command is supplemental. Path-looking plain text is
+not interpreted as a file-upload request. The old claim that a native-paste
+bypass was itself a security defect has been withdrawn.
 
 The originating device and destination conversation/draft are fixed independently
-of the agent binding. Sources are private snapshots of selected regular files.
-Uploads use bounded chunks, ownership checks, byte counts, SHA-256 verification,
-and atomic publication before becoming eligible for handoff. The extension
-validates the destination again and appends quoted real remote paths with one
-synchronous editor update, preserving the latest draft text and leaving it unsent.
-Files may contain hostile instructions; transferring them does not authorize
-executing their contents.
+of agent binding for bridge-managed transfers. Sources are private snapshots;
+uploads use bounded chunks, ownership checks, byte counts, SHA-256 verification
+and atomic publication. A generated receiving-directory README is published with
+the bytes. Ordinary-file paths carry an agent-visible archival reminder and a
+user notice: copy/archive into durable project storage and work on those copies.
+The bridge does not choose a destination, execute file contents, or enforce a
+filesystem sandbox. Files may contain hostile instructions; transfer alone does
+not authorize executing them.
 
-**The bridge rejects images on its own human-transfer path.** Recognized image
-selections are rejected before bridge upload or editor mutation; the draft side
-also rejects image attachments. These checks do not disable native Tern paste
-routes: a bypass was observed in a same-Mac remote-loopback fixture. Do not treat
-bridge rejection as a universal clipboard barrier or proof about actual remote
-server uploads. Atomic original-draft confirmation remains unavailable on the
-reviewed native image interface. Do not rename images to bypass detection.
-Native image reads and screenshots remain separate, supported tool-result paths
-subject to their permissions.
+Images enter the host's native image-paste handling after pre-handoff validation;
+they are not replaced by ordinary path prose. The native interface returns void:
+handoff is not an atomic preview-completion receipt, so uncertain operations must
+not be replayed automatically. Native supported path formats are PNG, JPEG, GIF
+and WebP; unsupported image formats fail explicitly. Existing text/attachments
+are preserved, and the bridge does not submit prompts. Native image reads and
+screenshots remain separate tool-result paths subject to their permissions.
 
 File transfer itself discloses the selected content to the agent-host account.
 Verify the destination and content before pasting/dropping confidential material.

@@ -264,21 +264,33 @@ through the native runtime, subject to backend availability.
 
 ## Human files and the unsent draft
 
-On this device, focus the intended remote OMP composer. The plugin routes eligible
-local file drops; their source is this viewer, independently of the agent binding.
-Plain text uses Tern's original native paste implementation untouched. The bridge
-does not override Paste, read/classify the clipboard, delay text for destination
-validation, or replay a native command. Path-shaped text does not instruct the
-bridge to upload a file. The local capture endpoint accepts only explicit selected
-file paths; clipboard requests are rejected. No replacement chord, clipboard
-watcher, or agent clipboard tool is added.
+On this device, focus the intended remote OMP composer. Human transfers originate
+on this viewer, independently of the agent binding, including with `--allow none`.
+Native text and image paste remain unchanged: no Paste override, asynchronous
+text classification, native-command replay, or additional native-paste gate.
+Path-shaped plain text does not instruct the bridge to upload a file.
 
-Ordinary files are privately snapshotted, streamed in bounded chunks, verified
-with SHA-256, and published to real agent-host files. After checking the original
-conversation/draft and file sizes, the extension reads the latest editor text
-and synchronously appends quoted file paths to the core editor. It neither sends
-a prompt nor simulates Enter. A changed/closed/submitted draft fails rather than
-receiving an attachment in the newly focused pane.
+For a clipboard image, choose **OMP: Paste image to remote** in the command
+palette or click **Paste image to remote** in the status line. Review the local
+approval picker and select **Read image once and upload**, or **Reject**. The
+command alone does not read the clipboard. Confirmation reads one image and
+snapshots its PNG bytes; it does not monitor the clipboard or expose a reader to
+the agent. An empty/non-image clipboard reports an error. This supplemental
+command does not replace Cmd/Ctrl+V.
+
+For files, drag selected local regular files into the focused remote composer.
+Images enter OMP's native image-paste handling after upload. Ordinary files enter
+a private temporary receiving directory at `STATE_DIR/imports/TRANSFER_ID/` and
+their quoted remote paths are appended to the unsent draft. Mixed selections
+keep those two paths separate and preserve existing text and attachments. The
+bridge neither submits a prompt nor simulates Enter.
+
+Every published receiving directory contains a `README`. Ordinary-file handoff
+also adds a draft reminder and a visible notice: **copy/archive the files into
+appropriate durable project storage, tell the user where, and work on those
+copies—not inside the receiving directory**. The bridge does not choose that
+destination or perform the archive automatically. This is guidance, not a
+filesystem sandbox. Completed referenced uploads do not expire automatically.
 
 Snapshot copying observes cancellation of its capture request. An abandoned
 request removes its private snapshot, including a completed snapshot not yet
@@ -298,14 +310,13 @@ Published basenames include their unique index prefix within a 255-byte UTF-8
 limit. Truncation preserves complete characters; transfer metadata retains the
 original filename.
 
-**Bridge-managed image-file attachment is rejected.** The bridge rejects recognized
-image files before its own upload/editor mutation, including mixed selections.
-It does not inspect clipboard bitmaps. Native file/image paste routes remain outside
-this control, so the approved pure-plugin fail-closed requirement is still blocked.
-Same-Mac loopback file-paste observations are not actual remote-server upload
-acceptance. Do not rename images to bypass detection. A successful ordinary-file
-transfer is a file reference, not an image preview or hidden image queue.
-Screenshots returned by tools are unaffected.
+**Images are handed to the native editor, not pasted as path-only substitutes.**
+The supported native image-path formats are PNG, JPEG, GIF and WebP. Other image
+formats return an explicit error before bridge draft mutation; export them to a
+supported format first. The clipboard reader supplies PNG snapshots. The native
+paste interface returns after handoff, while decoding/preview may finish later:
+the bridge's `attached` state means handed to OMP, not a separate synchronous
+preview acknowledgement. Native image reads and tool screenshots are unaffected.
 
 Use **OMP: Human transfer progress / cancel** to inspect phases, byte counts, and
 errors or cancel an unfinished transfer. At most 256 regular files are accepted
@@ -314,9 +325,9 @@ alone is not proof that the editor accepted it. Inspect the draft if the final
 receipt is lost; do not blindly repeat a possibly completed transfer. Attached
 references cannot be cancelled as partial uploads.
 
-Restoring native text does not complete native file/bitmap Cmd/Ctrl+V or fail-closed
-image rejection: safe native hooks for those routes remain missing. Native text
-under IME/streaming and Windows/macOS GUI drop targeting still require GUI evidence.
+Native input need not pass through bridge validation. The explicit image command
+and file-drop path are supplemental entry points. Actual clipboard/GUI gestures,
+IME/streaming behavior and Windows/macOS drop targeting require platform evidence.
 Tern's drop request lacks an explicit hovered-pane field: the implementation uses
 the focused remote pane. Focus the intended composer first and do not assume
 cross-pane drops are proven safe. See [Compatibility](compatibility.md).

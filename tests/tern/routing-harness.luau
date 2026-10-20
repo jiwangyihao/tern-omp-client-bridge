@@ -14,6 +14,7 @@ function run(entry)
 		local decodedState = nil
 		local surfaceRole, paneKind = "omp.session", "agent"
 		local f = { original = original, other = other, sent = {}, native = {}, errors = {} }
+		f.picks = {}
 		local ui = { device = { id = "self", name = "Fixture client" }, connected = true, views = {}, transfers = {}, interactions = {} }
 		local function copy(value)
 			if type(value) ~= "table" or value == null then return value end
@@ -57,6 +58,10 @@ function run(entry)
 				run = function(_, pane, frame) live(); table.insert(f.sent, { pane = pane, frame = frame }) end,
 				command = function(_, name) live(); table.insert(f.native, { command = name, pane = focused }) end,
 				toast = function(_, level, _, message) live(); if level == "error" then table.insert(f.errors, message) end end,
+				pick = function(_, options)
+					live()
+					return { next = function(_, callback) table.insert(f.picks, { options = options, callback = callback }) end }
+				end,
 			}
 			return cx, function() alive = false end
 		end
@@ -86,12 +91,12 @@ function run(entry)
 			fetch = function(url, options, callback)
 				ioCount += 1
 				assert(options.headers.Authorization == "Bearer fixture-token", "local UI authentication omitted")
-				table.insert(requests, { path = url:sub(#"http://127.0.0.1:9999" + 1), body = options.body and copy(encoded[options.body]), callback = callback })
+				table.insert(requests, { path = url:sub(#"http://127.0.0.1:9999" + 1), body = options.body and copy(encoded[options.body]), timeout = options.timeout_ms, callback = callback })
 			end,
 			timer = function(_, callback) table.insert(timers, callback) end,
 			chrome = { refresh = function() end, status = function(callback) handlers.status = callback end },
-			command = function() end,
-			override = function(name, fn) handlers[name] = fn end,
+			command = function(command) handlers[command.id] = command.run end,
+			override = function() error("bridge must never override native paste or any native command") end,
 			route = { open = function(fn) handlers.drop = fn end },
 			on = function(name, fn) handlers[name] = fn end,
 		}
@@ -126,6 +131,11 @@ function run(entry)
 		function f.remote(value) remote = value end
 		function f.connected(value) ui.connected = value end
 		function f.surface(role, kind) surfaceRole, paneKind = role, kind end
+		function f.approval(id) ui.interactions = { { id = id, title = "Paste image", choices = { { id = "capture-image", label = "Read image once and upload" } } } }; f.poll() end
+		function f.choose(choice)
+			local pick = assert(table.remove(f.picks, 1), "approval picker missing")
+			invoke(function(cx) pick.callback(choice and { choice = choice } or nil, nil, cx) end)
+		end
 		function f.advance(ms) clock += ms end
 		function f.receipt(request)
 			serial += 1
@@ -185,6 +195,12 @@ function run(entry)
 			assert(#handlers.status({ pane = original }) > 0, "status disappeared")
 			assert(ioCount == before, "chrome formatter performed IO")
 		end
+		function f.imageEntryVisible()
+			for _, segment in handlers.status({ pane = original }) do
+				if segment.command == "plugin.omp-client-bridge.paste-image" then return true end
+			end
+			return false
+		end
 		entry()
 		return f
 	end
@@ -201,6 +217,43 @@ function run(entry)
 		assert(f.invoke("drop", { origin = "drop", host = "agent", path = "/synthetic/file.txt" }) == nil)
 		f.noRequest("/v1/captures")
 		f.chromeIsPure()
+	end)
+
+	case("explicit image entry opens one matching approval and retains the original destination", function(f)
+		f.warm()
+		assert(f.imageEntryVisible(), "image entry is not discoverable")
+		f.invoke("paste-image")
+		local capture = f.take("/v1/captures/image")
+		assert(capture.body.kind == "image" and capture.body.approved == nil)
+		assert(capture.timeout > 75000, "image fetch expires before approval and capture")
+		f.invoke("paste-image")
+		f.noRequest("/v1/captures/image")
+		f.approval(capture.body.requestId)
+		assert(#f.picks == 1, "image request did not open its local approval")
+		f.poll()
+		assert(#f.picks == 1, "approval was opened more than once")
+		f.choose("capture-image")
+		local reply = f.take("/v1/interactions/reply")
+		assert(reply.body.id == capture.body.requestId and reply.body.choice == "capture-image")
+		f.respond(reply, { ok = true })
+		f.focus(f.other)
+		f.resolve(f.capture(capture, "image-snapshot"), "session-A", "draft-A")
+		local upload = f.take("/v1/transfers")
+		assert(upload.body.captureId == "image-snapshot" and upload.body.expectedSessionId == "session-A" and upload.body.expectedDraftToken == "draft-A")
+		assert(#f.native == 0, "image command replayed native paste")
+		f.chromeIsPure()
+	end)
+
+	case("rejected image approval never starts transfer or native replay", function(f)
+		f.warm()
+		f.invoke("paste-image")
+		local capture = f.take("/v1/captures/image")
+		f.approval(capture.body.requestId)
+		f.choose(nil)
+		f.respond(f.take("/v1/interactions/reply"), { ok = true })
+		f.respond(capture, { error = "Clipboard image capture was refused" }, 400)
+		f.noRequest("/v1/transfers")
+		assert(#f.native == 0)
 	end)
 
 	case("terminal retaining an OMP surface is not an active destination", function(f)

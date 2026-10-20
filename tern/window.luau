@@ -12,6 +12,9 @@ local resolving = {}
 local resolved = {}
 local pollBusy = false
 local action = "plugin.omp-client-bridge."
+local imageRequest = nil
+local imageSerial = 0
+local transferPhaseLabels = { attached = "Handed to OMP" }
 
 local function report(cx, message)
 	statusError = tostring(message)
@@ -38,7 +41,7 @@ local function api(method, path, body, callback)
 	local options = {
 		method = method,
 		headers = { Authorization = "Bearer " .. connection.token, ["Content-Type"] = "application/json" },
-		timeout_ms = 10000,
+		timeout_ms = path == "/v1/captures/image" and 90000 or 10000,
 	}
 	if body then options.body = tern.json.encode(body) end
 	tern.fetch(connection.url .. path, options, function(response, cx)
@@ -136,7 +139,7 @@ local function pinDestination(cx, target)
 		or tern.now() >= confirmation.validUntil then
 		-- Do not start file work and adopt whichever draft resolves later.
 		-- Resolve only to prepare a NEW user gesture; this one stays consumed.
-		report(cx, "Original OMP destination is not resolved; wait for the bridge, then retry drop")
+		report(cx, "Original OMP destination is not resolved; wait for the bridge, then retry the transfer")
 		if not resolving[target.viewId] then
 			resolve(target, function(_, err, fresh) if err then report(fresh, err) end end)
 		end
@@ -217,7 +220,7 @@ local function transfers(cx)
 	if not state or #state.transfers == 0 then cx:toast("info", "No human transfers"); return end
 	local items = {}
 	for _, item in state.transfers do
-		table.insert(items, { label = table.concat(item.names, ", "), detail = item.phase .. " · " .. tostring(item.bytesSent) .. "/" .. tostring(item.totalBytes) .. " bytes" .. (item.error and " · " .. item.error or ""), transfer = item })
+		table.insert(items, { label = table.concat(item.names, ", "), detail = (transferPhaseLabels[item.phase] or item.phase) .. " · " .. tostring(item.bytesSent) .. "/" .. tostring(item.totalBytes) .. " bytes" .. (item.error and " · " .. item.error or ""), transfer = item })
 	end
 	cx:pick({ items = items, placeholder = "Human transfers — select to cancel", action = "cancel" }):next(function(item, err, fresh)
 		if err then report(fresh, err); return end
@@ -230,9 +233,9 @@ local function transfers(cx)
 	end)
 end
 
-local function interactions(cx)
-	if not state or #state.interactions == 0 then cx:toast("info", "No pending device approvals"); return end
-	local request = state.interactions[1]
+local function interactions(cx, selected)
+	if not selected and (not state or #state.interactions == 0) then cx:toast("info", "No pending device approvals"); return end
+	local request = selected or state.interactions[1]
 	local items = {}
 	for _, choice in request.choices do table.insert(items, { label = choice.label, choice = choice.id }) end
 	table.insert(items, { label = "Reject", choice = tern.json.null })
@@ -242,6 +245,23 @@ local function interactions(cx)
 		api("POST", "/v1/interactions/reply", { id = request.id, choice = item and item.choice or tern.json.null }, function(_, failure, live)
 			if failure then report(live, failure) end
 		end)
+	end)
+end
+
+local function pasteImage(cx)
+	if imageRequest then cx:toast("info", "A clipboard image request is already waiting for approval or capture"); return end
+	local target = destination(cx)
+	if not target then cx:toast("info", "Focus a remote OMP pane to paste an image"); return end
+	target = pinDestination(cx, target)
+	if not target then return end
+	imageSerial += 1
+	local request = { id = windowId .. ":image:" .. tostring(imageSerial), target = target }
+	imageRequest = request
+	cx:toast("info", "Paste image to remote", "Approve one clipboard image read in the local approval picker. Native paste is unchanged.")
+	api("POST", "/v1/captures/image", { kind = "image", requestId = request.id }, function(capture, err, fresh)
+		if imageRequest == request then imageRequest = nil end
+		if err then report(fresh, err); return end
+		transfer(target, capture)
 	end)
 end
 
@@ -259,6 +279,18 @@ local function poll(cx)
 			state = value
 			statusError = nil
 			if not state.connected then resolved = {}; resolving = {} end
+			if fresh and imageRequest and not imageRequest.shown then
+				for _, request in state.interactions do
+					if request.id == imageRequest.id then
+						imageRequest.shown = true
+						if panes[imageRequest.target.viewId] == imageRequest.target.pane and remoteOmp(fresh, imageRequest.target.pane) then
+							interactions(fresh, request)
+						else
+							api("POST", "/v1/interactions/reply", { id = request.id, choice = tern.json.null }, function(_, failure, live) if failure then report(live, failure) end end)
+						end
+					end
+				end
+			end
 			for id, request in pending do
 				local view = state.views[request.target.viewId]
 				if resolving[request.target.viewId] ~= request then
@@ -313,6 +345,7 @@ end
 tern.command({ id = "devices", title = "OMP: Select agent client", run = picker })
 tern.command({ id = "transfers", title = "OMP: Human transfer progress / cancel", run = transfers })
 tern.command({ id = "approvals", title = "OMP: Pending client approvals", run = interactions })
+tern.command({ id = "paste-image", title = "OMP: Paste image to remote", run = pasteImage })
 -- Native paste remains untouched: no clipboard classification, delay, or replay.
 tern.route.open(function(req, cx)
 	if req.origin ~= "drop" then return nil end
@@ -338,6 +371,7 @@ end)
 tern.chrome.status(function(info)
 	-- Pure cached table access: no filesystem, network, clipboard, or cx here.
 	local segments = { { text = "This device: " .. (state and state.device.name or "not connected"), command = action .. "devices" } }
+	table.insert(segments, { text = "Paste image to remote", command = action .. "paste-image" })
 	if statusError then
 		table.insert(segments, { text = "Bridge unavailable", tone = "error", command = action .. "devices" })
 	else
@@ -359,7 +393,7 @@ tern.chrome.status(function(info)
 	if state then
 		for _, item in state.transfers do
 			if panes[item.viewId] == info.pane then
-				table.insert(segments, { text = "Transfer: " .. item.phase .. " " .. tostring(item.bytesSent) .. "/" .. tostring(item.totalBytes), tone = item.phase == "failed" and "error" or "muted", command = action .. "transfers" })
+				table.insert(segments, { text = "Transfer: " .. (transferPhaseLabels[item.phase] or item.phase) .. " " .. tostring(item.bytesSent) .. "/" .. tostring(item.totalBytes), tone = item.phase == "failed" and "error" or "muted", command = action .. "transfers" })
 			end
 		end
 		if #state.interactions > 0 then table.insert(segments, { text = tostring(#state.interactions) .. " client approvals", tone = "warn", command = action .. "approvals" }) end
@@ -372,6 +406,9 @@ tern.on("focus", function(_, cx)
 	if target and connection then resolve(target, function(_, err, fresh) if err then report(fresh, err) end end) end
 end)
 tern.on("pane_closed", function(ev, _)
+	if imageRequest and imageRequest.target.pane == ev.pane then
+		api("POST", "/v1/interactions/reply", { id = imageRequest.id, choice = tern.json.null }, function() end)
+	end
 	for viewId, pane in panes do
 		if pane == ev.pane then
 			panes[viewId] = nil

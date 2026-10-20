@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -117,7 +117,7 @@ test("unbound human uploads preserve bytes and cancellation cannot claim a nativ
 		const first = await start();
 		expect((await f.broker.state("conversation")).binding.clientId).toBeNull();
 		const destination = join(f.root, "server", "imports", first.transfer.id);
-		const [filename] = await readdir(destination);
+		const filename = (await readdir(destination)).find(name => name !== "README");
 		expect(await readFile(join(destination, filename!))).toEqual(bytes);
 		await ui(client.endpoint, "/v1/transfers/cancel", Ok, { id: first.transfer.id });
 		await expect(f.broker.claimIntent(first.intentId, "conversation", "draft")).rejects.toMatchObject({ code: "INTENT_CONSUMED" });
@@ -131,7 +131,7 @@ test("unbound human uploads preserve bytes and cancellation cannot claim a nativ
 	} finally { await f.close(); }
 }, 120000);
 
-test("image transfer is rejected before upload even when capture snapshots have numeric filenames", async () => {
+test("unbound image transfer preserves native image format and bytes through the real broker", async () => {
 	const f = await fixture(1);
 	const client = f.clients[0]!;
 	try {
@@ -140,10 +140,22 @@ test("image transfer is rejected before upload even when capture snapshots have 
 		const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 		await writeFile(path, bytes);
 		const capture = await ui(client.endpoint, "/v1/captures", CaptureResultSchema, { kind: "files", paths: [path] });
-		await expect(ui(client.endpoint, "/v1/transfers", TransferStatusSchema, { viewId: "image-view", captureId: capture.id, expectedSessionId: view.sessionId, expectedDraftToken: view.draftToken, expectedResolveIntentId: view.resolveIntentId })).rejects.toThrow("IMAGE_ATTACHMENT_UNSUPPORTED");
-		await expect(stat(join(f.root, "server", "imports"))).rejects.toMatchObject({ code: "ENOENT" });
-		expect((await ui(client.endpoint, "/v1/state", LocalUiStateSchema)).transfers).toEqual([]);
+		const started = await ui(client.endpoint, "/v1/transfers", TransferStatusSchema, { viewId: "image-view", captureId: capture.id, expectedSessionId: view.sessionId, expectedDraftToken: view.draftToken, expectedResolveIntentId: view.resolveIntentId });
+		const state = await stateWhen(client, state => state.transfers.some(item => item.id === started.id && (item.phase === "ready" || item.phase === "failed")));
+		const ready = state.transfers.find(item => item.id === started.id)!;
+		expect(ready.phase).toBe("ready");
+		if (!ready.frame) throw new Error("Uploaded image has no native handoff frame");
+		const [intentId] = new ControlFrameDecoder().push(ready.frame).intentIds;
+		if (!intentId) throw new Error("Uploaded image has no valid handoff intent");
+		const claimed = await f.broker.claimIntent(intentId, view.sessionId, view.draftToken);
+		expect(claimed.state.binding.clientId).toBeNull();
+		expect(claimed.files).toHaveLength(1);
+		const file = claimed.files![0]!;
+		expect(file.name).toBe("synthetic image.png");
+		expect(Bun.file(file.path).type).toBe("image/png");
+		expect(await readFile(file.path)).toEqual(bytes);
+		await f.broker.finishIntent(intentId);
+		await stateWhen(client, state => state.transfers.some(item => item.id === started.id && item.phase === "attached"));
 		expect(await readFile(path)).toEqual(bytes);
-		await ui(client.endpoint, "/v1/captures/release", Ok, { id: capture.id });
 	} finally { await f.close(); }
 }, 60000);

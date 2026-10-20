@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ExtensionContext, TerminalInputHandler } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { BrokerApi, ImportedFile, ServerState } from "../api.ts";
 import { ControlFrameDecoder } from "../control-frame.ts";
+import { INBOX_REMINDER } from "../inbox-guidance.ts";
 import { BridgeError } from "../protocol.ts";
 import { isImageAttachment } from "../transfers/policy.ts";
 
 export interface DraftContext extends Pick<ExtensionContext, "mode" | "hasUI" | "agent"> {
 	readonly sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId">;
-	readonly ui: Pick<ExtensionContext["ui"], "onTerminalInput" | "supportsEditor" | "setEditorText" | "getEditorText" | "notify">;
+	readonly ui: Pick<ExtensionContext["ui"], "onTerminalInput" | "supportsEditor" | "setEditorText" | "getEditorText" | "pasteToEditor" | "notify">;
 }
 
 export interface DraftIdentity {
@@ -95,26 +97,39 @@ export class DraftBridge {
 			if (!isAbsolute(file.path) || /[\x00-\x1f\x7f]/.test(file.path)) {
 				throw new BridgeError("invalid_attachment_path", "The staged attachment has an unsafe path");
 			}
-			if (isImageAttachment(file.path)) {
-				throw new BridgeError("image_attachment_unsupported", "Image attachments are not supported by this pure-plugin bridge. Transfer an ordinary file reference instead; the draft was not changed.");
+			if (isImageAttachment(file.path) && !/\.(?:png|jpe?g|gif|webp)$/i.test(file.path)) {
+				throw new BridgeError("image_format_unsupported", "OMP's native image paste supports PNG, JPEG, GIF and WebP paths. Export this image to one of those formats before transferring; the draft was not changed.");
 			}
 			const info = await stat(file.path);
 			if (!info.isFile() || info.size !== file.size) {
 				throw new BridgeError("attachment_changed", `Staged attachment is missing or changed: ${file.name}`);
 			}
 		}
-		// Read the latest text only after all asynchronous validation has completed.
-		// One synchronous core-editor update cannot enter the image/video paste path.
-		const before = this.ctx.ui.getEditorText();
-		const references = files.map(file => JSON.stringify(file.path)).join(" ");
-		const separator = before.length > 0 && !/\s$/.test(before) ? " " : "";
-		const next = `${before}${separator}${references} `;
-		this.#assertCurrent(identity);
-		this.ctx.ui.setEditorText(next);
-		this.#assertCurrent(identity);
-		if (this.ctx.ui.getEditorText() !== next) {
-			throw new BridgeError("editor_update_failed", "OMP did not retain the transferred file references in the original draft");
+		const images = [...new Set(files.filter(file => isImageAttachment(file.path)).map(file => file.path))];
+		const ordinary = files.filter(file => !isImageAttachment(file.path));
+		if (images.length && typeof this.ctx.ui.pasteToEditor !== "function") {
+			throw new BridgeError("image_paste_unavailable", "This OMP host does not expose native image paste; the draft was not changed");
 		}
+		this.#assertCurrent(identity);
+		if (ordinary.length) {
+			// Read the latest text after validation, preserving any existing native image atoms.
+			const before = this.ctx.ui.getEditorText();
+			const references = ordinary.map(file => JSON.stringify(file.path)).join(" ");
+			const separator = before.length > 0 && !/\s$/.test(before) ? " " : "";
+			const next = `${before}${separator}${references}\n[Client bridge: ${INBOX_REMINDER}]\n`;
+			this.ctx.ui.setEditorText(next);
+			this.#assertCurrent(identity);
+			if (this.ctx.ui.getEditorText() !== next) {
+				throw new BridgeError("editor_update_failed", "OMP did not retain the transferred file references in the original draft");
+			}
+		}
+		if (images.length) {
+			this.#assertCurrent(identity);
+			// An image-only paste enters OMP's native attachment loader, never quoted-path prose.
+			// This void API acknowledges handoff, not asynchronous preview completion. Do not replay.
+			this.ctx.ui.pasteToEditor(images.map(path => JSON.stringify(pathToFileURL(path).href)).join(" "));
+		}
+		if (ordinary.length) this.ctx.ui.notify(`Client bridge: ${INBOX_REMINDER}`, "info");
 	}
 
 	async settled(): Promise<void> {

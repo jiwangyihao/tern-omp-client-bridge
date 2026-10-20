@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
-import { startClientService } from "../../src/client.ts";
+import { startClientService, type ClientServiceOptions } from "../../src/client.ts";
 import { authorized, loadClientIdentity, readEndpoint, verifyIdentity, writePrivateJson, type Endpoint } from "../../src/config.ts";
 import { encodeControlFrame } from "../../src/control-frame.ts";
 import { BridgeError, type DeviceDescriptor, type ExecuteRequest, type ToolResult } from "../../src/protocol.ts";
@@ -32,6 +32,8 @@ interface FixtureOptions {
 	corruptDigest?: boolean;
 	beforeRegister?: (peer: RpcPeer) => Promise<void>;
 	cancelTooLate?: boolean;
+	capabilities?: DeviceDescriptor["capabilities"];
+	readClipboardImage?: ClientServiceOptions["readClipboardImage"];
 }
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -42,7 +44,7 @@ afterEach(async () => {
 async function fixture(options: FixtureOptions = {}) {
 	const root = await mkdtemp(join(tmpdir(), "client-service-"));
 	cleanup.push(() => rm(root, { recursive: true, force: true }));
-	const identity = await loadClientIdentity(join(root, "identity"), { name: "Synthetic client", capabilities: ["files", "exec", "computer"] });
+	const identity = await loadClientIdentity(join(root, "identity"), { name: "Synthetic client", capabilities: options.capabilities ?? ["files", "exec", "computer"] });
 	const uploads = new UploadStore(join(root, "imports"));
 	cleanup.push(() => uploads.close());
 	const firstRegistration = Promise.withResolvers<RpcPeer>();
@@ -130,7 +132,7 @@ async function fixture(options: FixtureOptions = {}) {
 		close(socket) { sockets.delete(socket); socket.data.peer?.close(); },
 	} });
 	cleanup.push(async () => { for (const socket of sockets) socket.close(); await server.stop(true); });
-	const client = await startClientService({ identity, stateDir: join(root, "client"), cwd: root, serverName: "Synthetic server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${server.port}`, token } } });
+	const client = await startClientService({ identity, readClipboardImage: options.readClipboardImage, stateDir: join(root, "client"), cwd: root, serverName: "Synthetic server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${server.port}`, token } } });
 	cleanup.push(() => client.close());
 	const peer = await firstRegistration.promise;
 	await client.waitForConnection();
@@ -175,6 +177,100 @@ test("local capture rejects clipboard commands and malformed requests before cap
 	}
 	expect(f.begins).toBe(0);
 	expect(UiStateSchema.parse((await f.api("/v1/state")).value).transfers).toEqual([]);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("image capture requires a pending local choice, never a request approval flag or remote method", async () => {
+	let reads = 0;
+	const f = await fixture({ capabilities: [], readClipboardImage: async () => { reads++; return null; } });
+	expect((await f.api("/v1/captures/image", { kind: "image", approved: true })).value).toMatchObject({ code: "INVALID_INPUT" });
+	expect((await f.api("/v1/captures/image", { kind: "image" })).value).toMatchObject({ code: "CAPTURE_DENIED" });
+	await expect(f.peer.request("capture.image", { approved: true })).rejects.toThrow("Only native tool execution");
+	await f.api("/v1/state");
+	const capturing = f.api("/v1/captures/image", { kind: "image" });
+	const approval = await pendingImageApproval(f);
+	expect(reads).toBe(0);
+	expect((await f.api("/v1/interactions/reply", { id: approval.id, choice: null })).response.ok).toBe(true);
+	expect((await capturing).value).toMatchObject({ code: "CAPTURE_DENIED" });
+	expect(reads).toBe(0);
+	expect(f.begins).toBe(0);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+async function pendingImageApproval(f: { api(route: string, body?: unknown): Promise<{ response: Response; value: unknown }> }) {
+	for (let attempt = 0; attempt < 200; attempt++) {
+		const state = UiStateSchema.parse((await f.api("/v1/state")).value);
+		if (state.interactions.length) return z.object({ id: z.string(), choices: z.array(z.object({ id: z.string() })) }).parse(state.interactions[0]);
+	}
+	throw new Error("Image approval did not become locally visible");
+}
+
+test("one approved image snapshot uploads while unbound with no agent capabilities", async () => {
+	let reads = 0;
+	const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=", "base64");
+	const f = await fixture({ capabilities: [], readClipboardImage: async () => { reads++; return { data: bytes, mimeType: "image/png" }; } });
+	const destination = await f.resolveView();
+	await f.api("/v1/state");
+	const capturing = f.api("/v1/captures/image", { kind: "image" });
+	const approval = await pendingImageApproval(f);
+	expect(reads).toBe(0);
+	await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" });
+	const capture = CaptureSchema.parse((await capturing).value);
+	expect(capture.names).toEqual(["clipboard.png"]);
+	expect(reads).toBe(1);
+	expect((await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" })).value).toMatchObject({ code: "INTERACTION_EXPIRED" });
+	const transfer = TransferSchema.parse((await f.api("/v1/transfers", { ...destination, captureId: capture.id })).value);
+	await f.attachment.promise;
+	const imported = f.uploads.completed(f.identity.device.id, transfer.id);
+	expect(imported.files[0]!.name).toBe("clipboard.png");
+	expect(imported.files[0]!.path.endsWith(".png")).toBe(true);
+	expect(await readFile(imported.files[0]!.path)).toEqual(bytes);
+	expect(reads).toBe(1);
+});
+
+test("dropped images are admitted as real file uploads without agent authorization", async () => {
+	const f = await fixture({ capabilities: [] });
+	const path = join(f.root, "dropped.png");
+	const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+	await writeFile(path, bytes);
+	const capture = CaptureSchema.parse((await f.api("/v1/captures", { kind: "files", paths: [path] })).value);
+	const destination = await f.resolveView();
+	const transfer = TransferSchema.parse((await f.api("/v1/transfers", { ...destination, captureId: capture.id })).value);
+	await f.attachment.promise;
+	expect(await readFile(f.uploads.completed(f.identity.device.id, transfer.id).files[0]!.path)).toEqual(bytes);
+	expect(await readFile(path)).toEqual(bytes);
+});
+
+test("approved empty clipboard reports no image and disconnect denies a waiting read", async () => {
+	let reads = 0;
+	const f = await fixture({ capabilities: [], readClipboardImage: async () => { reads++; return undefined; } });
+	await f.api("/v1/state");
+	const empty = f.api("/v1/captures/image", { kind: "image" });
+	const approval = await pendingImageApproval(f);
+	await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" });
+	expect((await empty).value).toMatchObject({ code: "NO_CLIPBOARD_IMAGE" });
+	const abandoned = f.api("/v1/captures/image", { kind: "image" });
+	await pendingImageApproval(f);
+	await f.reconnect();
+	expect((await abandoned).response.ok).toBe(false);
+	expect(reads).toBe(1);
+	expect(f.begins).toBe(0);
+});
+
+test("disconnect during an approved native read discards its late bytes without taking a snapshot", async () => {
+	const entered = Promise.withResolvers<void>();
+	const image = Promise.withResolvers<{ data: Uint8Array; mimeType: string }>();
+	const f = await fixture({ capabilities: [], readClipboardImage: () => { entered.resolve(); return image.promise; } });
+	await f.api("/v1/state");
+	const capturing = f.api("/v1/captures/image", { kind: "image" });
+	const approval = await pendingImageApproval(f);
+	await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" });
+	await entered.promise;
+	await f.reconnect();
+	expect((await capturing).response.ok).toBe(false);
+	image.resolve({ data: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" });
+	await f.api("/v1/state");
+	expect(f.begins).toBe(0);
 	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 

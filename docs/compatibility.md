@@ -48,8 +48,8 @@ integrity hashes. A fresh isolated Linux installation used those URLs with
 | Computer | Existing native computer Eval prelude with local confirmation and context ownership. | A real macOS desktop run exercised an owned AppKit window, input, screenshots, control release and in-flight cancellation. Windows and cross-physical-device desktop acceptance remain unproven. |
 | ADB | Installed client executable used through existing Bash/Eval; explicit `-s` selection. | Requires Android platform tools, attached/paired device, debugging authorization, and any OS driver permissions. Executable discovery is not device authorization. Physical ADB acceptance remains unproven. |
 | Native text paste | Original Tern implementation, without a bridge Paste override, classification, delay, or replay. | Native field routes already bypassed command interception. Restoring text does not verify file/bitmap paste, IME, streaming, or platform GUI acceptance. |
-| Human image attachments | Recognized selected image files are rejected before bridge upload/editor mutation in pure-plugin mode. | Clipboard bitmaps and native bypass routes are not intercepted; universal fail-closed rejection remains blocked. Tool-result image reads/screenshots are unaffected. |
-| Ordinary human files | Explicit selected-file snapshots, bounded transfer, verified bytes, quoted remote references in original unsent editor. | Native file Cmd/Ctrl+V remains blocked; pane switching and drag/drop focus behavior require actual Tern/OMP acceptance on each OS. |
+| Human image attachments | Explicit image command with local approval, or selected-file drops; supported uploaded images enter native OMP paste handling. | Native paste remains untouched. PNG/JPEG/GIF/WebP paths are supported; actual clipboard/OS gestures still need platform evidence. Handoff does not certify preview completion. |
+| Ordinary human files | Selected-file snapshots, verified transfer, real inbox paths, published README and visible archival reminders. | Copy/archive into project storage before working. Native copied-file clipboard handling is not intercepted; cross-pane drop targeting still needs actual GUI evidence. |
 
 ## Native backend details
 
@@ -140,19 +140,17 @@ install platform tools, accept debugging keys, or publish an unprotected ADB ser
 The native plugin requires a connected remote host, a live agent pane, and TSP
 `surface.role == "omp.session"`. Shell metadata is not the agent identity: an
 actual native OMP pane retained `program: "zsh"` and `at_prompt: true`.
-For eligible file drops, the bridge resolves the OMP conversation/draft and pins
-that destination. It no longer overrides built-in Paste command dispatch or reads
-the ambient clipboard. Plain text stays on the original native implementation,
-without asynchronous classification, validation, or command replay. Native
-text-field/TSP edits and raw PTY paste are separate routes; actual native
-text-field Cmd+V was observed to bypass the former command override.
+For eligible file drops and the explicit image-paste entry, the bridge resolves
+the originating OMP context before upload/handoff. Native text/image paste is
+left untouched; it is not required to pass through bridge validation. Native
+text-field/TSP edits and raw PTY input are distinct routes, which is why the
+supplemental image command does not claim to intercept every Cmd/Ctrl+V.
 
-The reviewed window interfaces lack a safe media-only native paste hook. Native
-file/bitmap Cmd/Ctrl+V and fail-closed image rejection on bypass routes therefore
-remain blocked acceptance gates, not removed requirements. Restoring native text
-does not complete those gates or establish IME/streaming behavior on either OS.
-No replacement frontend, alternate shortcut, clipboard watcher, OS hook, or host
-patch is substituted for standard Cmd/Ctrl+V acceptance.
+The approved **OMP: Paste image to remote** command/status action asks for local
+confirmation, snapshots one clipboard image, and uploads it. Dropped image files
+use the same transport. No agent clipboard tool, watcher, replacement frontend or
+host patch is introduced. Native queue/focus behavior applies after image
+handoff; there is no new atomic original-draft/preview-completion contract.
 
 The 0.8.4 drop request has no explicit hovered destination-pane ID. The source
 uses the focused eligible remote pane; real GUI evidence must establish its drop
@@ -165,12 +163,13 @@ not opaque local paths or fake attachment markers. It does not submit the prompt
 The remaining GUI acceptance includes ongoing typing, selections/IME, streaming,
 session switching, and lost receipt handling.
 
-The confirmed **pure-plugin, reduced-image scope** requires human images to fail
-closed before upload or editor mutation. The bridge's own capture/transfer path
-rejects them, but that is not an end-to-end guarantee for native paste routes that
-bypass the bridge. This acceptance requirement remains incomplete. No host patch,
-fake success, queued-image workaround, or replacement UI is included. Native
-`read` image results and browser/computer screenshots remain supported.
+The earlier fail-closed-all-images scope and assessment of native paste bypass
+have been superseded by the user's clarification: native input remains trusted
+and unchanged. Supported uploaded images now enter native `pasteToEditor`
+handling (PNG/JPEG/GIF/WebP). Ordinary files are published into a private inbox
+with a README and visible archival reminders; image-only handoffs do not add
+ordinary-file path prose. The terminal transfer label is **Handed to OMP**;
+native decoding/preview may complete later. Tool image results remain supported.
 
 On macOS, Tern 0.8.4 with OMP 18.11.1-1.1.62 accepted ordinary text and
 Finder-copied ordinary/PNG files through standard Cmd+V without bridge capture

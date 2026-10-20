@@ -4,6 +4,7 @@ import { mkdir, open, rename, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import type { ImportedFile } from "./api.ts";
 import { protectPrivatePath } from "./config.ts";
+import { INBOX_README } from "./inbox-guidance.ts";
 import { BridgeError } from "./protocol.ts";
 
 export interface UploadInput {
@@ -130,6 +131,10 @@ export class UploadStore {
 				return { name: entry.name, path: path.join(this.root, id, entry.filename), size: entry.bytes, sha256 };
 			});
 			for (const entry of upload.entries) { await entry.handle.sync(); await entry.handle.close(); entry.closed = true; }
+			// Publish guidance and verified bytes together; numeric file prefixes reserve README.
+			const readme = await open(path.join(upload.directory, "README"), "wx", 0o600);
+			try { await readme.writeFile(INBOX_README, "utf8"); await readme.sync(); }
+			finally { await readme.close(); }
 			if (upload.cancelled) throw new BridgeError("CANCELLED", "Upload cancelled before publication");
 			const destination = path.join(this.root, id);
 			await rename(upload.directory, destination);
