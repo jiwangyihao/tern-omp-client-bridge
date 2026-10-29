@@ -20,6 +20,25 @@ The broader original specification remains open for platform/GUI acceptance;
 this record does not claim three physical clients, Windows GUI, or attached-device
 ADB acceptance.
 
+## October 29: v0.5.0-beta.1 prerelease checks
+
+[GitHub Actions run 40898284516](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)
+executed the product code at `fcfad878ad826ac819d4c45445a6648a35d8cc64`.
+The macOS job passed dependency installation, typecheck, the complete TypeScript
+suite, package build and built CLI help. Windows dependency installation and
+typecheck passed, but its suite reported 158 passes, 17 skips and 105 failures.
+The log includes failure to load the PowerShell Security module for `Set-Acl`
+and a native PTY timeout. Windows is a known failing beta target, not an accepted
+platform. No permission check was bypassed or failed test skipped to publish.
+
+All five local Luau boundary runners passed: 212 window cases, nine host-panel
+cases, 37 setup-controller scenarios, 432 setup-target assertions with nine
+read-only POSIX probe cases, and 22 setup-view cases. They are not GUI acceptance.
+The source-only tar/zip archives have byte-identical payloads and SHA-256 checks;
+the extracted package installs through native `tern plugin install` into an
+isolated profile and lists ready with no catalog problems. That check started
+no daemon or Bridge service. README/installation-guide local links were checked.
+
 ## October 29: native daemon routing from the GUI
 
 After absolute executable launch was repaired, the native command still failed:
