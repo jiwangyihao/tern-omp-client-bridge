@@ -44,8 +44,9 @@
 
 验证记录与实现范围分开维护，不作跨平台通用保证。
 
-- **已有验证记录**。macOS 普通 GUI 使用的原生 daemon 转发已通过最小 `PATH` 下的 `ctl state` 检查，并验证拒绝无效窗口。另有 Luau 边界、客户端解析与设置单元测试、原生 Linux 解析、源码安装及真实隔离初始化的通过记录。既有真实 SSH 传输和原生未发送草稿交接记录，不等同于全部系统剪贴板或鼠标拖放手势通过验收。
-- **仍待实际验收**。主窗口 PiP 的打开、尺寸与焦点仍待授权后的桌面验收；原生 Windows 进程与 GUI、三台物理客户端共同使用、跨设备桌面控制、完整粘贴与拖放，以及真实 Android 设备操作尚未完成验收。Windows 实现要求原生运行环境，不能以 WSL 结果替代。
+- **已有验证记录**。GitHub Actions 的 macOS 原生平台任务已通过类型检查、测试、打包和 CLI 检查。[本次 CI 记录](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)同时保留各平台结果。macOS 普通 daemon 转发、Luau 边界及原生 Linux 解析也有通过记录；这些结果不等同于系统剪贴板或鼠标拖放手势完成验收。
+- **Windows 已知问题**。本次原生 Windows CI 未通过，日志包含 PowerShell `Set-Acl` 模块加载失败及 PTY 测试超时。此测试版暂不建议用于 Windows 日常工作；安装步骤保留供问题验证，不能以 WSL 结果替代原生 Windows 验收。
+- **仍待实际验收**。主窗口 PiP 的打开、尺寸与焦点仍待授权后的桌面验收；Windows GUI、三台物理客户端共同使用、跨设备桌面控制、完整粘贴与拖放，以及真实 Android 设备操作尚未完成验收。
 
 具体环境、历史结果与未完成项见[兼容性与验证边界](docs/compatibility.md)和[验证记录](docs/verification.md)。Linux 主机或安装检查通过，不代表全部客户端交互能力可用。
 

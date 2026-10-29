@@ -2,7 +2,7 @@
 
 本文面向首次安装 `v0.5.0-beta.1` 的用户。推荐先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Set up Bridge** 中授权远端初始化。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
 
-这是首个公开预发布版本。macOS 主窗口的 PiP 几何与焦点仍待完成授权后的实机验收，Windows 原生 GUI 尚未验证。实现范围与平台证据见[兼容性说明](compatibility.md)，项目概览见 [README](../README.md)。
+这是首个公开预发布版本。macOS 主窗口的 PiP 几何与焦点仍待完成授权后的实机验收。**本次 Windows 原生 CI 未通过**，日志包含 PowerShell `Set-Acl` 模块加载失败及 PTY 测试超时，暂不建议用于 Windows 日常工作；下面的 Windows 步骤供问题验证，GUI 仍未验收。[CI 结果](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)、[兼容性说明](compatibility.md)与 [README](../README.md)分别记录验证结果、实现范围和项目概览。
 
 ## 1. 准备本机与 Agent 主机
 

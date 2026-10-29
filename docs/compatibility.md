@@ -34,11 +34,17 @@ The advanced source-checkout workflow does not require a build. Finite
 setup workflow installs and starts services and attempts the appropriate remote
 plugin reload. Neither path restarts active OMP sessions. See [Usage](usage.md).
 
-Unified setup supports POSIX SSH agent hosts and client launchers for macOS,
-Linux and native Windows. Trusted noninteractive SSH remains a prerequisite.
+Unified setup includes POSIX SSH agent-host and macOS/Linux/native-Windows
+client-launcher implementations. Trusted noninteractive SSH remains a prerequisite.
 Unsupported platforms and missing download/extraction tools fail explicitly;
 setup does not bypass host trust, OS permissions, or application sign-in.
 Windows implementation is not evidence of a real Windows initialization run.
+
+For `v0.5.0-beta.1`, [GitHub Actions run 40898284516](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)
+passed the macOS native job but failed Windows: PowerShell could not load the
+Security module for `Set-Acl`, and the native PTY test timed out. These are known
+failures, not skipped acceptance checks. Windows is experimental and is not
+recommended for daily use in this beta. No ACL or permission check was bypassed.
 
 Native CLI discovery and launch are machine-local on macOS, Linux and Windows.
 Install/setup save an absolute executable path; the window plugin uses it as a
