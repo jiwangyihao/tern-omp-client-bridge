@@ -2,11 +2,11 @@
 
 ## Trust model
 
-This bridge connects a trusted OMP agent host to client devices whose operators
-explicitly start an executor and grant capabilities. It is not a security boundary
+This bridge connects a trusted OMP agent host to paired client devices. Manually
+binding a device authorizes native tool operations for that OMP session under
+the client's native Agent policy and OS permissions. It is not a security boundary
 between people sharing an agent-host OS account, a root account, or a client OS
-account. A session binding is routing and attribution, **not authorization to
-cross an otherwise untrusted tenant boundary**.
+account, and does not authorize crossing an otherwise untrusted tenant boundary.
 
 Do not expose the broker or client UI endpoint publicly, proxy them to a public
 interface, or forward their bearer credentials to other users. Both listeners
@@ -17,17 +17,51 @@ same user, and local bearer authentication is not hardware-backed proof of a
 human gesture.
 
 The outbound transport is a separate SSH stdio connection initiated by each
-client. It uses `ssh -T`, `BatchMode=yes`, and `ForwardAgent=no`. The operator must
-configure authentication and independently trust the host key. The remote relay
+client. It uses `ssh -T`, `BatchMode=yes`, `ForwardAgent=no`, and
+`StrictHostKeyChecking=yes`. The operator must configure authentication and independently trust the host key. The remote relay
 uses the broker's private agent-host endpoint; a client does not need an inbound
 SSH server or public listener. Keep remote relay stdout free of unrelated output.
+
+## Initialization consent
+
+Installing/loading the Tern plugin does not authorize downloads, remote changes,
+or service startup. A cold-host setup sidebar is prepared only after interface-only
+consent, through Tern's already-authenticated connected-host command transport.
+The client uses an owned preparation pane and a nonce-qualified result, then checks
+the native block catalog. It never types deployment commands into an existing user
+shell or agent pane. This isolated UI package cannot overwrite the full Bridge.
+
+Full Bridge installation remains a separate approval inside the sidebar. Its
+read-only SSH check does not add/update host keys, forward agents, establish
+configured forwards, run LocalCommand hooks, or create multiplexing sockets.
+Display names and opaque device identifiers are not trusted as SSH destinations.
+The captured target and verified address must still match at approval; editing
+the address invalidates installation consent. Only then may setup provision
+private runtimes, dependencies, integrations,
+and background services. It does not install OMP or Tern themselves, use sudo,
+modify SSH trust, restart active conversations, or change session bindings.
+Registration alone does not bind a session or authorize agent operations.
+
+Setup logs and service credentials remain private. Public progress excludes raw
+subprocess output and bearer/private-key material. Services are checked through
+authenticated loopback endpoints; a PID record alone is not readiness. Healthy
+manual services retain their original ownership, and older running code is not
+relabeled as upgraded. Unknown stale-lock ownership requires explicit recovery
+confirmation; live owners are not reclaimed.
+
+Process and native completion callbacks only deposit receipts. They do not enumerate
+hosts, read storage, parse setup JSON, refresh chrome or build dialogs. Bounded pump
+stages validate and display results; missing callbacks yield an interrupted/unknown
+outcome. Host views expire without fresh owner snapshots and disable consequential
+controls. Neither stale UI nor a displayed next step authorizes installation.
 
 ## Device identity and shared access
 
 Each client has an Ed25519 keypair in `identity.json`; a challenge signature binds
-its device ID, label, platform, architecture, and granted capabilities. A label is
-not identity. Copying that file copies identity and signing authority; use a
-separate state directory and generated key for every device.
+its device ID, label, platform and architecture. A label is not identity. Copying
+that file copies identity and signing authority; use a separate state directory
+and generated key for every device. Protocol 2 removes legacy capability grants;
+identity migration preserves both keys and the device ID, not obsolete grants.
 
 Signed registration prevents another device from merely claiming an existing
 label/ID. It does not turn a shared server root into per-user isolation. Anyone
@@ -43,21 +77,43 @@ captures one target. URI authorities cannot select arbitrary devices. A running
 invocation, its cancellation, background output, and returned handles retain the
 captured device, even if a viewer changes the next target.
 
-## Capability grants are coarse
+The native Bridge panel is host-rendered and therefore visible to other windows
+of the Tern session. Its snapshots contain display information only: never the
+local UI bearer, endpoint, private key, or clipboard payload. Controls are
+window-routed native links, not host-side broadcasts. The originating window
+checks its live panel instance and source pane before handling an action; other
+windows reject the link. Owner/instance identifiers prevent accidental cross-window
+routing, not malicious access by already-trusted same-account code. Closing the
+panel does not revoke or cancel an existing transfer.
 
-`--allow` is mandatory on each client start. Use `--allow none` if only human
-transfers are needed. `files` grants the existing filesystem tools over paths
-accessible to the executor's OS account, not just a project folder. `exec` grants
-arbitrary Bash/Eval execution under that account. It is **not** a sandbox, a
-restricted SSH command, a clipboard sandbox, or a filesystem capability system.
+Native draft destinations are owned by individual authenticated OMP WebSockets,
+not by a session-wide broadcast. The widget exposes only a random locator. Resolve,
+bind, paste and attachment claims validate the same destination, session and draft;
+even two live viewers of one OMP session cannot claim each other's draft channel.
+Submission invalidates the previous token; socket closure/reconnect revokes the
+old locator and pending work. A locator never authorizes device use or changes a
+binding by itself. Completed or uncertain UI outcomes are correlated to the
+originating receipt and displayed without replay.
 
-`browser` and `computer` enable the corresponding native Eval integrations;
-`exec` is also needed to call Eval. `adb` is an advertised capability for use of
-the installed ADB executable through execution. It does not enforce command-level
-ADB restrictions. Arbitrary code granted through `exec` can call other installed
-programs or OS APIs regardless of whether those convenience integrations are
-enabled. Browser profiles, clipboard data, private files, network access, and
-device access may therefore be reachable to separately authorized code.
+Panel records are keyed by authenticated client identity plus window/instance
+locators. Publication updates only a live, explicitly opened record. Host reads
+and close acknowledgements require the host's private loopback bearer. Public
+snapshots are whitelisted and size-bounded; stale records expire after 15 seconds.
+Closed identifiers are quarantined for 60 seconds to reject delayed requests,
+then reclaimed rather than exhausting a lifetime creation budget.
+
+## Binding authorizes native tools
+
+The plugin has no per-tool grant list or `--allow` switch. A human's manual
+session binding authorizes use of the paired device's native tools; unbound
+sessions cannot issue client operations. Unbinding blocks new invocations, while
+already-dispatched operations retain their original target and cancellation path.
+
+The executor reads client-local native Agent policy without rewriting it. Native
+tool approvals/denials, browser/computer settings and OS permissions remain in
+force. Runtime isolation does not replace local policy with server settings or
+an all-allow map. Availability reports describe backend prerequisites, not grants.
+Native code execution is not a filesystem, clipboard or OS sandbox.
 
 Run the client as the intended nonprivileged interactive user. Do not run it as
 root/Administrator just to avoid backend permission errors. Grant OS screen,
@@ -77,29 +133,34 @@ The companion additionally routes native browser/computer confirmations to the
 local device UI. The operator uses **OMP: Pending client approvals** and selects
 a valid displayed choice. Missing/recently inactive UI, cancellation, timeout,
 disconnect, or unsupported interaction results in denial. Remote execution flags
-cannot assert approval. Not every file/exec call asks again locally: starting the
-client with those grants is the coarse authorization, while the native host's
-applicable policy still applies.
+cannot assert approval. These are native policy checks, not an additional plugin
+authorization system. Binding does not auto-approve a native confirmation or
+override a client-local denial.
 
 These UI controls rely on trusted local software and private state. They do not
 protect against arbitrary code already running as the same OS user or a malicious
 server that the operator has authorized for broad execution. Screen/page/file
 content is data, not user authorization for further side effects.
 
-## Human transfers and local image consent
+## Human transfers and local clipboard consent
 
-Selected-file capture accepts explicit local paths. Clipboard image capture is a
-separate authenticated local endpoint with a pending local approval before the
-native reader is called. A command invocation, correlation ID, or remote
-`approved` flag is not approval. Rejection, missing active local UI, cancellation,
-expiry or disconnect prevents capture or discards a late read. Only a confirmed
-image is snapshotted; no clipboard watcher or automatic synchronization runs.
+Selected-file capture accepts explicit local paths. An explicit local
+**Paste to remote** gesture (button, palette command or user-bound shortcut)
+authorizes one clipboard capture into the destination pinned by that gesture.
+The separate local endpoint accepts only `{kind:"clipboard"}` and retains
+loopback-only access, private bearer authentication and Origin rejection.
+There is no second product-owned approval dialog and no remote `approved` flag.
+Cancellation, expiry or disconnect still prevents capture or discards a late
+read; downstream checks reject a changed destination. An image is snapshotted;
+otherwise plain text is returned for draft insertion without submission.
+Native execution approvals and OS permissions are unchanged. No clipboard
+watcher or automatic synchronization runs.
 The remote execution RPC exposes native tools/context disposal, not clipboard
 capture. Separately authorized Bash/Eval retains its broad OS-account authority.
 Local UI bearer access is not a sandbox against malicious same-account software.
 
 Native text/image paste is neither intercepted nor required to pass through the
-bridge. The explicit image command is supplemental. Path-looking plain text is
+bridge. The explicit paste command is supplemental. Path-looking plain text is
 not interpreted as a file-upload request. The old claim that a native-paste
 bypass was itself a security defect has been withdrawn.
 

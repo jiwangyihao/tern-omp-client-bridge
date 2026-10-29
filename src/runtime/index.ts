@@ -2,10 +2,11 @@
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
-import { BridgeError, type Capability, type ExecuteRequest, type ExecutionOptions, type Executor, type ToolName, type ToolResult } from "../protocol.ts";
+import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { BridgeError, type ExecuteRequest, type ExecutionOptions, type Executor, type ToolResult } from "../protocol.ts";
 import { assertSupportedRuntime } from "../config.ts";
 import type { InteractionHandler } from "./interactions.ts";
 import { WorkerOutputSchema, type WorkerInput, type WorkerOutput } from "./messages.ts";
@@ -15,13 +16,8 @@ export type { RuntimeEnvironment } from "./environment.ts";
 export interface OmpRuntimeOptions {
 	stateDir: string;
 	cwd?: string;
-	capabilities: readonly Capability[];
 	onInteraction?: InteractionHandler;
 }
-
-const TOOL_CAPABILITY: Record<ToolName, Capability> = {
-	read: "files", write: "files", edit: "files", grep: "files", glob: "files", bash: "exec", eval: "exec",
-};
 
 interface PendingCall {
 	resolve(result: ToolResult): void;
@@ -48,7 +44,7 @@ class RuntimeProcess {
 	#initialized = false;
 
 	private constructor(readonly dir: string, private readonly options: OmpRuntimeOptions, contextId: string, owner: string, nativeRoot: string, private readonly rootAlias?: string) {
-		this.#initialization = { type: "init", cwd: resolve(options.cwd ?? homedir()), stateDir: dir, owner, contextId, capabilities: options.capabilities, hasInteractions: options.onInteraction !== undefined };
+		this.#initialization = { type: "init", cwd: resolve(options.cwd ?? homedir()), stateDir: dir, owner, contextId, agentDir: getAgentDir(), configFiles: process.env.PI_CONFIG_FILES?.split(delimiter).filter(Boolean) ?? [], hasInteractions: options.onInteraction !== undefined };
 		// SDK config roots and daemon/Python/browser caches must not attach to a different OMP process.
 		// Keep the actual user's HOME, PATH and OS shell; these are not an emulated POSIX device.
 		const env: Record<string, string | undefined> = { ...process.env };
@@ -266,20 +262,16 @@ class RuntimeProcess {
 export class OmpRuntime implements Executor {
 	readonly #contexts = new Map<string, { contextId: string; process: Promise<RuntimeProcess> }>();
 	readonly #instance = crypto.randomUUID();
-	readonly #capabilities: ReadonlySet<Capability>;
 	#closed = false;
 	#closePromise?: Promise<void>;
 
 	constructor(private readonly options: OmpRuntimeOptions) {
 		assertSupportedRuntime();
-		this.#capabilities = new Set(options.capabilities);
 	}
 
 	async execute(request: ExecuteRequest, options?: ExecutionOptions): Promise<ToolResult> {
 		if (this.#closed) throw new BridgeError("runtime_closed", "Client native runtime is closed");
 		options?.signal?.throwIfAborted();
-		const capability = Object.hasOwn(TOOL_CAPABILITY, request.tool) ? TOOL_CAPABILITY[request.tool] : undefined;
-		if (!capability || !this.#capabilities.has(capability)) throw new BridgeError("capability_denied", `Client capability not granted for ${request.tool}`);
 		const { sessionId, contextId, device } = request.target;
 		if (device.platform !== process.platform) throw new BridgeError("platform_mismatch", `Invocation targets ${device.platform}, but this executor is ${process.platform}`);
 		const key = JSON.stringify([sessionId, contextId, device.id]);
@@ -318,7 +310,7 @@ export class OmpRuntime implements Executor {
 export async function inspectRuntimeEnvironment(cwd: string = homedir()): Promise<RuntimeEnvironment> {
 	assertSupportedRuntime();
 	const dir = await mkdtemp(join(tmpdir(), "tern-runtime-inspect-"));
-	const runtime = await RuntimeProcess.start(dir, { stateDir: dir, cwd, capabilities: [] }, "inspect", crypto.randomUUID());
+	const runtime = await RuntimeProcess.start(dir, { stateDir: dir, cwd }, "inspect", crypto.randomUUID());
 	try { return await runtime.inspect(); }
 	finally { await runtime.close(); }
 }

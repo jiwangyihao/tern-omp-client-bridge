@@ -2,24 +2,25 @@
 import { createHash, randomBytes } from "node:crypto";
 import { open, rm } from "node:fs/promises";
 import path from "node:path";
-import { readImageFromClipboard, type ClipboardImage } from "@oh-my-pi/pi-natives/clipboard";
+import { readImageFromClipboard, readTextFromClipboard } from "@oh-my-pi/pi-natives/clipboard";
 import { z } from "zod";
-import type { InteractionDecision, InteractionRequest, LocalUiState, ResolvedView, TransferStatus } from "./api.ts";
+import type { InteractionDecision, InteractionRequest, LocalUiState, PanelState, ResolvedView, TransferStatus, UiIntentInput, UiIntentOutcome, UiIntentReceipt } from "./api.ts";
 import { assertSupportedRuntime, authorized, defaultStateDir, readEndpoint, signIdentity, writePrivateJson, type ClientIdentity, type Endpoint } from "./config.ts";
 import { openClientTransport, type ClientConnection, type ClientTransport } from "./client-transport.ts";
 import { BridgeError, type ExecuteRequest, type ToolResult } from "./protocol.ts";
-import { ClientIdentitySchema, DeviceDescriptorSchema, ExecuteRequestSchema, IdentifierSchema, ImportedFileSchema, ResolvedViewSchema, ServerStateSchema, UiIntentReceiptSchema as ReceiptSchema, UiIntentSchema } from "./schemas.ts";
+import { ClientIdentitySchema, DeviceDescriptorSchema, ExecuteRequestSchema, IdentifierSchema, ImportedFileSchema, PanelCloseSchema, PanelPublishSchema, PanelStateSchema, ResolvedViewSchema, ServerStateSchema, UiIntentOutcomeSchema as FinishedEventSchema, UiIntentReceiptSchema as ReceiptSchema, UiIntentSchema } from "./schemas.ts";
 import { OmpRuntime } from "./runtime/index.ts";
 import { HumanTransferSource } from "./transfers/source.ts";
+import { chooseUploadFile } from "./transfers/file-picker.ts";
 import { RpcPeer, type RpcContext } from "./wire.ts";
 
 const ChallengeSchema = z.object({ nonce: z.string().min(16).max(1024) });
 const RegistrationSchema = z.object({ device: DeviceDescriptorSchema, serverName: z.string().min(1).max(256), serverInstance: IdentifierSchema });
 const StateEventSchema = z.object({ sessionId: IdentifierSchema, state: ServerStateSchema });
-const FinishedEventSchema = z.object({ id: IdentifierSchema, viewId: IdentifierSchema, kind: z.enum(["resolve", "bind", "attach"]), error: z.string().optional() });
+const RevokedViewSchema = z.object({ viewId: IdentifierSchema, destinationId: IdentifierSchema, resolveIntentId: IdentifierSchema });
 const ContextCloseSchema = z.object({ contextId: IdentifierSchema });
 const CaptureSchema = z.object({ kind: z.literal("files"), paths: z.array(z.string().min(1).max(32768)).min(1).max(256) }).strict();
-const ImageCaptureSchema = z.object({ kind: z.literal("image"), requestId: IdentifierSchema.optional() }).strict();
+const ClipboardCaptureSchema = z.object({ kind: z.literal("clipboard") }).strict();
 const TransferSchema = z.object({ viewId: IdentifierSchema, captureId: IdentifierSchema, expectedSessionId: IdentifierSchema, expectedDraftToken: IdentifierSchema, expectedResolveIntentId: IdentifierSchema }).strict();
 const IdSchema = z.object({ id: IdentifierSchema }).strict();
 const ReplySchema = z.object({ id: IdentifierSchema, choice: IdentifierSchema.nullable() }).strict();
@@ -41,6 +42,7 @@ export interface ClientServiceOptions {
 	connection: ClientConnection;
 	/** Local native boundary; never accepted from HTTP or remote execution parameters. */
 	readClipboardImage?: typeof readImageFromClipboard;
+	readClipboardText?: typeof readTextFromClipboard;
 }
 export interface ClientService {
 	readonly endpoint: Endpoint;
@@ -98,16 +100,26 @@ async function jsonBody(request: Request): Promise<unknown> {
 export async function startClientService(options: ClientServiceOptions): Promise<ClientService> {
 	assertSupportedRuntime();
 	const parsedIdentity = ClientIdentitySchema.parse(options.identity);
-	const identity: ClientIdentity = { ...parsedIdentity, device: Object.freeze({ ...parsedIdentity.device, capabilities: Object.freeze([...parsedIdentity.device.capabilities]) }) };
+	const identity: ClientIdentity = { ...parsedIdentity, device: Object.freeze({ ...parsedIdentity.device }) };
 	const stateDir = options.stateDir ?? defaultStateDir();
 	const source = new HumanTransferSource({ stateDir });
 	const views = new Map<string, ResolvedView>();
-	const resolveIntents = new Map<string, string>();
+	const resolveIntents = new Map<string, { id: string; destinationId: string }>();
+	const resolving = new Map<string, object>();
+	const earlyViews = new Map<string, ResolvedView>();
+	const earlyFinishes = new Map<string, z.infer<typeof FinishedEventSchema>>();
+	const revokedResolves = new Set<string>();
+	const pendingIntents = new Set<object>();
+	const admittedIntents = new Map<string, { viewId: string; kind: UiIntentInput["kind"]; expiresAt: number }>();
+	const outcomes = new Map<string, UiIntentOutcome>();
+	const panels = new Map<string, PanelState>();
+	const panelClosures = new Map<string, number>();
 	const transfers = new Map<string, TransferJob>();
 	const capturesInUse = new Map<string, TransferJob>();
 	const attachIntents = new Map<string, TransferJob>();
 	const interactions = new Map<string, Interaction>();
-	const imageRequests = new Set<AbortController>();
+	const clipboardRequests = new Set<AbortController>();
+	const filePickerRequests = new Set<AbortController>();
 	const seenCalls = new Set<string>();
 	const tasks = new Set<Promise<unknown>>();
 	const responseDeliveries = new WeakMap<object, ResultDelivery>();
@@ -176,7 +188,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 		if (signal?.aborted) finish(null);
 		return decision.promise;
 	}
-	const runtime = new OmpRuntime({ stateDir, cwd: options.cwd, capabilities: identity.device.capabilities, onInteraction: requestInteraction });
+	const runtime = new OmpRuntime({ stateDir, cwd: options.cwd, onInteraction: requestInteraction });
 
 	function update(job: TransferJob, change: Partial<TransferStatus>): void {
 		if (job.status) job.status = { ...job.status, ...change };
@@ -185,7 +197,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 		job.controller.signal.throwIfAborted();
 		if (!connected || peer !== job.peer) throw new BridgeError("CLIENT_OFFLINE", "The original transfer connection is unavailable; upload was not replayed");
 		const current = views.get(job.view.viewId);
-		if (!current || current.sessionId !== job.view.sessionId || current.draftToken !== job.view.draftToken) throw new BridgeError("DESTINATION_CHANGED", "The captured destination conversation or draft changed");
+		if (!current || current.destinationId !== job.view.destinationId || current.sessionId !== job.view.sessionId || current.draftToken !== job.view.draftToken) throw new BridgeError("DESTINATION_CHANGED", "The captured destination conversation or draft changed");
 	}
 	async function cancelRemote(job: TransferJob): Promise<void> {
 		if (job.cancelling) return await job.cancelling;
@@ -238,19 +250,19 @@ export async function startClientService(options: ClientServiceOptions): Promise
 			const finished = UploadFinishSchema.parse(await job.peer.request("upload.finish", { id: began.id, sha256 }, { signal: job.controller.signal, timeoutMs: REQUEST_TIMEOUT }));
 			if (finished.files.length !== files.length || finished.files.some((file, index) => file.size !== files[index]!.size || file.name !== files[index]!.name || file.sha256 !== sha256[index])) throw new BridgeError("UPLOAD_MISMATCH", "Broker verification did not match the captured files");
 			guardDestination(job);
-			const intent = ReceiptSchema.parse(await job.peer.request("ui.intent", { kind: "attach", viewId: job.view.viewId, sessionId: job.view.sessionId, draftToken: job.view.draftToken, transferId: began.id }, { signal: job.controller.signal, timeoutMs: REQUEST_TIMEOUT }));
-			guardDestination(job);
-			job.intentId = intent.id;
-			attachIntents.set(intent.id, job);
-			update(job, { phase: "ready", frame: intent.frame });
+			await requestIntent(job.peer, { kind: "attach", viewId: job.view.viewId, sessionId: job.view.sessionId, draftToken: job.view.draftToken, transferId: began.id }, job.controller.signal, job);
+			if (job.status?.phase !== "attached" && job.status?.phase !== "failed") guardDestination(job);
 		} catch (error) {
 			const failure = error instanceof Error ? error : new Error(String(error));
 			ready.reject(failure);
-			update(job, { phase: "failed", frame: undefined, error: failure.message });
+			update(job, { phase: "failed", error: failure.message });
 			try {
 				await cancelRemote(job);
 				if (job.controller.signal.aborted && job.controller.signal.reason instanceof BridgeError && job.controller.signal.reason.code === "CANCELLED") update(job, { phase: "cancelled" });
-			} catch (cleanupError) { update(job, { error: `${failure.message}; partial cleanup could not be confirmed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}` }); }
+			} catch (cleanupError) {
+				// A confirmed native handoff wins over a late partial-cleanup error.
+				if (job.status?.phase !== "attached") update(job, { error: `${failure.message}; partial cleanup could not be confirmed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}` });
+			}
 		} finally {
 			capturesInUse.delete(job.captureId);
 			await source.release(job.captureId);
@@ -259,46 +271,113 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	async function cancel(job: TransferJob): Promise<void> {
 		if (job.status?.phase === "attached") throw new BridgeError("ALREADY_ATTACHED", "An attachment handed to OMP cannot be cancelled as a partial upload");
 		job.controller.abort(new BridgeError("CANCELLED", "The local user cancelled this transfer"));
-		update(job, { frame: undefined });
-		await job.done;
+		// Cancel promptly even while the attach receipt is in flight. Keep that
+		// receipt observable so a too-late cancellation can still receive completion.
+		if (!job.status) await job.done;
 		try {
 			await cancelRemote(job);
+			await job.done;
 			if (job.intentId) attachIntents.delete(job.intentId);
 			update(job, { phase: "cancelled" });
 		}
 		catch (error) {
+			await job.done;
 			const latest = job.status ? transfers.get(job.status.id)?.status : undefined;
 			if (latest?.phase !== "attached") update(job, { phase: "failed", error: `Cancellation could not be confirmed: ${error instanceof Error ? error.message : String(error)}` });
 			throw error;
 		}
 	}
 
+	function applyView(view: ResolvedView): void {
+		const expected = resolveIntents.get(view.viewId);
+		if (expected?.id !== view.resolveIntentId || expected.destinationId !== view.destinationId) return;
+		if (view.state.binding.sessionId !== view.sessionId) throw new BridgeError("INVALID_STATE", "Resolved view state belongs to another session");
+		views.set(view.viewId, view);
+		for (const job of transfers.values()) if (job.view.viewId === view.viewId && (job.view.destinationId !== view.destinationId || job.view.sessionId !== view.sessionId || job.view.draftToken !== view.draftToken) && ["uploading", "ready"].includes(job.status?.phase ?? "")) {
+			track(cancel(job)).catch(() => {}); update(job, { error: "The original destination conversation or draft changed" });
+		}
+	}
+	function applyFinish(event: UiIntentOutcome): boolean {
+		if (outcomes.has(event.id)) return true;
+		const admitted = admittedIntents.get(event.id);
+		if (!admitted) return false;
+		if (admitted.viewId !== event.viewId || admitted.kind !== event.kind) return true;
+		admittedIntents.delete(event.id);
+		outcomes.set(event.id, event);
+		if (outcomes.size > 256) outcomes.delete(outcomes.keys().next().value!);
+		const job = attachIntents.get(event.id);
+		if (event.kind === "attach" && job) {
+			attachIntents.delete(event.id);
+			update(job, { phase: event.error ? "failed" : "attached", error: event.error });
+		}
+		if (event.kind === "resolve" && event.error && resolveIntents.get(event.viewId)?.id === event.id) { resolveIntents.delete(event.viewId); views.delete(event.viewId); }
+		return true;
+	}
+	function expireUiReceipts(): void {
+		for (const [id, intent] of admittedIntents) if (intent.expiresAt <= Date.now()) applyFinish({ id, viewId: intent.viewId, kind: intent.kind, error: "The intent expired without a confirmed result; its outcome is unknown. Nothing was replayed." });
+		for (const [key, expiresAt] of panelClosures) if (expiresAt <= Date.now()) { panelClosures.delete(key); if (panels.get(key)?.phase === "closed") panels.delete(key); }
+	}
+	async function requestIntent(owner: RpcPeer, input: UiIntentInput, signal: AbortSignal, job?: TransferJob): Promise<UiIntentReceipt> {
+		const request = {};
+		expireUiReceipts();
+		if (pendingIntents.size + admittedIntents.size >= 4096) throw new BridgeError("BUSY", "Too many outstanding UI intents");
+		pendingIntents.add(request);
+		if (input.kind === "resolve") { resolving.set(input.viewId, request); resolveIntents.delete(input.viewId); }
+		try {
+			// Attachment admission can precede its reply. Aborting this wait would
+			// discard the only correlation for a native handoff that already occurred.
+			const receipt = ReceiptSchema.parse(await owner.request("ui.intent", input, { signal: job ? undefined : signal, timeoutMs: REQUEST_TIMEOUT }));
+			if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The intent's original connection was lost");
+			if (admittedIntents.has(receipt.id) || outcomes.has(receipt.id)) throw new BridgeError("INVALID_RECEIPT", "The broker reused an existing intent receipt");
+			admittedIntents.set(receipt.id, { viewId: input.viewId, kind: input.kind, expiresAt: receipt.expiresAt });
+			if (input.kind === "resolve" && resolving.get(input.viewId) === request && !revokedResolves.has(receipt.id)) {
+				resolveIntents.set(input.viewId, { id: receipt.id, destinationId: input.destinationId });
+				const view = earlyViews.get(receipt.id);
+				if (view && view.destinationId === input.destinationId) applyView(view);
+			}
+			if (job) { job.intentId = receipt.id; attachIntents.set(receipt.id, job); update(job, { phase: "ready" }); }
+			const finished = earlyFinishes.get(receipt.id);
+			if (finished) applyFinish(finished);
+			earlyViews.delete(receipt.id); earlyFinishes.delete(receipt.id);
+			expireUiReceipts();
+			return receipt;
+		} finally {
+			pendingIntents.delete(request);
+			if (input.kind === "resolve" && resolving.get(input.viewId) === request) resolving.delete(input.viewId);
+			if (!pendingIntents.size) { earlyViews.clear(); earlyFinishes.clear(); revokedResolves.clear(); }
+		}
+	}
 	function onEvent(owner: RpcPeer, name: string, body: unknown): void {
 		if (owner !== peer || !connected) return;
 		if (name === "view.resolved") {
 			const view = ResolvedViewSchema.parse(body);
 			if (view.state.serverInstance !== serverInstance) return;
-			if (resolveIntents.get(view.viewId) !== view.resolveIntentId) return;
-			if (view.state.binding.sessionId !== view.sessionId) throw new BridgeError("INVALID_STATE", "Resolved view state belongs to another session");
-			views.set(view.viewId, view);
-			for (const job of transfers.values()) {
-				if (job.view.viewId === view.viewId && (job.view.sessionId !== view.sessionId || job.view.draftToken !== view.draftToken) && ["uploading", "ready"].includes(job.status?.phase ?? "")) {
-					track(cancel(job)).catch(() => {});
-					update(job, { error: "The original destination conversation or draft changed" });
-				}
+			if (resolveIntents.get(view.viewId)?.id === view.resolveIntentId) applyView(view);
+			else if (resolving.has(view.viewId) && !revokedResolves.has(view.resolveIntentId) && earlyViews.size < 4096) earlyViews.set(view.resolveIntentId, view);
+		} else if (name === "view.revoked") {
+			const event = RevokedViewSchema.parse(body);
+			earlyViews.delete(event.resolveIntentId);
+			if (pendingIntents.size && revokedResolves.size < 4096) revokedResolves.add(event.resolveIntentId);
+			if (resolveIntents.get(event.viewId)?.id === event.resolveIntentId) resolveIntents.delete(event.viewId);
+			if (views.get(event.viewId)?.resolveIntentId === event.resolveIntentId) views.delete(event.viewId);
+			for (const job of transfers.values()) if (job.view.destinationId === event.destinationId && ["uploading", "ready"].includes(job.status?.phase ?? "")) {
+				job.controller.abort(new BridgeError("DESTINATION_CHANGED", "The native destination draft was revoked"));
+				track(cancelRemote(job)).catch(() => {}); update(job, { phase: "failed", error: "The original destination draft or channel changed; nothing was replayed" });
 			}
+		} else if (name === "panel.state") {
+			const panel = PanelStateSchema.parse(body);
+			const key = JSON.stringify([panel.owner, panel.panelId]);
+			panels.set(key, panel);
+			if (panel.phase === "closed") panelClosures.set(key, Date.now() + 60000); else panelClosures.delete(key);
 		} else if (name === "state") {
 			const event = StateEventSchema.parse(body);
 			if (event.state.serverInstance !== serverInstance) return;
 			if (event.state.binding.sessionId !== event.sessionId) throw new BridgeError("INVALID_STATE", "State notification belongs to another session");
 			for (const [id, view] of views) if (view.sessionId === event.sessionId && (event.state.serverInstance !== view.state.serverInstance || event.state.binding.revision >= view.state.binding.revision)) views.set(id, { ...view, state: event.state });
+			for (const [id, view] of earlyViews) if (view.sessionId === event.sessionId && event.state.binding.revision >= view.state.binding.revision) earlyViews.set(id, { ...view, state: event.state });
 		} else if (name === "intent.finished") {
 			const event = FinishedEventSchema.parse(body);
-			const job = attachIntents.get(event.id);
-			if (event.kind === "attach" && job && event.viewId === job.view.viewId) {
-				attachIntents.delete(event.id);
-				update(job, { phase: event.error ? "failed" : "attached", frame: undefined, error: event.error });
-			}
+			if (!applyFinish(event) && pendingIntents.size && earlyFinishes.size < 4096) earlyFinishes.set(event.id, event);
 		}
 	}
 
@@ -364,11 +443,11 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				if (serverInstance !== undefined && registration.serverInstance !== serverInstance) {
 					if (!resettingContexts) {
 						brokerGeneration++;
-						denyInteractions(); views.clear(); resolveIntents.clear(); attachIntents.clear();
+						denyInteractions(); views.clear(); resolveIntents.clear(); attachIntents.clear(); resolving.clear(); earlyViews.clear(); earlyFinishes.clear(); revokedResolves.clear(); panels.clear(); panelClosures.clear();
 						const reason = new BridgeError("BROKER_RESTARTED", "The broker restarted; old execution contexts and draft receipts were invalidated");
 						const uploading = [...capturesInUse.values()];
 						for (const job of uploading) job.controller.abort(reason);
-						for (const job of transfers.values()) update(job, { frame: undefined, ...(job.status?.phase === "attached" || job.status?.phase === "cancelled" ? {} : { phase: "failed", error: reason.message }) });
+						for (const job of transfers.values()) if (job.status?.phase !== "attached" && job.status?.phase !== "cancelled") update(job, { phase: "failed", error: reason.message });
 						resettingContexts = Promise.all([
 							...[...ownedContexts].map(async contextId => { await runtime.disposeContext(contextId); ownedContexts.delete(contextId); }),
 							...uploading.map(job => job.done),
@@ -389,12 +468,15 @@ export async function startClientService(options: ClientServiceOptions): Promise
 			if (channel) track(channel.close()).catch(() => {});
 			if (peer !== owner) return;
 			clearTimeout(handshake); connected = false; peer = undefined; transport = undefined;
-			resolveIntents.clear(); denyInteractions();
-			for (const controller of imageRequests) controller.abort(error);
+			for (const [id, intent] of admittedIntents) applyFinish({ id, viewId: intent.viewId, kind: intent.kind, error: "Connection lost; the intent outcome is unknown. Nothing was replayed." });
+			views.clear(); resolveIntents.clear(); resolving.clear(); earlyViews.clear(); earlyFinishes.clear(); revokedResolves.clear(); denyInteractions();
+			for (const [key, panel] of panels) { panels.set(key, { ...panel, phase: "closed" }); panelClosures.set(key, Date.now() + 60000); }
+			for (const controller of clipboardRequests) controller.abort(error);
+			for (const controller of filePickerRequests) controller.abort(error);
 			for (const job of transfers.values()) if (["uploading", "ready"].includes(job.status?.phase ?? "")) {
 				job.controller.abort(error);
 				if (job.intentId) attachIntents.delete(job.intentId);
-				update(job, { phase: "failed", frame: undefined, error: "Connection lost; upload or native attachment outcome may be unknown. Nothing was replayed." });
+				update(job, { phase: "failed", error: "Connection lost; upload or native attachment outcome may be unknown. Nothing was replayed." });
 			}
 			if (!closed) reconnect = setTimeout(connect, 1000);
 		}
@@ -423,7 +505,8 @@ export async function startClientService(options: ClientServiceOptions): Promise
 			const route = new URL(request.url).pathname;
 			if (request.method === "GET" && route === "/v1/state") {
 				lastUiSeen = Date.now();
-				const snapshot: LocalUiState = { device: identity.device, connected, serverName, views: Object.fromEntries(views), transfers: [...transfers.values()].flatMap(job => job.status ? [job.status] : []), interactions: [...interactions.values()].map(item => item.request) };
+				expireUiReceipts();
+				const snapshot: LocalUiState = { device: identity.device, connected, serverName, views: Object.fromEntries(views), transfers: [...transfers.values()].flatMap(job => job.status ? [job.status] : []), interactions: [...interactions.values()].map(item => item.request), panels: [...panels.values()], outcomes: [...outcomes.values()] };
 				return Response.json(snapshot);
 			}
 			if (request.method !== "POST") return Response.json({ error: "Unknown local UI endpoint" }, { status: 404 });
@@ -432,38 +515,76 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				const input = UiIntentSchema.parse(body);
 				if (input.kind === "attach") throw new BridgeError("TRANSFER_REQUIRED", "Attachment intents are created only after verified human uploads");
 				const owner = requestPeer();
-				const receipt = ReceiptSchema.parse(await owner.request("ui.intent", input, { signal: request.signal, timeoutMs: REQUEST_TIMEOUT }));
-				if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The intent's original connection was lost");
-				if (input.kind === "resolve") resolveIntents.set(input.viewId, receipt.id);
-				return Response.json(receipt);
+				return Response.json(await requestIntent(owner, input, request.signal));
+			}
+			if (route === "/v1/panels/open" || route === "/v1/panels/publish") {
+				expireUiReceipts();
+				const input = PanelPublishSchema.parse(body);
+				const owner = requestPeer();
+				const panel = PanelStateSchema.parse(await owner.request(route === "/v1/panels/open" ? "panel.open" : "panel.publish", input, { signal: request.signal, timeoutMs: REQUEST_TIMEOUT }));
+				if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The panel's original connection was lost");
+				const key = JSON.stringify([panel.owner, panel.panelId]);
+				// A host read/close may beat the paired publish receipt. Never regress its event.
+				if (!panels.has(key)) panels.set(key, panel);
+				return Response.json(panels.get(key));
+			}
+			if (route === "/v1/panels/close") {
+				const input = PanelCloseSchema.parse(body);
+				const owner = requestPeer();
+				OkSchema.parse(await owner.request("panel.close", input, { signal: request.signal, timeoutMs: REQUEST_TIMEOUT }));
+				const key = JSON.stringify([input.owner, input.panelId]); const panel = panels.get(key);
+				if (panel) { panels.set(key, { ...panel, phase: "closed" }); panelClosures.set(key, Date.now() + 60000); }
+				return Response.json({ ok: true });
 			}
 			if (route === "/v1/captures") return Response.json(await source.capture(CaptureSchema.parse(body), request.signal));
-			if (route === "/v1/captures/image") {
-				const input = ImageCaptureSchema.parse(body);
+			if (route === "/v1/captures/pick-file") {
+				z.object({ kind: z.literal("files") }).strict().parse(body);
+				if (filePickerRequests.size) throw new BridgeError("FILE_PICKER_BUSY", "A system file chooser is already open");
+				server.timeout(request, 150);
+				const owner = requestPeer();
+				const controller = new AbortController();
+				filePickerRequests.add(controller);
+				const signal = AbortSignal.any([request.signal, controller.signal]);
+				try {
+					const selected = await chooseUploadFile(signal);
+					if (!selected) return Response.json({ cancelled: true });
+					if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original connection was lost while choosing a file");
+					return Response.json(await source.capture({ kind: "files", paths: [selected] }, signal));
+				} finally { filePickerRequests.delete(controller); }
+			}
+			if (route === "/v1/captures/clipboard") {
+				ClipboardCaptureSchema.parse(body);
 				server.timeout(request, 120);
 				const owner = requestPeer();
 				const controller = new AbortController();
-				imageRequests.add(controller);
+				clipboardRequests.add(controller);
 				const signal = AbortSignal.any([request.signal, controller.signal, AbortSignal.timeout(75000)]);
-				try {
-					const decision = await requestInteraction({ id: input.requestId ?? crypto.randomUUID(), contextId: "local-human-image", title: "Paste clipboard image to remote OMP?", message: "Read one image from this device's clipboard and upload it to the originally selected remote OMP draft. Nothing is submitted. Reject to leave the clipboard unread.", choices: [{ id: "capture-image", label: "Read image once and upload" }] }, signal);
+				async function readClipboard<T>(reader: () => Promise<T>): Promise<T> {
 					signal.throwIfAborted();
-					if (decision.choice !== "capture-image") throw new BridgeError("CAPTURE_DENIED", "Clipboard image capture was refused, expired, or has no active local approval UI; nothing was read");
-					if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original image transfer connection was lost");
-					const reading = Promise.withResolvers<ClipboardImage | null | undefined>();
+					const reading = Promise.withResolvers<T>();
 					const abort = () => reading.reject(signal.reason);
 					signal.addEventListener("abort", abort, { once: true });
-					let image;
 					try {
-						void (options.readClipboardImage ?? readImageFromClipboard)().then(reading.resolve, reading.reject);
-						image = await reading.promise;
+						void reader().then(reading.resolve, reading.reject);
+						const value = await reading.promise;
+						signal.throwIfAborted();
+						if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original clipboard transfer connection was lost");
+						return value;
 					} finally { signal.removeEventListener("abort", abort); }
+				}
+				try {
+					// The authenticated local Paste command authorizes this capture, not native tool execution.
 					signal.throwIfAborted();
-					if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original image transfer connection was lost");
-					if (!image || image.data.byteLength === 0) throw new BridgeError("NO_CLIPBOARD_IMAGE", "This device's clipboard contains no image; nothing was uploaded");
-					if (image.mimeType !== "image/png") throw new BridgeError("CLIPBOARD_IMAGE_FORMAT", "Native clipboard reader did not return PNG image bytes");
-					return Response.json(await source.captureImage(image.data, signal));
-				} finally { imageRequests.delete(controller); }
+					if (owner !== requestPeer()) throw new BridgeError("CLIENT_OFFLINE", "The original clipboard transfer connection was lost");
+					const image = await readClipboard(options.readClipboardImage ?? readImageFromClipboard);
+					if (image && image.data.byteLength > 0) {
+						if (image.mimeType !== "image/png") throw new BridgeError("CLIPBOARD_IMAGE_FORMAT", "Native clipboard reader did not return PNG image bytes");
+						return Response.json(await source.captureImage(image.data, signal));
+					}
+					const text = await readClipboard(options.readClipboardText ?? readTextFromClipboard);
+					if (text === undefined || text === null || text.length === 0) throw new BridgeError("EMPTY_CLIPBOARD", "This device's clipboard contains no text or image; nothing was pasted");
+					return Response.json({ kind: "text", text });
+				} finally { clipboardRequests.delete(controller); }
 			}
 			if (route === "/v1/captures/release") {
 				const { id } = IdSchema.parse(body);
@@ -475,14 +596,14 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				const input = TransferSchema.parse(body);
 				const owner = requestPeer();
 				const view = views.get(input.viewId);
-				if (!view || view.sessionId !== input.expectedSessionId || view.draftToken !== input.expectedDraftToken || view.resolveIntentId !== input.expectedResolveIntentId || resolveIntents.get(view.viewId) !== view.resolveIntentId) throw new BridgeError("DESTINATION_CHANGED", "The captured destination handshake no longer matches this view");
+				if (!view || view.sessionId !== input.expectedSessionId || view.draftToken !== input.expectedDraftToken || view.resolveIntentId !== input.expectedResolveIntentId || resolveIntents.get(view.viewId)?.id !== view.resolveIntentId) throw new BridgeError("DESTINATION_CHANGED", "The captured destination handshake no longer matches this view");
 				if (capturesInUse.has(input.captureId)) throw new BridgeError("CAPTURE_BUSY", "This snapshot is already being transferred");
 				const ready = Promise.withResolvers<TransferStatus>();
 				const job: TransferJob = { captureId: input.captureId, view: Object.freeze({ ...view }), peer: owner, controller: new AbortController(), done: Promise.resolve() };
 				source.claim(input.captureId);
 				capturesInUse.set(input.captureId, job);
 				job.done = track(upload(job, ready));
-				void job.done.catch(error => { ready.reject(error); update(job, { phase: "failed", frame: undefined, error: error instanceof Error ? error.message : String(error) }); });
+				void job.done.catch(error => { ready.reject(error); update(job, { phase: "failed", error: error instanceof Error ? error.message : String(error) }); });
 				return Response.json(await ready.promise);
 			}
 			if (route === "/v1/transfers/cancel") {
@@ -510,7 +631,8 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	function close(): Promise<void> {
 		return closing ??= (async () => {
 			closed = true; connected = false; clearTimeout(reconnect); clearTimeout(handshake); denyInteractions();
-			for (const controller of imageRequests) controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
+			for (const controller of clipboardRequests) controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
+			for (const controller of filePickerRequests) controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
 			for (const waiter of [...connectionWaiters]) waiter.reject(new BridgeError("CLIENT_CLOSED", "The client service closed before a connection became ready"));
 			for (const job of capturesInUse.values()) job.controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
 			peer?.close();

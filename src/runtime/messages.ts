@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 import { z } from "zod";
 import type { InteractionDecision, InteractionRequest } from "../api.ts";
-import type { Capability, ExecuteRequest, ToolResult } from "../protocol.ts";
-import { CapabilitySchema, ExecuteRequestSchema, IdentifierSchema, InteractionRequestSchema, ToolResultSchema } from "../schemas.ts";
+import type { ExecuteRequest, ToolResult } from "../protocol.ts";
+import { ExecuteRequestSchema, IdentifierSchema, InteractionRequestSchema, ToolResultSchema } from "../schemas.ts";
 import { RuntimeEnvironmentSchema, type RuntimeEnvironment } from "./environment.ts";
 
 export type WorkerInput =
-	| { type: "init"; cwd: string; stateDir: string; owner: string; contextId: string; capabilities: readonly Capability[]; hasInteractions: boolean }
+	| { type: "init"; cwd: string; stateDir: string; owner: string; contextId: string; agentDir: string; configFiles: string[]; hasInteractions: boolean }
 	| { type: "execute"; request: ExecuteRequest }
 	| { type: "abort"; requestId: string }
 	| { type: "interaction"; id: string; decision: InteractionDecision }
@@ -26,7 +26,7 @@ export type WorkerOutput =
 const InteractionDecisionSchema: z.ZodType<InteractionDecision> = z.object({ choice: z.string().nullable() });
 
 export const WorkerInputSchema: z.ZodType<WorkerInput> = z.discriminatedUnion("type", [
-	z.object({ type: z.literal("init"), cwd: z.string().min(1), stateDir: z.string().min(1), owner: IdentifierSchema, contextId: IdentifierSchema, capabilities: z.array(CapabilitySchema), hasInteractions: z.boolean() }),
+	z.object({ type: z.literal("init"), cwd: z.string().min(1), stateDir: z.string().min(1), owner: IdentifierSchema, contextId: IdentifierSchema, agentDir: z.string().min(1), configFiles: z.array(z.string().min(1)), hasInteractions: z.boolean() }),
 	z.object({ type: z.literal("execute"), request: ExecuteRequestSchema }),
 	z.object({ type: z.literal("abort"), requestId: IdentifierSchema }),
 	z.object({ type: z.literal("interaction"), id: IdentifierSchema, decision: InteractionDecisionSchema }),

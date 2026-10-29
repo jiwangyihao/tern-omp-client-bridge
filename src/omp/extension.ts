@@ -8,6 +8,8 @@ import { DraftBridge } from "./draft.ts";
 import { parameters, routeTool, withTarget } from "./routing.ts";
 import { nativeMetadata, type NativeMetadata } from "./native-metadata.ts";
 import { BackgroundDelivery } from "./background.ts";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { NativeAttachmentEditor } from "./native-attachment-editor.ts";
 
 const TOOL_NAMES: Record<ToolName, true> = { eval: true, bash: true, read: true, write: true, edit: true, grep: true, glob: true };
 
@@ -17,7 +19,7 @@ export interface ExecutionIdentity {
 }
 
 
-const MISSING_SESSION_POLICY = "Client bridge did not receive this session's scoped Settings from the native extension lifecycle. Start/reload the extension through OMP session_start/session_switch; global or same-directory sibling policies are not accepted.";
+const MISSING_SESSION_POLICY = "Client bridge did not receive this session's scoped Settings from the native extension lifecycle. Start/reload the extension through OMP session_start/session_switch/session_branch; global or same-directory sibling policies are not accepted.";
 
 export function executionIdentity(ctx: Pick<ExtensionContext, "sessionManager" | "localProtocolOptions" | "agent">): ExecutionIdentity {
 	const ownSessionId = ctx.sessionManager.getSessionId();
@@ -38,6 +40,9 @@ export function bindingDescription(state: ServerState): string {
 
 /** Public factory is also the DI seam for isolated SDK sessions and transport tests. */
 export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void {
+	if (Settings !== api.pi.Settings) {
+		throw new BridgeError("host_sdk_mismatch", "Client bridge loaded a different Settings module than the active OMP host. Load this extension through OMP's native extension loader so config/settings resolves to the host SDK; refusing to use a package-local approval scope.");
+	}
 	const registered = new Set<string>();
 	const owned = new Map<string, ExecutionIdentity>();
 	let draft: DraftBridge | undefined;
@@ -49,6 +54,7 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	const retiredInstances = new Set<string>();
 	let activation = 0;
 	let closed = false;
+	let attachmentEditorInstalled = false;
 	let metadata: Record<ToolName, NativeMetadata> | undefined;
 	let sessionPolicy: { sessionId: string; settings: Settings } | undefined;
 	const background = new BackgroundDelivery(api, () => closed ? undefined : activeIdentity, owned);
@@ -88,13 +94,13 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 				description: `${native.description}\n${execution ? 'Optional target: "agent" (default) or "client" (the manually bound device); target is fixed for the entire invocation.' : 'Explicit client:// paths and bridge-owned artifact/proc handles route to their client. Other paths retain native agent-host behavior.'}`,
 				parameters: execution ? withTarget(native.parameters) : native.parameters,
 				async execute(_id, input, signal, onUpdate, ctx) {
-					if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId()) throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
 					const route = routeTool(name, parameters(input));
 					if (!route.client) {
 						if (!ctx.invokeTool) throw new BridgeError("native_delegate_unavailable", `OMP has no native ${name} delegation`);
 						// Native same-name dispatch retains provider metadata, bookkeeping, signals, progress.
 						return ctx.invokeTool(route.params, { signal, onUpdate });
 					}
+					if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId()) throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
 					const identity = executionIdentity(ctx);
 					owned.set(identity.contextId, identity);
 					// No agent cwd is copied to the client. Broker captures binding once per call.
@@ -108,23 +114,38 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	}
 
 	function activate(ctx: ExtensionContext): void {
+		if (closed) return;
 		const owner = ++activation;
 		const acceptState = (state: ServerState) => { if (owner === activation) stateChanged(state); };
-		if (Settings !== api.pi.Settings) {
-			throw new BridgeError("host_sdk_mismatch", "Client bridge loaded a different Settings module than the active OMP host. Load this extension through OMP's native extension loader so config/settings resolves to the host SDK; refusing to use a package-local approval scope.");
-		}
 		activeContext = ctx;
+		if (!attachmentEditorInstalled && ctx.mode === "tui" && ctx.hasUI && ctx.agent.kind === "main" && ctx.ui.supportsEditor) {
+			if (ctx.ui.getEditorText().length > 0) {
+				ctx.ui.notify("Client bridge: automatic native image paste requires a fresh empty composer; the existing draft was not replaced", "info");
+			} else if (typeof ctx.ui.setEditorComponent === "function") {
+				try {
+					ctx.ui.setEditorComponent((tui, theme) => {
+						const previous = tui.getFocused();
+						if (!(previous instanceof CustomEditor) || previous.getText().length > 0 || previous.pendingImages.length > 0 || previous.pendingTexts.length > 0) {
+							throw new Error("Automatic image paste was not installed: open a fresh empty OMP composer to preserve existing draft state");
+						}
+						return new NativeAttachmentEditor(theme);
+					});
+					attachmentEditorInstalled = true;
+				} catch (error) {
+					ctx.ui.notify(`Client bridge: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
+			} else {
+				ctx.ui.notify("Client bridge: this OMP host does not expose the native editor factory required for automatic image paste", "error");
+			}
+		}
 		// The native runner wraps lifecycle handlers in withActiveSettings. Resolve once
 		// HERE: outside that scope this SDK's cwd lookup merely selects the latest sibling.
 		const settings = findScopedSettings(ctx.cwd);
 		sessionPolicy = settings ? { sessionId: ctx.sessionManager.getSessionId(), settings } : undefined;
 		if (sessionPolicy) {
-			metadata ??= nativeMetadata(api, () => activeContext!, () => {
-				if (!sessionPolicy || sessionPolicy.sessionId !== activeContext?.sessionManager.getSessionId()) {
-					throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
-				}
-				return sessionPolicy.settings;
-			});
+			// Native approval belongs to this runner's Settings object, not the broker's
+			// conversation lease. Keep its live policy even during a conversation transition.
+			metadata ??= nativeMetadata(api, () => activeContext!, sessionPolicy.settings);
 			registerOverrides();
 		}
 		lastState = undefined;
@@ -153,13 +174,15 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 
 	api.on("session_start", (_event, ctx) => activate(ctx));
 	api.on("session_switch", (_event, ctx) => activate(ctx));
+	api.on("session_branch", (_event, ctx) => activate(ctx));
 	api.on("tool_call", (event, ctx) => {
 		if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId() && Object.hasOwn(TOOL_NAMES, event.toolName) && routeTool(event.toolName as ToolName, parameters(event.input)).client) {
 			return { block: true, reason: MISSING_SESSION_POLICY };
 		}
 	});
 	api.on("input", (event, ctx) => {
-		if (event.source === "interactive" && ctx.sessionManager.getSessionId() === draft?.identity.sessionId) draft.submitted();
+		if (event.source === "interactive" && ctx.mode === "tui" && ctx.hasUI && ctx.agent.kind === "main"
+			&& ctx.sessionManager.getSessionId() === draft?.identity.sessionId) draft.submitted();
 	});
 	api.on("context", event => {
 		if (!lastState) return;

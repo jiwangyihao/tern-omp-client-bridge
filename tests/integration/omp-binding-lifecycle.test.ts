@@ -16,6 +16,7 @@ import { startClientService, type ClientService } from "../../src/client.ts";
 import { loadClientIdentity } from "../../src/config.ts";
 import { bindingDescription, installClientBridge } from "../../src/omp/extension.ts";
 import { LocalUiStateSchema, UiIntentReceiptSchema } from "../../src/schemas.ts";
+import { eventually, nativeDraftHost } from "../fixtures/native-draft.ts";
 
 /** Real broker HTTP/watch/claims and native ExtensionRunner lifecycle; no model or desktop. */
 test("broker restart resets native visible/model binding and retired callbacks cannot restore it", async () => {
@@ -25,19 +26,23 @@ test("broker restart resets native visible/model binding and retired callbacks c
 	const settings = Settings.isolated({});
 	const manager = SessionManager.inMemory(settings.getCwd());
 	const sessionId = manager.getSessionId();
+	const native = await nativeDraftHost(manager);
 	const auth = new AuthStorage(new SqliteAuthCredentialStore(database));
 	const models = new ModelRegistry(auth, join(root, "models.yml"), { ignoreLocalModelConfig: true, cacheDbPath: join(root, "models.db"), settings });
 	const clientDir = join(root, "client");
-	const identity = await loadClientIdentity(clientDir, { name: "Lifecycle fixture", capabilities: [] });
+	const identity = await loadClientIdentity(clientDir, { name: "Lifecycle fixture" });
 	let server = await startBroker({ stateDir });
 	let client: ClientService | undefined;
 	const transport = new BrokerClient({ stateDir });
 	const callbacks: Array<(state: ServerState) => void> = [];
+	const claims = new Map<string, ServerState>();
+	const finished = new Map<string, string | undefined>();
 	const broker: BrokerApi = {
 		state: id => transport.state(id),
 		invoke: (...args) => transport.invoke(...args),
-		claimIntent: (...args) => transport.claimIntent(...args),
-		finishIntent: (...args) => transport.finishIntent(...args),
+		openDraft: (...args) => transport.openDraft(...args),
+		claimIntent: async (...args) => { const claim = await transport.claimIntent(...args); claims.set(claim.id, claim.state); return claim; },
+		finishIntent: async (id, error) => { await transport.finishIntent(id, error); finished.set(id, error); },
 		closeContext: (...args) => transport.closeContext(...args),
 		close: () => transport.close(),
 		watch(id, onState, onError, onBackground) {
@@ -61,9 +66,9 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		getSessionName: () => undefined, setSessionName: unused,
 	};
 	runner.initialize(actions, { getModel: () => undefined, isIdle: () => true, abort: unused, hasPendingMessages: () => false, shutdown: unused, getContextUsage: () => undefined, compact: unused, getSystemPrompt: () => [] }, undefined, {
-		...runner.getUIContext(),
+		...native.ui,
 		setStatus: (_key, value) => { status = value; for (const notify of statusWaiters) notify(); },
-	});
+	}, "tui");
 	runner.onError(error => { errors.push(error.error); });
 	async function visible(state: ServerState) {
 		const expected = bindingDescription(state);
@@ -87,12 +92,13 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		const response = await fetch(client.endpoint.url + "/v1/intents", { method: "POST", headers: { authorization: `Bearer ${client.endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
 		expect(response.ok).toBe(true);
 		const receipt = UiIntentReceiptSchema.parse(await response.json());
-		const claim = await transport.claimIntent(receipt.id, sessionId, "fixture-draft");
-		await transport.finishIntent(receipt.id);
-		return claim.state;
+		await eventually(() => finished.has(receipt.id), Boolean);
+		expect(finished.get(receipt.id)).toBeUndefined();
+		return claims.get(receipt.id)!;
 	}
 	async function resolveViewer() {
-		const resolved = await intent({ kind: "resolve", viewId: "fixture-view" });
+		const destinationId = await eventually(native.destinationId, id => id !== undefined);
+		const resolved = await intent({ kind: "resolve", viewId: "fixture-view", destinationId });
 		// The state endpoint is the same real API used by Tern. Wait for its
 		// independently delivered view before submitting the binding intent.
 		const signal = AbortSignal.timeout(10000);
@@ -103,20 +109,40 @@ test("broker restart resets native visible/model binding and retired callbacks c
 			signal.throwIfAborted();
 		}
 	}
+	async function bindViewer() {
+		if (!client) throw new Error("Viewer not connected");
+		const state = LocalUiStateSchema.parse(await (await fetch(client.endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${client.endpoint.token}` } })).json());
+		const view = state.views["fixture-view"];
+		if (!view) throw new Error("Native draft has not resolved");
+		return intent({ kind: "bind", viewId: view.viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientId: identity.device.id, expectedRevision: 0 });
+	}
 	try {
 		await startViewer();
 		await runner.emit({ type: "session_start" });
 		const initial = await resolveViewer();
+		const firstDestination = native.destinationId();
+		if (!firstDestination) throw new Error("Native draft destination was not published");
 		await visible(initial);
-		const old = await intent({ kind: "bind", viewId: "fixture-view", sessionId, clientId: identity.device.id, expectedRevision: 0 });
+		const old = await bindViewer();
 		expect(old.serverInstance).toBe(initial.serverInstance);
 		expect(old.binding.revision).toBe(1);
 		await visible(old);
 		const firstCallback = callbacks[0]!;
 		firstCallback(initial); // Stale same-generation revision must not roll back.
 		expect(status).toBe(bindingDescription(old));
+		const oldDraft = LocalUiStateSchema.parse(await (await fetch(client!.endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${client!.endpoint.token}` } })).json()).views["fixture-view"]!;
+		await runner.emitInput("extension-authored input", undefined, "extension");
+		await resolveViewer();
+		const unchanged = LocalUiStateSchema.parse(await (await fetch(client!.endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${client!.endpoint.token}` } })).json()).views["fixture-view"]!;
+		expect(unchanged.draftToken).toBe(oldDraft.draftToken);
+		await runner.emitInput("actual interactive submission", undefined, "interactive");
+		await resolveViewer();
+		const submitted = LocalUiStateSchema.parse(await (await fetch(client!.endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${client!.endpoint.token}` } })).json()).views["fixture-view"]!;
+		expect(submitted.destinationId).toBe(firstDestination);
+		expect(submitted.draftToken).not.toBe(oldDraft.draftToken);
 		await client!.close(); client = undefined;
 		await server.close();
+		await eventually(native.destinationId, id => id === undefined);
 		server = await startBroker({ stateDir });
 		const restarted = await transport.state(sessionId);
 		expect(restarted.serverInstance).not.toBe(old.serverInstance);
@@ -129,8 +155,9 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		await visible(restarted);
 		await startViewer();
 		const newInitial = await resolveViewer();
+		expect(native.destinationId()).not.toBe(firstDestination);
 		expect(newInitial.serverInstance).toBe(restarted.serverInstance);
-		const current = await intent({ kind: "bind", viewId: "fixture-view", sessionId, clientId: identity.device.id, expectedRevision: 0 });
+		const current = await bindViewer();
 		await visible(current);
 		firstCallback(restarted);
 		expect(status).toBe(bindingDescription(current));
@@ -139,9 +166,20 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		await visible(current);
 		firstCallback({ ...initial, serverInstance: "late-unseen-owner" });
 		expect<string | undefined>(status).toBe(bindingDescription(current));
+		const previousDestination = await eventually(native.destinationId, id => id !== undefined);
+		await manager.newSession();
+		await runner.emit({ type: "session_switch", reason: "new", previousSessionFile: undefined });
+		const switched = await resolveViewer();
+		expect(native.destinationId()).not.toBe(previousDestination);
+		expect(switched.binding).toMatchObject({ sessionId: manager.getSessionId(), clientId: null, revision: 0 });
+		await visible(switched);
+		const stale = await fetch(client!.endpoint.url + "/v1/intents", { method: "POST", headers: { authorization: `Bearer ${client!.endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify({ kind: "resolve", viewId: "stale-session-view", destinationId: previousDestination }) });
+		expect(stale.ok).toBe(false);
 		expect(errors).toEqual([]);
 	} finally {
 		await runner.emit({ type: "session_shutdown" });
+		expect(native.destinationNode()).toBeUndefined();
+		native.controller.disposeComposerShapes();
 		runner.clearManagedTimers(); runner.disposeFileFallbacks();
 		transport.close();
 		await Promise.allSettled([client?.close(), server.close()]);

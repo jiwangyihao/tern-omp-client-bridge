@@ -7,7 +7,7 @@ export class SessionBindings {
 
 	connect(device: DeviceDescriptor): void {
 		if (!device.id || !device.name) throw new BridgeError("INVALID_DEVICE", "A client needs an identity and display name");
-		this.#devices.set(device.id, Object.freeze({ ...device, capabilities: Object.freeze([...device.capabilities]), online: true }));
+		this.#devices.set(device.id, Object.freeze({ ...device, online: true }));
 	}
 
 	disconnect(clientId: string): void {
@@ -45,7 +45,7 @@ export class SessionBindings {
 
 	capture(sessionId: string, contextId: string, requestId: string): InvocationTarget {
 		const state = this.state(sessionId);
-		if (state.clientId === null) throw new BridgeError("UNBOUND", "Select an authorized client in Tern before using a client operation");
+		if (state.clientId === null) throw new BridgeError("UNBOUND", "Select a client in Tern before using a client operation");
 		const device = this.#devices.get(state.clientId);
 		if (!device?.online) throw new BridgeError("CLIENT_OFFLINE", "The bound client is offline; the operation was not redirected");
 		if (!contextId || !requestId) throw new BridgeError("INVALID_INVOCATION", "An execution context and request identity are required");

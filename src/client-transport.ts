@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 import { spawn } from "node:child_process";
 import type { Endpoint } from "./config.ts";
-import { BridgeError } from "./protocol.ts";
-import { JsonLineDecoder, type WireFrame } from "./wire.ts";
+import { BridgeError, PROTOCOL_VERSION } from "./protocol.ts";
+import { JsonLineDecoder, TRANSPORT_SILENCE_TIMEOUT_MS, TransportPingSchema, type WireFrame } from "./wire.ts";
 
 export type ClientConnection =
 	| { kind: "ssh"; host: string; remoteCommand: string; sshExecutable?: string }
@@ -21,11 +21,24 @@ export function openClientTransport(connection: ClientConnection, receive: (fram
 	let stop: () => Promise<void>;
 	let write: (line: string) => Promise<void>;
 	let closing: Promise<void> | undefined;
+	let heartbeatTimer: NodeJS.Timeout | undefined;
+	const armHeartbeat = () => {
+		clearTimeout(heartbeatTimer);
+		heartbeatTimer = setTimeout(() => fail(new BridgeError("CONNECTION_LOST", "The broker stopped proving end-to-end transport liveness; operation outcomes may be unknown, nothing was replayed")), TRANSPORT_SILENCE_TIMEOUT_MS);
+	};
+	const receiveFrame = (value: unknown) => {
+		if (closed) return;
+		const ping = TransportPingSchema.safeParse(value);
+		if (!ping.success) { receive(value); return; }
+		armHeartbeat();
+		void send({ v: PROTOCOL_VERSION, kind: "event", name: "transport.pong", body: ping.data.body }).catch(fail);
+	};
 	const fail = (error: unknown) => {
 		if (closed) return;
 		closed = true;
-		disconnected(error instanceof Error ? error : new Error(String(error)));
-		void (closing ??= stop()).catch(() => {});
+		clearTimeout(heartbeatTimer);
+		try { disconnected(error instanceof Error ? error : new Error(String(error))); }
+		finally { void (closing ??= stop()).catch(() => {}); }
 	};
 	if (connection.kind === "loopback") {
 		const url = new URL(connection.endpoint.url);
@@ -39,7 +52,7 @@ export function openClientTransport(connection: ClientConnection, receive: (fram
 		socket.addEventListener("message", event => {
 			try {
 				if (typeof event.data !== "string" || Buffer.byteLength(event.data) > MAX_BYTES) throw new BridgeError("INVALID_FRAME", "Expected a bounded text protocol frame");
-				receive(JSON.parse(event.data));
+				receiveFrame(JSON.parse(event.data));
 			} catch (error) { fail(error); }
 		});
 		socket.addEventListener("error", () => fail(new BridgeError("CONNECTION_LOST", "The outbound broker connection failed")));
@@ -59,10 +72,10 @@ export function openClientTransport(connection: ClientConnection, receive: (fram
 		};
 	} else {
 		if (!connection.host || connection.host.startsWith("-") || /[\s\x00-\x1f]/.test(connection.host) || !connection.remoteCommand || connection.remoteCommand.includes("\0")) throw new BridgeError("INVALID_SSH", "Provide an SSH alias and a remote relay command");
-		const child = spawn(connection.sshExecutable ?? "ssh", ["-T", "-o", "BatchMode=yes", "-o", "ForwardAgent=no", connection.host, connection.remoteCommand], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+		const child = spawn(connection.sshExecutable ?? "ssh", ["-T", "-o", "BatchMode=yes", "-o", "ForwardAgent=no", "-o", "StrictHostKeyChecking=yes", connection.host, connection.remoteCommand], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 		const exited = Promise.withResolvers<void>();
 		let stderrBytes = 0;
-		const decoder = new JsonLineDecoder(receive, MAX_BYTES);
+		const decoder = new JsonLineDecoder(receiveFrame, MAX_BYTES);
 		child.stdout.on("data", (chunk: Buffer) => { try { decoder.push(chunk); } catch (error) { fail(error); } });
 		// Drain without exposing remote banners, usernames, commands or credentials.
 		child.stderr.on("data", (chunk: Buffer) => { stderrBytes = Math.min(MAX_BYTES, stderrBytes + chunk.byteLength); });
@@ -82,25 +95,29 @@ export function openClientTransport(connection: ClientConnection, receive: (fram
 		};
 		stop = async () => {
 			child.stdin.destroy();
+			// Inherited remote pipes must not keep local shutdown waiting after SSH exits.
+			child.stdout.destroy(); child.stderr.destroy();
 			if (child.exitCode === null && child.signalCode === null) child.kill();
 			const force = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 2000);
 			try { await exited.promise; } finally { clearTimeout(force); }
 		};
 	}
+	function send(frame: WireFrame): Promise<void> {
+		if (closed) return Promise.reject(new BridgeError("CONNECTION_LOST", "The outbound transport is closed"));
+		const line = JSON.stringify(frame);
+		const bytes = Buffer.byteLength(line) + 1;
+		if (bytes > MAX_BYTES || queuedBytes + bytes > MAX_BYTES) {
+			const error = new BridgeError("BACKPRESSURE", "Outbound frames exceeded the bounded transport queue");
+			fail(error); return Promise.reject(error);
+		}
+		queuedBytes += bytes;
+		const sent = writes.then(() => { if (closed) throw new BridgeError("CONNECTION_LOST", "The outbound transport closed"); return write(line); });
+		writes = sent.then(() => { queuedBytes -= bytes; }, error => { queuedBytes -= bytes; fail(error); });
+		return sent;
+	}
+	armHeartbeat();
 	return {
-		send(frame) {
-			if (closed) return Promise.reject(new BridgeError("CONNECTION_LOST", "The outbound transport is closed"));
-			const line = JSON.stringify(frame);
-			const bytes = Buffer.byteLength(line) + 1;
-			if (bytes > MAX_BYTES || queuedBytes + bytes > MAX_BYTES) {
-				const error = new BridgeError("BACKPRESSURE", "Outbound frames exceeded the bounded transport queue");
-				fail(error); return Promise.reject(error);
-			}
-			queuedBytes += bytes;
-			const sent = writes.then(() => { if (closed) throw new BridgeError("CONNECTION_LOST", "The outbound transport closed"); return write(line); });
-			writes = sent.then(() => { queuedBytes -= bytes; }, error => { queuedBytes -= bytes; fail(error); });
-			return sent;
-		},
-		close() { closed = true; return closing ??= stop(); },
+		send,
+		close() { closed = true; clearTimeout(heartbeatTimer); return closing ??= stop(); },
 	};
 }

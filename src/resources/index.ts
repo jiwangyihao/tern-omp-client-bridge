@@ -63,7 +63,7 @@ export class ClientResources {
 			}
 		}
 		// Keep registry ownership immutable even if an invoker mutates its input object.
-		target = Object.freeze({ ...target, device: Object.freeze({ ...target.device, capabilities: Object.freeze([...target.device.capabilities]) }) });
+		target = Object.freeze({ ...target, device: Object.freeze({ ...target.device }) });
 		const platform = target.device.platform;
 		if (request.tool === "edit") {
 			if (typeof params.input !== "string") throw new BridgeError("INVALID_CLIENT_EDIT", "Client edits require the native hashline input form.");

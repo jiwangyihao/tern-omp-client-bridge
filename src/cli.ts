@@ -4,22 +4,36 @@ import path from "node:path";
 import { z } from "zod";
 import { assertSupportedRuntime, defaultStateDir, loadClientIdentity } from "./config.ts";
 import { BridgeError } from "./protocol.ts";
-import type { Capability } from "./protocol.ts";
 import { startBroker } from "./broker.ts";
 import { startClientService } from "./client.ts";
 import { runRelay } from "./relay.ts";
 import { installOmp, installTern } from "../scripts/install.ts";
+import { setup, setupAgent, setupRegistration } from "./setup.ts";
+import { ensureManagedService, runManagedService } from "./setup-managed.ts";
 
 const HELP = `Usage: tern-omp-bridge COMMAND [OPTIONS]
 
+  setup --host SSH_ALIAS --plugin-data PATH --package-root PATH
+        [--remote-root POSIX_PATH] [--agent-dir POSIX_PATH] [--tern-dir POSIX_PATH]
+        [--tern-executable ABSOLUTE_LOCAL_PATH] [--tern-pane-socket ABSOLUTE_LOCAL_PATH]
   server [--state-dir PATH] [--port N]
   relay [--state-dir PATH]
-  client --host SSH_ALIAS --allow files,exec,computer,browser,adb|none
+  client --host SSH_ALIAS
          [--name NAME] [--state-dir PATH] [--cwd PATH]
          [--remote-command COMMAND]
-  install-omp [--target AGENT_DIRECTORY]
-  install-tern [--target TERN_DIRECTORY] [--control-file PATH]
+  install-omp [--target AGENT_DIRECTORY] [--state-dir PATH]
+  install-tern [--target TERN_DIRECTORY] [--control-file PATH] [--tern-executable ABSOLUTE_PATH]
+               [--tern-pane-socket ABSOLUTE_LOCAL_PATH]
   help | --help | -h
+
+The normal flow is Tern's consented Set up Bridge command, which invokes setup.
+Setup provisions private compatible runtimes/packages and owned detached services;
+manual session binding authorizes client tools under native policy and OS permissions.
+It never installs globally, bypasses SSH host trust, or restarts OMP sessions.
+--remote-root isolates remote broker/runtime/package state; --agent-dir and
+--tern-dir isolate native host installations. All three overrides are remote
+absolute POSIX paths. A connected client is awaiting_session until a real view
+handshake; plugin-data/setup-state.json contains bounded public progress.
 
 Install this package on BOTH the client device and agent host. Run server on
 that host; its authenticated loopback endpoint is required by relay and OMP.
@@ -28,13 +42,20 @@ The user must establish/trust the SSH host key before starting client. Client
 uses outbound SSH without agent forwarding; default remote command is
 "tern-omp-bridge relay". An offline client does not replay operations.
 
---allow is required on every client start; none enables human transfers only.
 Ports must be integers from 1 to 65535; omission selects an ephemeral port.
-Long-running commands stop on stdin EOF or SIGINT/SIGTERM.
+Foreground server/client/relay commands stop on stdin EOF or SIGINT/SIGTERM.
 
-install-omp writes only extensions/tern-omp-client-bridge/index.ts under the
-native OMP agent directory (or --target). Keep this package installed there.
-install-tern copies the actual plugin and merges only its controlFile setting.
+install-omp verifies its candidate with the installed omp executable on PATH in
+an isolated, no-prompt host before replacing extensions/tern-omp-client-bridge/index.ts
+under the native OMP agent directory (or --target). Keep this package installed.
+It never activates bridge lifecycle handlers, contacts the broker, or restarts an existing OMP.
+install-tern copies the plugin and merges connection metadata plus this machine's
+absolute Tern CLI path and native daemon socket. --tern-executable overrides
+executable discovery; --tern-pane-socket sets the native control route explicitly.
+Setup's local overrides are never forwarded to the remote host. An isolated
+--target needs an explicit socket before its window plugin can initialize PiP.
+Run install-tern on the client AND the remote Tern host: the right-side Bridge
+panel is a native host block, while its controls and clipboard stay on the client.
 --target isolates BOTH Tern config and plugin data beneath that directory;
 without it the native platform config/state directories are used.
 --control-file defaults to the local bridge state directory's client.json,
@@ -46,11 +67,15 @@ never install/start background services or change unrelated settings.
 const OPTIONS: Record<string, readonly string[]> = {
 	server: ["state-dir", "port"],
 	relay: ["state-dir"],
-	client: ["host", "allow", "name", "state-dir", "cwd", "remote-command"],
-	"install-omp": ["target"],
-	"install-tern": ["target", "control-file"],
+	client: ["host", "name", "state-dir", "cwd", "remote-command"],
+	"install-omp": ["target", "state-dir"],
+	"install-tern": ["target", "control-file", "tern-executable", "tern-pane-socket"],
+	setup: ["host", "plugin-data", "package-root", "remote-root", "agent-dir", "tern-dir", "tern-executable", "tern-pane-socket"],
+	"setup-agent": ["remote-root", "package-root", "agent-dir", "tern-dir", "tern-executable", "tern-pane-socket"],
+	"setup-status": ["state-dir", "device-id"],
+	"managed-start": ["kind", "state-dir", "package-root", "host", "remote-command"],
+	"managed-service": ["kind", "state-dir", "package-root", "host", "remote-command"],
 };
-const CapabilitySchema = z.enum(["files", "exec", "computer", "browser", "adb"]);
 
 function argumentsFor(command: string, args: string[]): Map<string, string> {
 	const allowed = OPTIONS[command];
@@ -66,15 +91,6 @@ function argumentsFor(command: string, args: string[]): Map<string, string> {
 		result.set(key, value);
 	}
 	return result;
-}
-
-function capabilities(value: string | undefined): Capability[] {
-	if (value === undefined) throw new BridgeError("USAGE", "client requires explicit --allow capabilities or --allow none");
-	if (value === "none") return [];
-	const parsed = z.array(CapabilitySchema).nonempty().safeParse(value.split(","));
-	if (!parsed.success) throw new BridgeError("USAGE", "--allow must contain files,exec,computer,browser,adb or exactly none");
-	if (new Set(parsed.data).size !== parsed.data.length) throw new BridgeError("USAGE", "--allow contains duplicate capabilities");
-	return parsed.data;
 }
 
 interface RunningService {
@@ -124,7 +140,33 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 	const options = argumentsFor(command, args.slice(1));
 	assertSupportedRuntime();
 	const stateDir = path.resolve(options.get("state-dir") ?? defaultStateDir());
+	function required(key: string): string {
+		const value = options.get(key);
+		if (!value) throw new BridgeError("USAGE", `${command} requires --${key}`);
+		return value;
+	}
 	switch (command) {
+		case "setup": {
+			console.log(JSON.stringify(await setup({ host: required("host"), pluginData: required("plugin-data"), packageRoot: required("package-root"), remoteRoot: options.get("remote-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable"), ternPaneSocket: options.get("tern-pane-socket") })));
+			return;
+		}
+		case "setup-agent": {
+			console.log(JSON.stringify(await setupAgent({ remoteRoot: required("remote-root"), packageRoot: required("package-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable"), ternPaneSocket: options.get("tern-pane-socket") })));
+			return;
+		}
+		case "setup-status": {
+			console.log(JSON.stringify(await setupRegistration(path.resolve(required("state-dir")), required("device-id"))));
+			return;
+		}
+		case "managed-start":
+		case "managed-service": {
+			const kind = z.enum(["server", "client"]).safeParse(required("kind"));
+			if (!kind.success) throw new BridgeError("USAGE", "--kind must be server or client");
+			const managed = { kind: kind.data, stateDir: path.resolve(required("state-dir")), packageRoot: path.resolve(required("package-root")), host: options.get("host"), remoteCommand: options.get("remote-command") };
+			if (command === "managed-start") console.log(JSON.stringify(await ensureManagedService(managed)));
+			else await runManagedService(managed);
+			return;
+		}
 		case "server": {
 			const rawPort = options.get("port");
 			const port = rawPort === undefined ? undefined : Number(rawPort);
@@ -135,9 +177,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 		case "client": {
 			const host = options.get("host");
 			if (!host || host.startsWith("-") || /\s/.test(host)) throw new BridgeError("USAGE", "client requires --host with one SSH host alias");
-			const allowed = capabilities(options.get("allow"));
 			await serve(async () => {
-				const identity = await loadClientIdentity(stateDir, { capabilities: allowed, ...(options.has("name") ? { name: options.get("name")! } : {}) });
+				const identity = await loadClientIdentity(stateDir, options.has("name") ? { name: options.get("name")! } : {});
 				return startClientService({
 					identity, stateDir, serverName: host,
 					...(options.has("cwd") ? { cwd: path.resolve(options.get("cwd")!) } : {}),
@@ -158,11 +199,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 			return;
 		}
 		case "install-omp": {
-			console.log(JSON.stringify(await installOmp(options.get("target"))));
+			console.log(JSON.stringify(await installOmp(options.get("target"), options.has("state-dir") ? { stateDir } : {})));
 			return;
 		}
 		case "install-tern": {
-			console.log(JSON.stringify(await installTern({ target: options.get("target"), controlFile: options.get("control-file") })));
+			console.log(JSON.stringify(await installTern({ target: options.get("target"), controlFile: options.get("control-file"), ternExecutable: options.get("tern-executable"), ternPaneSocket: options.get("tern-pane-socket") })));
 			return;
 		}
 	}

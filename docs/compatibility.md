@@ -24,12 +24,38 @@ native WebSocket server/client case after both close events. The same case
 completed with checksum-verified Bun 1.4.3. This is why the bridge requires the
 newer runtime; it is not a reason to replace a user's native OMP/Tern installation.
 
-`bun run build` packages the source tree into `dist/`; dependencies still need
-installation with `bun install --frozen-lockfile --ignore-scripts` in the deployed
-package. Install platform dependencies on the destination machine rather than
-copying another OS's `node_modules`. The documented source-checkout workflow does
-not require a build. Installers are finite, preserve unrelated settings, and do
-not start services or reload apps. See [Usage](usage.md) for exact commands.
+`bun run build` packages the complete native plugin and source tree into `dist/`.
+The root `plugin.toml` references entries beneath `tern/`. **Set up Bridge**
+provisions a private supported runtime and frozen dependencies after explicit
+consent; dependencies are installed for the destination OS, never copied from
+another machine. Managed packages live outside Tern's watched plugin directory.
+The advanced source-checkout workflow does not require a build. Finite
+`install-omp`/`install-tern` commands only install files; the separate consented
+setup workflow installs and starts services and attempts the appropriate remote
+plugin reload. Neither path restarts active OMP sessions. See [Usage](usage.md).
+
+Unified setup supports POSIX SSH agent hosts and client launchers for macOS,
+Linux and native Windows. Trusted noninteractive SSH remains a prerequisite.
+Unsupported platforms and missing download/extraction tools fail explicitly;
+setup does not bypass host trust, OS permissions, or application sign-in.
+Windows implementation is not evidence of a real Windows initialization run.
+
+Native CLI discovery and launch are machine-local on macOS, Linux and Windows.
+Install/setup save an absolute executable path; the window plugin uses it as a
+single argv element without a shell. POSIX execute permission is checked;
+Windows paths must identify a native `.exe` with a drive-qualified or UNC root.
+Saved paths, PATH discovery and conventional installation locations support
+GUI environments without a login-shell PATH; custom locations use
+`--tern-executable`. A client's path is never reused as the agent host's path.
+Path-policy coverage is not evidence of native Windows process/GUI acceptance.
+Native control routing is also machine-local: the window child receives the
+saved `ternPaneSocket` as `TERN_PANE_SOCKET`, alongside its captured window key.
+Linux runtime-directory precedence was checked with the native CLI; macOS
+daemon forwarding was exercised without a standalone control endpoint.
+Windows socket defaults follow the documented settings-directory contract;
+native Windows process/GUI acceptance remains unverified. Isolated file
+installation does not infer a daemon endpoint from its target directory.
+
 
 The lockfile uses public npm tarball URLs while preserving pinned versions and
 integrity hashes. A fresh isolated Linux installation used those URLs with
@@ -41,14 +67,14 @@ integrity hashes. A fresh isolated Linux installation used those URLs with
 | --- | --- | --- |
 | macOS filesystem and execution | Native Bun/SDK worker, real absolute paths, per-context state. | Native runtime and broker integration have been exercised on one Mac; this does not establish multiple physical machines. |
 | Windows filesystem and execution | Native drive-letter/UNC handling, Windows file URLs/ACLs, Windows runtime path handling. | Must run native Windows Bun/SDK, not WSL. Source coverage is not a Windows process/GUI acceptance result. |
-| Other agent-host platforms | Platform state defaults and broker/relay source are present. | This does not claim all client interactive features are supported there. The bridge does not implement clipboard capture on any platform. |
+| Other agent-host platforms | Platform state defaults and broker/relay source are present. | This does not claim all client interactive features are supported there. Clipboard capture is a client-local human operation, not an agent-host clipboard tool. |
 | Native shell | Ordinary Bash uses embedded **brush/POSIX** syntax on all platforms, with per-context persistence. | It is not Windows cmd/PowerShell or WSL. Explicitly invoke a different installed shell if needed. |
 | Background/PTY | Explicit async and named native PTY services; provenance-preserving process handles. | Automatic Bash backgrounding disabled; unnamed `pty:true` errors because the execution-only worker has no TUI overlay. Service shell is reported separately. |
 | Browser | Existing native browser Eval prelude; bridge disables implicit cmux/Tern selection and reports client-owned default backend. | Actual executable/backend startup must succeed. Do not infer Chromium, CDP, relay, or app backends have identical APIs or approvals. |
 | Computer | Existing native computer Eval prelude with local confirmation and context ownership. | A real macOS desktop run exercised an owned AppKit window, input, screenshots, control release and in-flight cancellation. Windows and cross-physical-device desktop acceptance remain unproven. |
 | ADB | Installed client executable used through existing Bash/Eval; explicit `-s` selection. | Requires Android platform tools, attached/paired device, debugging authorization, and any OS driver permissions. Executable discovery is not device authorization. Physical ADB acceptance remains unproven. |
 | Native text paste | Original Tern implementation, without a bridge Paste override, classification, delay, or replay. | Native field routes already bypassed command interception. Restoring text does not verify file/bitmap paste, IME, streaming, or platform GUI acceptance. |
-| Human image attachments | Explicit image command with local approval, or selected-file drops; supported uploaded images enter native OMP paste handling. | Native paste remains untouched. PNG/JPEG/GIF/WebP paths are supported; actual clipboard/OS gestures still need platform evidence. Handoff does not certify preview completion. |
+| Human image attachments | Explicit local Paste to remote gesture, or selected-file uploads/drops; supported uploaded images enter native OMP paste handling. | The paste gesture authorizes one capture without a second Bridge dialog. Native paste and OS/tool permissions remain unchanged; actual clipboard/OS gestures still need platform evidence. Handoff does not certify preview completion. |
 | Ordinary human files | Selected-file snapshots, verified transfer, real inbox paths, published README and visible archival reminders. | Copy/archive into project storage before working. Native copied-file clipboard handling is not intercepted; cross-pane drop targeting still needs actual GUI evidence. |
 
 ## Native backend details
@@ -103,9 +129,9 @@ without submitting a model prompt.
 
 ### Browser
 
-The bridge enables the native browser prelude only when granted and uses isolated
-native configuration roots. Its reported default is `headless-chromium`, owned by
-the execution context; browser availability is initially **not probed**. Native
+The bridge exposes native browser integration according to the client's own Agent
+settings, while keeping runtime caches and execution contexts isolated.
+The default backend is context-owned `headless-chromium`; availability is initially **not probed**. Native
 Chromium or an explicitly selected supported app/CDP/relay backend must actually
 start or connect. The bridge does not silently reuse an agent-host browser,
 Tern's embedded browser, another user's profile, or another device's cookies.
@@ -121,8 +147,8 @@ those require backend-specific evidence.
 
 ### Computer and ADB
 
-An executable or capability flag is not proof of usable desktop control. The
-computer backend requires the logged-in interactive desktop, installed native
+An executable or availability flag is not proof of usable desktop control.
+The computer backend requires the logged-in interactive desktop, installed native
 support, OS permissions, and a live local human approval path. A Windows service
 session is not a substitute for that desktop. Screenshots/window handles retain
 their owner and native coordinate context; neither a binding change nor a renamed
@@ -140,17 +166,53 @@ install platform tools, accept debugging keys, or publish an unprotected ADB ser
 The native plugin requires a connected remote host, a live agent pane, and TSP
 `surface.role == "omp.session"`. Shell metadata is not the agent identity: an
 actual native OMP pane retained `program: "zsh"` and `at_prompt: true`.
-For eligible file drops and the explicit image-paste entry, the bridge resolves
+For file uploads and the explicit paste entry, the bridge resolves
 the originating OMP context before upload/handoff. Native text/image paste is
 left untouched; it is not required to pass through bridge validation. Native
 text-field/TSP edits and raw PTY input are distinct routes, which is why the
-supplemental image command does not claim to intercept every Cmd/Ctrl+V.
+supplemental command does not claim to intercept every Cmd/Ctrl+V.
 
-The approved **OMP: Paste image to remote** command/status action asks for local
-confirmation, snapshots one clipboard image, and uploads it. Dropped image files
-use the same transport. No agent clipboard tool, watcher, replacement frontend or
-host patch is introduced. Native queue/focus behavior applies after image
-handoff; there is no new atomic original-draft/preview-completion contract.
+The **Paste to remote** native plugin entry directly captures clipboard text/images
+after an explicit local gesture, without a second Bridge confirmation. **Upload file**
+separately opens the system file chooser. The checked Tern window API has no OS
+file chooser, so the local client service opens it:
+macOS `NSOpenPanel`, Windows `OpenFileDialog`, or Linux `zenity`/`kdialog`.
+Only the authenticated local human endpoint exposes this operation; it is not an
+agent tool. macOS dialog display and request-abort cleanup were exercised;
+Windows/Linux native dialog behavior remains unverified. No replacement frontend
+or host patch is introduced. Native queue/focus behavior
+applies after image handoff; there is no new atomic preview-completion contract.
+
+The window-status summary opens a true host-defined Bridge Block in a background
+temporary tab with `focus=false`, then uses the window-side `layout.float` API
+with `focus=false` to place that exact pane over the saved OMP owner. The host
+must have the block installed. There is no intermediate visible-tab switch,
+transient split, tiled-tree resize or snapshot/restore of another viewer's layout.
+Tern 0.9.7 headless probes with real plugin callbacks preserved a nested,
+nonuniform original tree on both the local host and an isolated remote loopback
+host; the temporary tab disappeared after floating. Native visual acceptance
+is separate from these headless layout results.
+
+One-time native `tern ctl pip resize` initializes 240×360 logical-pixel glance
+and 360×540 focus dimensions, subject to native frame constraints, followed by
+`tern ctl pip focus`. Both commands run locally with the captured native window
+key explicitly supplied as `TERN_WINDOW_KEY`; this is not a `--window` flag or
+a remote daemon command. Before each dispatch, the plugin rechecks the current
+tab, OMP session/host and owner, then resolves the owned pane and owner in the
+current tab's ordered float list to a quoted `"#N"` ordinal. SDK aliases are not
+converted to raw CLI pane IDs. There is no exact-ID size setter or atomic
+check-and-mutate guarantee: a tab or float-order change after the final check
+can redirect the command. The user explicitly accepted that small check/dispatch
+race. Window-key scoping prevents selecting a different native window, not this
+within-window race. Native process failures are reported, and unknown outcomes
+are not retried. Later user sizing is preserved; there is no permanent size lock,
+polling resize or geometry enforcement on heartbeat.
+
+Opening and closing panes changes shared session layout. Local actions remain
+owned by the originating window and keep the original OMP target while its panel
+is focused. Missing owner heartbeats expire the shared display snapshot; closing
+the panel does not cancel an admitted upload. Rail/floating-margin rendering and
+native click routing still require actual GUI acceptance.
 
 The 0.8.4 drop request has no explicit hovered destination-pane ID. The source
 uses the focused eligible remote pane; real GUI evidence must establish its drop

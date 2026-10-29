@@ -27,7 +27,8 @@ test("bundled OMP host retains native validation while accepting only the two ex
 	});
 	const cli = fileURLToPath(new URL("../../node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", import.meta.url));
 	const fixture = fileURLToPath(new URL("../fixtures/host-parameters-probe.ts", import.meta.url));
-	const child = Bun.spawn([process.execPath, cli, "--mode", "rpc", "--model", "openai/gpt-4o-mini", "--no-session", "--no-skills", "--no-extensions", "--no-rules", "--no-lsp", "--no-title", "-e", fixture], {
+	const command = process.env.BRIDGE_TEST_OMP ? [process.env.BRIDGE_TEST_OMP] : [process.execPath, cli];
+	const child = Bun.spawn([...command, "--mode", "rpc", "--model", "openai/gpt-4o-mini", "--no-session", "--no-skills", "--no-extensions", "--no-rules", "--no-lsp", "--no-title", "-e", fixture], {
 		cwd: root, env: environment, stdin: "pipe", stdout: "pipe", stderr: "pipe", timeout: 40000,
 	});
 	try {

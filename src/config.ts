@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { ClientIdentitySchema, DeviceDescriptorSchema, EndpointSchema } from "./schemas.ts";
-import { BridgeError, PROTOCOL_VERSION, type Capability, type DeviceDescriptor } from "./protocol.ts";
+import { BridgeError, PROTOCOL_VERSION, type DeviceDescriptor } from "./protocol.ts";
 
 const runFile = promisify(execFile);
 export interface Endpoint { readonly url: string; readonly token: string; readonly pid?: number }
@@ -80,7 +80,7 @@ export function publicKeyId(publicKey: string): string {
 }
 
 function identityPayload(challenge: string, device: DeviceDescriptor): Buffer {
-	return Buffer.from(JSON.stringify([PROTOCOL_VERSION, challenge, device.id, device.name, device.platform, device.arch, [...device.capabilities].sort()]));
+	return Buffer.from(JSON.stringify([PROTOCOL_VERSION, challenge, device.id, device.name, device.platform, device.arch]));
 }
 
 export function signIdentity(challenge: string, identity: ClientIdentity): string {
@@ -92,7 +92,7 @@ export function verifyIdentity(challenge: string, device: DeviceDescriptor, publ
 	catch { return false; }
 }
 
-export async function loadClientIdentity(stateDir: string, options: { name?: string; capabilities?: readonly Capability[] } = {}): Promise<ClientIdentity> {
+export async function loadClientIdentity(stateDir: string, options: { name?: string } = {}): Promise<ClientIdentity> {
 	const file = path.join(stateDir, "identity.json");
 	let identity: ClientIdentity;
 	try {
@@ -100,13 +100,12 @@ export async function loadClientIdentity(stateDir: string, options: { name?: str
 		if (publicKeyId(identity.publicKey) !== identity.device.id) throw new BridgeError("INVALID_IDENTITY", "Client identity file is inconsistent");
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-		if (!options.capabilities) throw new BridgeError("AUTHORIZATION_REQUIRED", "Choose client capabilities explicitly with --allow before enabling this device");
 		const pair = generateKeyPairSync("ed25519");
 		const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
 		const privateKey = pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-		identity = { device: DeviceDescriptorSchema.parse({ id: publicKeyId(publicKey), name: options.name ?? os.hostname(), platform: process.platform, arch: process.arch, capabilities: [...options.capabilities] }), publicKey, privateKey };
+		identity = { device: DeviceDescriptorSchema.parse({ id: publicKeyId(publicKey), name: options.name ?? os.hostname(), platform: process.platform, arch: process.arch }), publicKey, privateKey };
 	}
-	const device = DeviceDescriptorSchema.parse({ ...identity.device, name: options.name ?? identity.device.name, capabilities: options.capabilities ?? identity.device.capabilities });
+	const device = DeviceDescriptorSchema.parse({ ...identity.device, name: options.name ?? identity.device.name });
 	identity = { ...identity, device };
 	if (!verifyIdentity("identity-file-check", device, identity.publicKey, signIdentity("identity-file-check", identity))) throw new BridgeError("INVALID_IDENTITY", "Client private and public keys do not match");
 	await writePrivateJson(file, identity);

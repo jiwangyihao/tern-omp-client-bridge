@@ -1,0 +1,117 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+/* Shared native setup surface. Tokens follow light, dark and contrast themes. */
+[data-surface='plugin.omp-bridge-setup.panel'],
+[data-surface='plugin.omp-client-bridge.setup'] {
+  --tv-font: var(--sans);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--t1);
+}
+.sf-main[data-surface='plugin.omp-bridge-setup.panel'],
+.sf-main[data-surface='plugin.omp-client-bridge.setup'] { padding: 12px; gap: 10px; min-width: 0; }
+
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-header'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-header'] { align-items: center; gap: 8px; min-height: 26px; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-header'] > .sf-text,
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-header'] > .sf-text { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+[data-surface='plugin.omp-bridge-setup.panel'] .sf-icon,
+[data-surface='plugin.omp-client-bridge.setup'] .sf-icon,
+[data-surface='plugin.omp-bridge-setup.panel'] .sf-icon .ico,
+[data-surface='plugin.omp-client-bridge.setup'] .sf-icon .ico { width: 14px; height: 14px; flex-shrink: 0; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-header'] > .sf-icon,
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-header'] > .sf-icon { color: var(--accent-ink); }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-subtitle'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-subtitle'] { margin-top: -6px; font-size: 12px; color: var(--t2); }
+
+/* Identity stays unboxed; only the disclosed host picker gets an inset fill. */
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-target'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-target'] { padding: 4px 0 10px; gap: 3px; border-bottom: 1px solid var(--l2); }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-target-heading'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-target-heading'] { align-items: center; gap: 8px; min-width: 0; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-target-heading'] > .sf-text,
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-target-heading'] > .sf-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-target-meta'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-target-meta'] { color: var(--t3); font-size: 11px; overflow-wrap: anywhere; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-hosts'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-hosts'] { padding: 4px; gap: 2px; background: var(--l1); border-radius: var(--r-ctl); min-width: 0; }
+
+/* main.ssh remains a direct child so native field identity never changes. */
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-form'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-form'] { gap: 4px; align-items: center; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-label'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-label'] { font-size: 11px; color: var(--t2); }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-form'] + [data-role='setup-ssh'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-form'] + [data-role='setup-ssh'] { margin-top: -6px; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-ssh'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-ssh'] {
+  min-width: 0; min-height: 32px; padding: 0 9px; border: 1px solid var(--l3); border-radius: var(--r-chip);
+  background: var(--card); color: var(--t1); font-family: var(--mono); font-size: 12px; box-shadow: none;
+}
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-ssh'].focused,
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-ssh'].focused {
+  border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; background: var(--card); box-shadow: none;
+}
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-ssh'][aria-readonly='true'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-ssh'][aria-readonly='true'] { color: var(--t2); background: var(--l1); border-color: var(--l2); }
+
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-actions'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-actions'] { align-items: center; flex-wrap: wrap; gap: 6px; }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-action,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-action {
+  display: flex; align-items: center; gap: 6px; flex: 0 1 auto; align-self: flex-start; min-width: 0; max-width: 100%;
+  min-height: 28px; padding: 5px 8px; border: 1px solid transparent; border-radius: var(--r-chip);
+  color: var(--t2); background: transparent; font-family: var(--sans); font-size: 12px; line-height: 1.35;
+  text-align: left; cursor: pointer;
+}
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-action .sf-text,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-action .sf-text { min-width: 0; font: inherit; overflow-wrap: anywhere; }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-action:hover,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-action:hover { background: var(--l1); color: var(--t1); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-action:active,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-action:active { background: var(--l2); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-primary,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-primary {
+  color: var(--accent-ink); background: rgb(from var(--accent) r g b / 12%);
+  border-color: rgb(from var(--accent) r g b / 24%); font-weight: 600;
+}
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-primary:hover,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-primary:hover { color: var(--accent-ink); background: rgb(from var(--accent) r g b / 18%); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-primary:active,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-primary:active { background: rgb(from var(--accent) r g b / 24%); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-secondary,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-secondary { color: var(--t2); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-quiet,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-quiet { min-height: 24px; padding: 3px 5px; color: var(--t3); font-size: 11px; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-header'] .setup-quiet,
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-header'] .setup-quiet,
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-target-heading'] .setup-quiet,
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-target-heading'] .setup-quiet { flex: 0 0 auto; align-self: center; margin-left: auto; }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-host-option,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-host-option { align-self: stretch; width: 100%; padding: 7px 8px; color: var(--t1); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-host-option .sf-col,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-host-option .sf-col { gap: 2px; min-width: 0; }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-host-option .sf-t-muted,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-host-option .sf-t-muted { font-size: 11px; color: var(--t3); }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-action:focus-visible,
+[data-surface='plugin.omp-client-bridge.setup'] .setup-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-action[aria-disabled='true'],
+[data-surface='plugin.omp-client-bridge.setup'] .setup-action[aria-disabled='true'] { color: var(--t3); background: transparent; border-color: transparent; cursor: default; }
+[data-surface='plugin.omp-bridge-setup.panel'] .setup-primary[aria-disabled='true'],
+[data-surface='plugin.omp-client-bridge.setup'] .setup-primary[aria-disabled='true'] { background: var(--l1); border-color: var(--l2); }
+
+/* Approval is a compact, complete scope list, not another card. */
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-consent'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-consent'] { gap: 8px; min-width: 0; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-scope-row'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-scope-row'] { align-items: flex-start; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; overflow-wrap: anywhere; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-message'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-message'] { color: var(--t2); font-size: 12px; overflow-wrap: anywhere; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-error'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-error'] { padding: 2px 0 2px 9px; border-left: 2px solid var(--bad); font-size: 12px; overflow-wrap: anywhere; }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-footer'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-footer'] { padding-top: 8px; border-top: 1px solid var(--l2); gap: 6px; font-size: 11px; color: var(--t3); }
+[data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-progress'],
+[data-surface='plugin.omp-client-bridge.setup'] [data-role='setup-progress'] { font-size: 11px; color: var(--t2); }
+.sf-dock[data-surface='plugin.omp-bridge-setup.panel'],
+.sf-dock[data-surface='plugin.omp-client-bridge.setup'] { padding: 0; border: 0; }

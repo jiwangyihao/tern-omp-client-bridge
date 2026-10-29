@@ -5,5 +5,5 @@ export { startClientService } from "./client.ts";
 export { OmpRuntime } from "./runtime/index.ts";
 export { installClientBridge } from "./omp/extension.ts";
 export { loadClientIdentity, defaultStateDir } from "./config.ts";
-export type { BrokerApi, BackgroundResult, LocalUiState, ServerState } from "./api.ts";
-export type { Capability, DeviceDescriptor, ExecuteRequest, ExecutionOptions, Executor, InvocationTarget, ToolResult } from "./protocol.ts";
+export type { BrokerApi, BackgroundResult, DraftChannel, DraftDestination, DraftIntent, UiIntentOutcome, LocalUiState, ServerState } from "./api.ts";
+export type { DeviceDescriptor, ExecuteRequest, ExecutionOptions, Executor, InvocationTarget, ToolResult } from "./protocol.ts";

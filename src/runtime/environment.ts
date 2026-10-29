@@ -15,8 +15,8 @@ export interface RuntimeEnvironment {
 	};
 	readonly serviceShell: { readonly executable: string; readonly args: readonly string[]; readonly prefix?: string };
 	readonly adb: { readonly executable: string | null; readonly available: boolean; readonly deviceAccess: "not-probed"; readonly requirement: string };
-	readonly browser: { readonly defaultBackend: "headless-chromium"; readonly availability: "not-probed"; readonly ownership: "context"; readonly requirement: string };
-	readonly computer: { readonly availability: "not-probed"; readonly requirement: string };
+	readonly browser: { readonly defaultBackend: "headless-chromium"; readonly availability: "not-probed" | "disabled"; readonly ownership: "context"; readonly requirement: string };
+	readonly computer: { readonly availability: "not-probed" | "disabled"; readonly requirement: string };
 	readonly limits: readonly string[];
 }
 
@@ -26,7 +26,7 @@ export const RuntimeEnvironmentSchema: z.ZodType<RuntimeEnvironment> = z.object(
 	ordinaryShell: z.object({ backend: z.literal("native-brush"), syntax: z.literal("POSIX"), persistence: z.literal("per-context"), automaticBackgrounding: z.literal(false) }),
 	serviceShell: z.object({ executable: z.string(), args: z.array(z.string()), prefix: z.string().optional() }),
 	adb: z.object({ executable: z.string().nullable(), available: z.boolean(), deviceAccess: z.literal("not-probed"), requirement: z.string() }),
-	browser: z.object({ defaultBackend: z.literal("headless-chromium"), availability: z.literal("not-probed"), ownership: z.literal("context"), requirement: z.string() }),
-	computer: z.object({ availability: z.literal("not-probed"), requirement: z.string() }),
+	browser: z.object({ defaultBackend: z.literal("headless-chromium"), availability: z.enum(["not-probed", "disabled"]), ownership: z.literal("context"), requirement: z.string() }),
+	computer: z.object({ availability: z.enum(["not-probed", "disabled"]), requirement: z.string() }),
 	limits: z.array(z.string()),
 });

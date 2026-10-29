@@ -31,6 +31,7 @@ export async function runRelay(options: {
 	let pendingWrites = 0;
 	let drainTimer: NodeJS.Timeout | undefined;
 	let closeTimer: NodeJS.Timeout | undefined;
+	let drainDeadline: NodeJS.Timeout | undefined;
 	const connectTimer = setTimeout(() => finish(new BridgeError("CONNECT_TIMEOUT", "Relay could not connect to the agent-host server")), 15_000);
 
 	function settle(): void {
@@ -45,11 +46,13 @@ export async function runRelay(options: {
 		finishError = error;
 		clearTimeout(connectTimer);
 		clearInterval(drainTimer);
+		clearTimeout(drainDeadline);
 		input.pause();
 		input.off("data", onData);
 		input.off("end", onEnd);
 		input.off("error", onInputError);
 		input.off("close", onInputClose);
+		if (error) { input.destroy(); output.destroy(); }
 		if (pendingWrites === 0) setImmediate(() => {
 			output.off("error", onOutputError);
 			output.off("close", onOutputClose);
@@ -89,6 +92,13 @@ export async function runRelay(options: {
 		drainTimer ??= setInterval(drain, 10);
 	}
 
+	function endDrain(): void {
+		inputEnded = true;
+		drainDeadline ??= setTimeout(() => finish(new BridgeError("DRAIN_TIMEOUT", "Relay could not drain its closing channel; operation outcomes may be unknown, nothing was replayed")), 5000);
+		waitForDrain();
+		drain();
+	}
+
 	const decoder = new JsonLineDecoder(value => {
 		const parsed = WireFrameSchema.safeParse(value);
 		if (!parsed.success) throw new BridgeError("INVALID_FRAME", "Relay stdin contained an invalid wire frame");
@@ -107,9 +117,7 @@ export async function runRelay(options: {
 	function onEnd(): void {
 		try { decoder.end(); }
 		catch (error) { finish(error instanceof Error ? error : new Error("Relay input ended mid-frame")); return; }
-		inputEnded = true;
-		waitForDrain();
-		drain();
+		endDrain();
 	}
 	function onInputError(): void { finish(new BridgeError("STDIN_FAILED", "Relay stdin failed")); }
 	function onInputClose(): void { if (!inputEnded) finish(new BridgeError("STDIN_CLOSED", "Relay stdin closed before EOF")); }
@@ -160,7 +168,7 @@ export async function runRelay(options: {
 		if (finished) { settle(); return; }
 		if (event.code !== 1000) finish(new BridgeError("CONNECTION_LOST", `Relay WebSocket closed (${event.code}); execution outcome may be unknown`));
 		else if (pendingWrites === 0) finish();
-		else { inputEnded = true; waitForDrain(); }
+		else endDrain();
 	});
 	if (options.signal?.aborted) onAbort();
 	return done.promise;

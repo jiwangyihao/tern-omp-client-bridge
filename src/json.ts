@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-import { BridgeError, type Capability, type DeviceDescriptor, type ToolResult } from "./protocol.ts";
+import { BridgeError, type DeviceDescriptor, type ToolResult } from "./protocol.ts";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -20,25 +20,13 @@ export function integer(value: unknown, label: string, min = 0): number {
 	return value;
 }
 
-const CAPABILITIES: Record<Capability, true> = { files: true, exec: true, computer: true, browser: true, adb: true };
-
-export function capabilities(value: unknown): Capability[] {
-	if (!Array.isArray(value) || value.length > 5) throw new BridgeError("INVALID_DEVICE", "Invalid capability list");
-	const seen = new Set<Capability>();
-	for (const item of value) {
-		if (typeof item !== "string" || !Object.hasOwn(CAPABILITIES, item)) throw new BridgeError("INVALID_DEVICE", "Unknown client capability");
-		seen.add(item as Capability);
-	}
-	return [...seen];
-}
-
 export function deviceDescriptor(value: unknown): DeviceDescriptor {
 	const input = record(value);
 	const id = text(input.id, "client identity", 128);
 	const name = text(input.name, "client display name", 128);
 	if (!/^[A-Za-z0-9_-]+$/.test(id) || /[\x00-\x1f\x7f]/.test(name)) throw new BridgeError("INVALID_DEVICE", "Invalid client identity or display name");
 	if (input.platform !== "darwin" && input.platform !== "win32" && input.platform !== "linux") throw new BridgeError("INVALID_DEVICE", "Unsupported platform identifier");
-	return { id, name, platform: input.platform, arch: text(input.arch, "architecture", 32), capabilities: capabilities(input.capabilities) };
+	return { id, name, platform: input.platform, arch: text(input.arch, "architecture", 32) };
 }
 
 export function toolResult(value: unknown): ToolResult {

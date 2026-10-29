@@ -6,13 +6,19 @@ import { BridgeError, PROTOCOL_VERSION } from "./protocol.ts";
 const Id = z.string().min(1).max(128);
 const Failure = z.object({ code: z.string(), message: z.string() });
 export const WireFrameSchema = z.discriminatedUnion("kind", [
-	z.object({ v: z.literal(1), kind: z.literal("request"), id: Id, seq: z.number().int().positive(), method: z.string().min(1).max(80), body: z.unknown().optional() }),
-	z.object({ v: z.literal(1), kind: z.literal("result"), id: Id, ok: z.boolean(), body: z.unknown().optional(), error: Failure.optional() }),
-	z.object({ v: z.literal(1), kind: z.literal("update"), id: Id, body: z.unknown().optional() }),
-	z.object({ v: z.literal(1), kind: z.literal("cancel"), id: Id }),
-	z.object({ v: z.literal(1), kind: z.literal("event"), name: z.string().min(1).max(80), body: z.unknown().optional() }),
+	z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("request"), id: Id, seq: z.number().int().positive(), method: z.string().min(1).max(80), body: z.unknown().optional() }),
+	z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("result"), id: Id, ok: z.boolean(), body: z.unknown().optional(), error: Failure.optional() }),
+	z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("update"), id: Id, body: z.unknown().optional() }),
+	z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("cancel"), id: Id }),
+	z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("event"), name: z.string().min(1).max(80), body: z.unknown().optional() }),
 ]);
 export type WireFrame = z.infer<typeof WireFrameSchema>;
+// Transport liveness must traverse SSH and reach the Client, not stop at the relay.
+export const TRANSPORT_PROBE_INTERVAL_MS = 15_000;
+export const TRANSPORT_PROBE_TIMEOUT_MS = 30_000;
+export const TRANSPORT_SILENCE_TIMEOUT_MS = 60_000;
+export const TransportHeartbeatSchema = z.object({ nonce: z.string().uuid() });
+export const TransportPingSchema = z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("event"), name: z.literal("transport.ping"), body: TransportHeartbeatSchema });
 export interface RpcOptions { signal?: AbortSignal; timeoutMs?: number; onUpdate?: (value: unknown) => void }
 export interface RpcContext { readonly signal: AbortSignal; update(value: unknown): void }
 export type RpcHandler = (method: string, body: unknown, context: RpcContext) => Promise<unknown>;

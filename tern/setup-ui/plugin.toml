@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MPL-2.0
+schema = 1
+id = "omp-bridge-setup"
+name = "OMP Bridge Setup"
+version = "0.3.0"
+description = "Display-only native Bridge installation sidebar"
+host = "host.luau"
+styles = ["panel.css"]
+
+[[blocks]]
+id = "panel"
+title = "Bridge Setup"
+icon = "plug"
+palette = false

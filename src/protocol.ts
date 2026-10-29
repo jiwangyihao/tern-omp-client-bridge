@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export type Platform = "darwin" | "win32" | "linux";
 export type ToolName = "read" | "write" | "edit" | "grep" | "glob" | "bash" | "eval";
-export type Capability = "files" | "exec" | "computer" | "browser" | "adb";
 export type ToolParameters = Record<string, unknown>;
 export type ToolResult = AgentToolResult<unknown>;
 
@@ -13,7 +12,6 @@ export interface DeviceDescriptor {
 	readonly name: string;
 	readonly platform: Platform;
 	readonly arch: string;
-	readonly capabilities: readonly Capability[];
 }
 
 export interface DeviceStatus extends DeviceDescriptor {

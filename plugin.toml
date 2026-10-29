@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MPL-2.0
+schema = 1
+id = "omp-client-bridge"
+name = "OMP Client Bridge"
+version = "0.5.0-beta.1"
+description = "Explicit client selection and local-human transfers for remote OMP drafts"
+host = "tern/host.luau"
+window = "tern/window.luau"
+styles = ["tern/panel.css", "tern/setup-ui/panel.css"]
+
+[[blocks]]
+id = "panel"
+title = "Bridge"
+icon = "plug"
+palette = false
+
+[[blocks]]
+id = "setup"
+title = "Bridge Setup"
+icon = "settings"
+palette = false

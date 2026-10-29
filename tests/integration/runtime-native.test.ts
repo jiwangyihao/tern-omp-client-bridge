@@ -4,20 +4,25 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectRuntimeEnvironment, OmpRuntime, type OmpRuntimeOptions } from "../../src/runtime/index.ts";
-import { BridgeError, type Capability, type DeviceDescriptor, type ExecuteRequest, type ToolName, type ToolParameters, type ToolResult } from "../../src/protocol.ts";
+import { BridgeError, type DeviceDescriptor, type ExecuteRequest, type ToolName, type ToolParameters, type ToolResult } from "../../src/protocol.ts";
 import type { InteractionDecision } from "../../src/api.ts";
 import { isRecord } from "../../src/json.ts";
 
 const fixtures: Array<{ runtime: OmpRuntime; root: string }> = [];
 const platform = process.platform;
 if (platform !== "darwin" && platform !== "win32" && platform !== "linux") throw new Error(`Unsupported test platform ${platform}`);
-const device: DeviceDescriptor = { id: "fixture-client", name: "Fixture client", platform, arch: process.arch, capabilities: ["files", "exec"] };
+const device: DeviceDescriptor = { id: "fixture-client", name: "Fixture client", platform, arch: process.arch };
 
-async function fixture(capabilities: readonly Capability[] = ["files", "exec"], onInteraction?: OmpRuntimeOptions["onInteraction"]) {
+async function fixture(onInteraction?: OmpRuntimeOptions["onInteraction"], autoBackground = false) {
 	const root = await mkdtemp(join(tmpdir(), "client-runtime-"));
 	const cwd = join(root, "workspace 空间");
 	await mkdir(cwd);
-	const runtime = new OmpRuntime({ stateDir: join(root, "state"), cwd, capabilities, onInteraction });
+	await mkdir(join(cwd, ".omp"));
+	await writeFile(join(cwd, ".omp", "config.yml"), Bun.YAML.stringify({
+		tools: { approvalMode: "yolo", approval: { read: "allow", write: "allow", edit: "allow", grep: "allow", glob: "allow", bash: "allow", eval: "allow", computer: "prompt", browser: "prompt" } },
+		eval: { js: true, py: true, ...(autoBackground ? { autoBackground: { enabled: true, thresholdMs: 5000 } } : {}) }, computer: { enabled: true }, browser: { enabled: true },
+	}));
+	const runtime = new OmpRuntime({ stateDir: join(root, "state"), cwd, onInteraction });
 	fixtures.push({ runtime, root });
 	return { runtime, root, cwd };
 }
@@ -115,9 +120,9 @@ test("native language errors and unavailable reasoning helpers remain errors", a
 	expect(await cell(runtime, "display(6 * 7)")).toContain("42");
 }, 90_000);
 
-test("capability grants and closed lifetimes reject rather than fallback to another context", async () => {
-	const { runtime, cwd } = await fixture(["files"]);
-	await expect(runtime.execute(request("bash", { command: "should never execute" }))).rejects.toThrow("not granted");
+test("native tools need no capability list and closed lifetimes reject without falling back", async () => {
+	const { runtime, cwd } = await fixture();
+	expect(text(await runtime.execute(request("bash", { command: "printf native-without-grants" })))).toContain("native-without-grants");
 	await runtime.execute(request("write", { path: join(cwd, "kept.txt"), content: "owned file" }));
 	await runtime.close();
 	await expect(runtime.execute(request("read", { path: join(cwd, "kept.txt") }))).rejects.toThrow("closed");
@@ -125,7 +130,7 @@ test("capability grants and closed lifetimes reject rather than fallback to anot
 }, 60_000);
 
 test("desktop and browser native preludes cannot proceed without local human approval", async () => {
-	const { runtime } = await fixture(["files", "exec", "computer", "browser"]);
+	const { runtime } = await fixture();
 	// Both are rejected at the prelude approval boundary, before touching a real desktop/browser.
 	const desktop = await runtime.execute(request("eval", { language: "js", code: "await computer.capabilities()" }));
 	expect(desktop.isError).toBe(true);
@@ -233,7 +238,7 @@ test("real managed PTYs accept stdin and keep same-named services isolated", asy
 
 test("native prelude approvals reach the local interaction channel and respect denial", async () => {
 	const titles: string[] = [];
-	const { runtime } = await fixture(["files", "exec", "computer"], async request => {
+	const { runtime } = await fixture(async request => {
 		titles.push(request.title);
 		expect(request.contextId).toBe("main");
 		return { choice: "no" };
@@ -269,13 +274,11 @@ test("background Eval keeps its permission owner while another language's foregr
 	const releaseBackground = Promise.withResolvers<Response>();
 	const releaseForeground = Promise.withResolvers<Response>();
 	const backgroundFinished = Promise.withResolvers<ToolResult>();
-	const { runtime, cwd } = await fixture(["files", "exec", "computer"], async (_request, signal) => {
+	const { runtime } = await fixture(async (_request, signal) => {
 		if (!signal) throw new Error("Local permission request has no cancellation signal");
 		prompt.resolve(signal);
 		return decision.promise;
-	});
-	await mkdir(join(cwd, ".omp"));
-	await writeFile(join(cwd, ".omp", "config.yml"), "eval:\n  autoBackground:\n    enabled: true\n    thresholdMs: 5000\n");
+	}, true);
 	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => {
 		if (new URL(request.url).pathname === "/background") { backgroundEntered.resolve(); return releaseBackground.promise; }
 		foregroundEntered.resolve();
@@ -324,7 +327,7 @@ test("background Eval keeps its permission owner while another language's foregr
 }, 120_000);
 
 test("cancelling a queued JS cell acknowledges before unrelated background work settles and preserves both kernels", async () => {
-	const { runtime, cwd } = await fixture();
+	const { runtime, cwd } = await fixture(undefined, true);
 	const entered = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<Response>();
 	const backgroundFinished = Promise.withResolvers<ToolResult>();
@@ -334,8 +337,6 @@ test("cancelling a queued JS cell acknowledges before unrelated background work 
 	let queued: Promise<{ result: ToolResult } | { error: unknown }> | undefined;
 	let ackTimer: NodeJS.Timeout | undefined;
 	let backgroundSettled = false;
-	await mkdir(join(cwd, ".omp"));
-	await writeFile(join(cwd, ".omp", "config.yml"), "eval:\n  autoBackground:\n    enabled: true\n    thresholdMs: 5000\n");
 	await writeFile(barrierPath, "dispatch-barrier");
 	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
 		entered.resolve();
@@ -481,7 +482,7 @@ test("cancelling a native async job delivers its terminal result to the original
 }, 90_000);
 
 test("closing during lazy native bootstrap never dispatches a queued mutation", async () => {
-	const { runtime, cwd } = await fixture(["files"]);
+	const { runtime, cwd } = await fixture();
 	const path = join(cwd, "must-not-be-written.txt");
 	const pending = runtime.execute(request("write", { path, content: "must not execute" })).then(
 		() => { throw new Error("Queued mutation executed after bootstrap cancellation"); },

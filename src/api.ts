@@ -9,14 +9,21 @@ export interface ServerState {
 }
 
 export type UiIntentInput =
-	| { readonly kind: "resolve"; readonly viewId: string }
-	| { readonly kind: "bind"; readonly viewId: string; readonly sessionId: string; readonly clientId: string | null; readonly expectedRevision: number }
-	| { readonly kind: "attach"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly transferId: string };
+	| { readonly kind: "resolve"; readonly viewId: string; readonly destinationId: string }
+	| { readonly kind: "bind"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly clientId: string | null; readonly expectedRevision: number }
+	| { readonly kind: "attach"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly transferId: string }
+	| { readonly kind: "paste"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly text: string };
 
 export interface UiIntentReceipt {
 	readonly id: string;
-	readonly frame: string;
 	readonly expiresAt: number;
+}
+
+export interface UiIntentOutcome {
+	readonly id: string;
+	readonly viewId: string;
+	readonly kind: UiIntentInput["kind"];
+	readonly error?: string;
 }
 
 export interface ImportedFile {
@@ -31,11 +38,13 @@ export interface UiClaim {
 	readonly kind: UiIntentInput["kind"];
 	readonly state: ServerState;
 	readonly files?: readonly ImportedFile[];
+	readonly text?: string;
 }
 
 export interface ResolvedView {
 	readonly viewId: string;
 	readonly resolveIntentId: string;
+	readonly destinationId: string;
 	readonly sessionId: string;
 	readonly draftToken: string;
 	readonly state: ServerState;
@@ -61,7 +70,6 @@ export interface TransferStatus {
 	readonly bytesSent: number;
 	readonly totalBytes: number;
 	readonly names: readonly string[];
-	readonly frame?: string;
 	readonly error?: string;
 }
 
@@ -72,6 +80,8 @@ export interface LocalUiState {
 	readonly views: Readonly<Record<string, ResolvedView>>;
 	readonly transfers: readonly TransferStatus[];
 	readonly interactions: readonly InteractionRequest[];
+	readonly panels: readonly PanelState[];
+	readonly outcomes: readonly UiIntentOutcome[];
 }
 
 export interface CaptureResult {
@@ -85,10 +95,49 @@ export interface BackgroundResult {
 	readonly result: ToolResult;
 }
 
+export interface DraftDestination {
+	readonly id: string;
+	readonly serverInstance: string;
+	readonly draftToken: string;
+}
+
+export interface DraftIntent {
+	readonly id: string;
+	readonly destinationId: string;
+	readonly sessionId: string;
+	readonly draftToken: string;
+}
+
+export interface DraftChannel {
+	update(draftToken: string): void;
+	close(): void;
+}
+
+export interface PanelState {
+	readonly owner: string;
+	readonly panelId: string;
+	readonly destinationId: string;
+	readonly phase: "waiting" | "ready" | "closed";
+}
+
+export interface NativePanelSnapshot {
+	readonly owner: string;
+	readonly panelId: string;
+	readonly source: string;
+	readonly target: string;
+	readonly agent: string;
+	readonly connected: boolean;
+	readonly devices: readonly { readonly name: string; readonly platform: string; readonly online: boolean; readonly bound: boolean }[];
+	readonly transfers: readonly { readonly id: string; readonly name: string; readonly phase: TransferStatus["phase"]; readonly bytesSent: number; readonly totalBytes: number; readonly error?: string }[];
+	readonly approvals: number;
+	readonly error?: string;
+}
+
 export interface BrokerApi {
 	state(sessionId: string): Promise<ServerState>;
 	invoke(sessionId: string, contextId: string, tool: ToolName, params: ToolParameters, options?: ExecutionOptions): Promise<ToolResult>;
-	claimIntent(id: string, sessionId: string, draftToken: string): Promise<UiClaim>;
+	openDraft(sessionId: string, draftToken: string, handlers: { onDestination(destination: DraftDestination | undefined): void; onIntent(intent: DraftIntent): void; onError(error: Error): void }): DraftChannel;
+	claimIntent(id: string, sessionId: string, draftToken: string, destinationId: string): Promise<UiClaim>;
 	finishIntent(id: string, error?: string): Promise<void>;
 	watch(sessionId: string, onState: (state: ServerState) => void, onError?: (error: Error) => void, onBackgroundResult?: (event: BackgroundResult) => void): () => void;
 	closeContext(sessionId: string, contextId: string): Promise<void>;

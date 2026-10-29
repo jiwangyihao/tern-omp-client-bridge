@@ -16,7 +16,9 @@ cannot migrate between machines while running.
 ## Consequences
 
 - New sessions start unbound; opening a session does not select a device.
-- A viewer can select any authorized device, not only this device.
+- A viewer can bind a paired device. This authorizes native tool operations for
+  that session under the device's native Agent and OS safety rules; there is no
+  additional plugin capability-grant list.
 - Client identity and session identity require an explicit handshake. The agent
   host cannot infer the switch actor from a shared SSH username or public IP.
 - Binding changes must be ordered and attributable so simultaneous viewers do

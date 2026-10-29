@@ -1,7 +1,0 @@
-/* SPDX-License-Identifier: MPL-2.0 */
-#statusline .sl-plugin[data-plugin='omp-client-bridge'].on {
-  border-bottom: 1px solid var(--accent);
-}
-#statusline .sl-plugin[data-plugin='omp-client-bridge'][data-tone='error'] {
-  color: var(--bad);
-}

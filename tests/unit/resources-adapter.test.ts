@@ -4,7 +4,7 @@ import type { ExecuteRequest, InvocationTarget, Platform, ToolResult } from "../
 import { ClientResources, decodeClientUri, isClientUri } from "../../src/resources/index.ts";
 
 function target(device = "client-a", platform: Platform = "darwin"): InvocationTarget {
-	return { requestId: "request", sessionId: "session", contextId: "context", bindingRevision: device === "client-a" ? 1 : 2, device: { id: device, name: device, platform, arch: "test", capabilities: ["files", "exec"] } };
+	return { requestId: "request", sessionId: "session", contextId: "context", bindingRevision: device === "client-a" ? 1 : 2, device: { id: device, name: device, platform, arch: "test" } };
 }
 
 function nativeRead(path = "/project/a.ts", tag = "ABCD", body = "1:original"): ToolResult {

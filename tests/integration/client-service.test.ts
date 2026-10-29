@@ -1,25 +1,21 @@
 // SPDX-License-Identifier: MPL-2.0
 import { afterEach, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { startClientService, type ClientServiceOptions } from "../../src/client.ts";
 import { authorized, loadClientIdentity, readEndpoint, verifyIdentity, writePrivateJson, type Endpoint } from "../../src/config.ts";
-import { encodeControlFrame } from "../../src/control-frame.ts";
 import { BridgeError, type DeviceDescriptor, type ExecuteRequest, type ToolResult } from "../../src/protocol.ts";
-import { DeviceDescriptorSchema, IdentifierSchema, ServerStateSchema, ToolResultSchema, UiIntentSchema } from "../../src/schemas.ts";
+import { DeviceDescriptorSchema, IdentifierSchema, LocalUiStateSchema as UiStateSchema, ToolResultSchema, TransferStatusSchema as TransferSchema, UiIntentReceiptSchema as ReceiptSchema, UiIntentSchema } from "../../src/schemas.ts";
 import { UploadStore } from "../../src/uploads.ts";
 import { RpcPeer, type RpcContext } from "../../src/wire.ts";
 
 const RegistrationSchema = z.object({ device: DeviceDescriptorSchema, publicKey: z.string(), signature: z.string() });
 const RegistrationReplySchema = z.object({ device: DeviceDescriptorSchema, serverName: z.string(), serverInstance: z.string() });
-const ReceiptSchema = z.object({ id: IdentifierSchema, frame: z.string(), expiresAt: z.number() });
 const CaptureSchema = z.object({ id: IdentifierSchema, kind: z.literal("files"), names: z.array(z.string()) });
-const TransferSchema = z.object({ id: IdentifierSchema, source: DeviceDescriptorSchema, viewId: IdentifierSchema, phase: z.string(), bytesSent: z.number(), totalBytes: z.number(), names: z.array(z.string()), frame: z.string().optional(), error: z.string().optional() });
-const UiStateSchema = z.object({ device: DeviceDescriptorSchema, connected: z.boolean(), serverName: z.string(), views: z.record(z.string(), z.object({ viewId: z.string(), sessionId: z.string(), draftToken: z.string(), resolveIntentId: z.string(), state: ServerStateSchema })), transfers: z.array(TransferSchema), interactions: z.array(z.unknown()) });
 const BeginSchema = z.object({ viewId: z.string(), sessionId: z.string(), draftToken: z.string(), files: z.array(z.object({ name: z.string(), size: z.number() })) });
 const ChunkSchema = z.object({ id: z.string(), index: z.number(), offset: z.number(), data: z.string() });
 const FinishSchema = z.object({ id: z.string(), sha256: z.array(z.string()) });
@@ -32,8 +28,9 @@ interface FixtureOptions {
 	corruptDigest?: boolean;
 	beforeRegister?: (peer: RpcPeer) => Promise<void>;
 	cancelTooLate?: boolean;
-	capabilities?: DeviceDescriptor["capabilities"];
 	readClipboardImage?: ClientServiceOptions["readClipboardImage"];
+	readClipboardText?: ClientServiceOptions["readClipboardText"];
+	beforeIntentReceipt?: (peer: RpcPeer, input: z.infer<typeof UiIntentSchema>, receipt: z.infer<typeof ReceiptSchema>) => Promise<void>;
 }
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -44,7 +41,12 @@ afterEach(async () => {
 async function fixture(options: FixtureOptions = {}) {
 	const root = await mkdtemp(join(tmpdir(), "client-service-"));
 	cleanup.push(() => rm(root, { recursive: true, force: true }));
-	const identity = await loadClientIdentity(join(root, "identity"), { name: "Synthetic client", capabilities: options.capabilities ?? ["files", "exec", "computer"] });
+	await mkdir(join(root, ".omp"));
+	await writeFile(join(root, ".omp", "config.yml"), Bun.YAML.stringify({
+		tools: { approvalMode: "yolo", approval: { read: "allow", write: "allow", edit: "allow", grep: "allow", glob: "allow", bash: "allow", eval: "allow", computer: "prompt", browser: "prompt" } },
+		eval: { js: true, py: true }, computer: { enabled: true }, browser: { enabled: true },
+	}));
+	const identity = await loadClientIdentity(join(root, "identity"), { name: "Synthetic client" });
 	const uploads = new UploadStore(join(root, "imports"));
 	cleanup.push(() => uploads.close());
 	const firstRegistration = Promise.withResolvers<RpcPeer>();
@@ -96,7 +98,9 @@ async function fixture(options: FixtureOptions = {}) {
 					}
 					const id = crypto.randomUUID();
 					intentKinds.set(id, input.kind);
-					return { id, frame: encodeControlFrame(id), expiresAt: Date.now() + 60000 };
+					const receipt = { id, expiresAt: Date.now() + 60000 };
+					await options.beforeIntentReceipt?.(peer, input, receipt);
+					return receipt;
 				}
 				if (method === "upload.begin") { begins++; await options.beforeBegin?.(); return uploads.begin(identity.device.id, BeginSchema.parse(body)); }
 				if (method === "upload.chunk") {
@@ -132,20 +136,20 @@ async function fixture(options: FixtureOptions = {}) {
 		close(socket) { sockets.delete(socket); socket.data.peer?.close(); },
 	} });
 	cleanup.push(async () => { for (const socket of sockets) socket.close(); await server.stop(true); });
-	const client = await startClientService({ identity, readClipboardImage: options.readClipboardImage, stateDir: join(root, "client"), cwd: root, serverName: "Synthetic server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${server.port}`, token } } });
+	const client = await startClientService({ identity, readClipboardImage: options.readClipboardImage ?? (async () => undefined), readClipboardText: options.readClipboardText ?? (async () => undefined), stateDir: join(root, "client"), cwd: root, serverName: "Synthetic server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${server.port}`, token } } });
 	cleanup.push(() => client.close());
 	const peer = await firstRegistration.promise;
 	await client.waitForConnection();
-	async function api(route: string, body?: unknown) {
-		const response = await fetch(client.endpoint.url + route, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${client.endpoint.token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+	async function api(route: string, body?: unknown, signal?: AbortSignal) {
+		const response = await fetch(client.endpoint.url + route, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${client.endpoint.token}`, "content-type": "application/json" }, signal, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 		const value: unknown = await response.json();
 		return { response, value };
 	}
-	async function resolveView(viewId = "window:host-tagged-pane", sessionId = "conversation", draftToken = "draft") {
-		const { value, response } = await api("/v1/intents", { kind: "resolve", viewId });
+	async function resolveView(viewId = "window:host-tagged-pane", sessionId = "conversation", draftToken = "draft", destinationId = "fixture-destination") {
+		const { value, response } = await api("/v1/intents", { kind: "resolve", viewId, destinationId });
 		expect(response.ok).toBe(true);
 		const receipt = ReceiptSchema.parse(value);
-		const view = { viewId, resolveIntentId: receipt.id, sessionId, draftToken, state: { serverInstance, binding: { sessionId, clientId: null, revision: 0, change: null }, devices: [{ ...identity.device, online: true }] } };
+		const view = { viewId, resolveIntentId: receipt.id, destinationId, sessionId, draftToken, state: { serverInstance, binding: { sessionId, clientId: null, revision: 0, change: null }, devices: [{ ...identity.device, online: true }] } };
 		if (!activePeer) throw new Error("Fixture connection unavailable");
 		activePeer.notify("view.resolved", view);
 		await activePeer.request("context.close", { contextId: "view-event-barrier" });
@@ -180,56 +184,99 @@ test("local capture rejects clipboard commands and malformed requests before cap
 	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-test("image capture requires a pending local choice, never a request approval flag or remote method", async () => {
-	let reads = 0;
-	const f = await fixture({ capabilities: [], readClipboardImage: async () => { reads++; return null; } });
-	expect((await f.api("/v1/captures/image", { kind: "image", approved: true })).value).toMatchObject({ code: "INVALID_INPUT" });
-	expect((await f.api("/v1/captures/image", { kind: "image" })).value).toMatchObject({ code: "CAPTURE_DENIED" });
-	await expect(f.peer.request("capture.image", { approved: true })).rejects.toThrow("Only native tool execution");
-	await f.api("/v1/state");
-	const capturing = f.api("/v1/captures/image", { kind: "image" });
-	const approval = await pendingImageApproval(f);
-	expect(reads).toBe(0);
-	expect((await f.api("/v1/interactions/reply", { id: approval.id, choice: null })).response.ok).toBe(true);
-	expect((await capturing).value).toMatchObject({ code: "CAPTURE_DENIED" });
-	expect(reads).toBe(0);
+test("clipboard capture requires local authentication and rejects flags, obsolete IDs and remote methods", async () => {
+	let imageReads = 0;
+	let textReads = 0;
+	const f = await fixture({ readClipboardImage: async () => { imageReads++; return null; }, readClipboardText: async () => { textReads++; return "private text"; } });
+	for (const headers of [new Headers(), new Headers({ authorization: "Bearer invalid" }), new Headers({ authorization: `Bearer ${f.client.endpoint.token}`, origin: "http://127.0.0.1" })]) {
+		headers.set("content-type", "application/json");
+		const response = await fetch(f.client.endpoint.url + "/v1/captures/clipboard", { method: "POST", headers, body: JSON.stringify({ kind: "clipboard" }) });
+		expect(response.status).toBe(401);
+	}
+	for (const body of [{ kind: "clipboard", approved: true }, { kind: "clipboard", requestId: "obsolete-approval" }, { kind: "image" }, { kind: "clipboard", paths: ["/synthetic/file"] }]) {
+		expect((await f.api("/v1/captures/clipboard", body)).value).toMatchObject({ code: "INVALID_INPUT" });
+	}
+	expect((await f.api("/v1/captures/image", { kind: "image" })).response.status).toBe(404);
+	for (const method of ["capture.clipboard", "capture.image"]) await expect(f.peer.request(method, { approved: true })).rejects.toThrow("Only native tool execution");
+	expect([imageReads, textReads]).toEqual([0, 0]);
 	expect(f.begins).toBe(0);
 	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-async function pendingImageApproval(f: { api(route: string, body?: unknown): Promise<{ response: Response; value: unknown }> }) {
-	for (let attempt = 0; attempt < 200; attempt++) {
-		const state = UiStateSchema.parse((await f.api("/v1/state")).value);
-		if (state.interactions.length) return z.object({ id: z.string(), choices: z.array(z.object({ id: z.string() })) }).parse(state.interactions[0]);
-	}
-	throw new Error("Image approval did not become locally visible");
-}
+test("one authenticated local paste completes without polling or a second approval", async () => {
+	let imageReads = 0;
+	let textReads = 0;
+	const entered = Promise.withResolvers<void>();
+	const image = Promise.withResolvers<null>();
+	const f = await fixture({ readClipboardImage: () => { imageReads++; entered.resolve(); return image.promise; }, readClipboardText: async () => { textReads++; return "private text"; } });
+	const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" });
+	await entered.promise;
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).interactions).toEqual([]);
+	image.resolve(null);
+	const result = await capturing;
+	expect(result.response.ok).toBe(true);
+	expect(result.value).toEqual({ kind: "text", text: "private text" });
+	expect([imageReads, textReads]).toEqual([1, 1]);
+	const state = UiStateSchema.parse((await f.api("/v1/state")).value);
+	expect(state.interactions).toEqual([]);
+	expect(state.transfers).toEqual([]);
+	expect(f.begins).toBe(0);
+});
 
-test("one approved image snapshot uploads while unbound with no agent capabilities", async () => {
-	let reads = 0;
+test("clipboard image takes precedence over text and uploads while unbound", async () => {
+	let imageReads = 0;
+	let textReads = 0;
 	const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=", "base64");
-	const f = await fixture({ capabilities: [], readClipboardImage: async () => { reads++; return { data: bytes, mimeType: "image/png" }; } });
+	const f = await fixture({ readClipboardImage: async () => { imageReads++; return { data: bytes, mimeType: "image/png" }; }, readClipboardText: async () => { textReads++; return "image alt text"; } });
 	const destination = await f.resolveView();
-	await f.api("/v1/state");
-	const capturing = f.api("/v1/captures/image", { kind: "image" });
-	const approval = await pendingImageApproval(f);
-	expect(reads).toBe(0);
-	await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" });
+	const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" });
 	const capture = CaptureSchema.parse((await capturing).value);
 	expect(capture.names).toEqual(["clipboard.png"]);
-	expect(reads).toBe(1);
-	expect((await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" })).value).toMatchObject({ code: "INTERACTION_EXPIRED" });
+	expect([imageReads, textReads]).toEqual([1, 0]);
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).interactions).toEqual([]);
 	const transfer = TransferSchema.parse((await f.api("/v1/transfers", { ...destination, captureId: capture.id })).value);
 	await f.attachment.promise;
 	const imported = f.uploads.completed(f.identity.device.id, transfer.id);
 	expect(imported.files[0]!.name).toBe("clipboard.png");
 	expect(imported.files[0]!.path.endsWith(".png")).toBe(true);
 	expect(await readFile(imported.files[0]!.path)).toEqual(bytes);
-	expect(reads).toBe(1);
+	expect([imageReads, textReads]).toEqual([1, 0]);
 });
 
-test("dropped images are admitted as real file uploads without agent authorization", async () => {
-	const f = await fixture({ capabilities: [] });
+test("clipboard text is returned verbatim without uploading path-shaped text", async () => {
+	let clipboardText = "";
+	let emptyImage = false;
+	const reads: string[] = [];
+	const f = await fixture({ readClipboardImage: async () => { reads.push("image"); return emptyImage ? { data: new Uint8Array(), mimeType: "image/png" } : null; }, readClipboardText: async () => { reads.push("text"); return clipboardText; } });
+	const localPath = join(f.root, "clipboard-path.txt");
+	await writeFile(localPath, "Do not upload this file");
+	for (const value of ["first line\n第二行\n", localPath, " \t\n"]) {
+		clipboardText = value;
+		reads.length = 0;
+		const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" });
+		const result = await capturing;
+		expect(result.response.ok).toBe(true);
+		expect(result.value).toEqual({ kind: "text", text: value });
+		expect(reads).toEqual(["image", "text"]);
+		emptyImage = true;
+	}
+	expect(f.begins).toBe(0);
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).transfers).toEqual([]);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("clipboard images retain the PNG format requirement without falling back to text", async () => {
+	let textReads = 0;
+	const f = await fixture({ readClipboardImage: async () => ({ data: new Uint8Array([1]), mimeType: "image/jpeg" }), readClipboardText: async () => { textReads++; return "not a fallback"; } });
+	const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" });
+	expect((await capturing).value).toMatchObject({ code: "CLIPBOARD_IMAGE_FORMAT" });
+	expect(textReads).toBe(0);
+	expect(f.begins).toBe(0);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("dropped images are admitted as real file uploads independently of session binding", async () => {
+	const f = await fixture();
 	const path = join(f.root, "dropped.png");
 	const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 	await writeFile(path, bytes);
@@ -241,37 +288,109 @@ test("dropped images are admitted as real file uploads without agent authorizati
 	expect(await readFile(path)).toEqual(bytes);
 });
 
-test("approved empty clipboard reports no image and disconnect denies a waiting read", async () => {
-	let reads = 0;
-	const f = await fixture({ capabilities: [], readClipboardImage: async () => { reads++; return undefined; } });
-	await f.api("/v1/state");
-	const empty = f.api("/v1/captures/image", { kind: "image" });
-	const approval = await pendingImageApproval(f);
-	await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" });
-	expect((await empty).value).toMatchObject({ code: "NO_CLIPBOARD_IMAGE" });
-	const abandoned = f.api("/v1/captures/image", { kind: "image" });
-	await pendingImageApproval(f);
-	await f.reconnect();
-	expect((await abandoned).response.ok).toBe(false);
-	expect(reads).toBe(1);
+test("empty clipboard reports no content without an approval or upload", async () => {
+	let imageReads = 0;
+	let textReads = 0;
+	let clipboardText: string | null | undefined;
+	const f = await fixture({ readClipboardImage: async () => { imageReads++; return undefined; }, readClipboardText: async () => { textReads++; return clipboardText; } });
+	for (const value of [undefined, null, ""]) {
+		clipboardText = value;
+		const empty = f.api("/v1/captures/clipboard", { kind: "clipboard" });
+		expect((await empty).value).toMatchObject({ code: "EMPTY_CLIPBOARD" });
+	}
+	expect([imageReads, textReads]).toEqual([3, 3]);
 	expect(f.begins).toBe(0);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-test("disconnect during an approved native read discards its late bytes without taking a snapshot", async () => {
+test("disconnect during an image read discards late bytes without reading text or taking a snapshot", async () => {
 	const entered = Promise.withResolvers<void>();
 	const image = Promise.withResolvers<{ data: Uint8Array; mimeType: string }>();
-	const f = await fixture({ capabilities: [], readClipboardImage: () => { entered.resolve(); return image.promise; } });
-	await f.api("/v1/state");
-	const capturing = f.api("/v1/captures/image", { kind: "image" });
-	const approval = await pendingImageApproval(f);
-	await f.api("/v1/interactions/reply", { id: approval.id, choice: "capture-image" });
+	let textReads = 0;
+	const f = await fixture({ readClipboardImage: () => { entered.resolve(); return image.promise; }, readClipboardText: async () => { textReads++; return "private text"; } });
+	const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" });
 	await entered.promise;
 	await f.reconnect();
 	expect((await capturing).response.ok).toBe(false);
 	image.resolve({ data: new Uint8Array([137, 80, 78, 71]), mimeType: "image/png" });
 	await f.api("/v1/state");
+	expect(textReads).toBe(0);
 	expect(f.begins).toBe(0);
 	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("disconnect during a text read settles before its late result and never replays it", async () => {
+	const entered = Promise.withResolvers<void>();
+	const clipboardText = Promise.withResolvers<string>();
+	const reads: string[] = [];
+	const f = await fixture({ readClipboardImage: async () => { reads.push("image"); return null; }, readClipboardText: () => { reads.push("text"); entered.resolve(); return clipboardText.promise; } });
+	const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" });
+	await entered.promise;
+	await f.reconnect();
+	const result = await capturing;
+	expect(result.response.ok).toBe(false);
+	expect(result.value).not.toHaveProperty("text");
+	clipboardText.resolve("private late result");
+	const state = UiStateSchema.parse((await f.api("/v1/state")).value);
+	expect(state.interactions).toEqual([]);
+	expect(state.transfers).toEqual([]);
+	expect(reads).toEqual(["image", "text"]);
+	expect(f.begins).toBe(0);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("clipboard native reader failures propagate without fallback or upload", async () => {
+	let failure: "image" | "text" = "image";
+	const reads: string[] = [];
+	const f = await fixture({
+		readClipboardImage: async () => { reads.push("image"); if (failure === "image") throw new Error("Native clipboard image read failed"); return null; },
+		readClipboardText: async () => { reads.push("text"); throw new Error("Native clipboard text read failed"); },
+	});
+	for (const reader of ["image", "text"] as const) {
+		failure = reader;
+		reads.length = 0;
+		const result = await f.api("/v1/captures/clipboard", { kind: "clipboard" });
+		expect(result.response.ok).toBe(false);
+		expect(result.value).toEqual({ code: "CLIENT_REQUEST_FAILED", error: `Native clipboard ${reader} read failed` });
+		expect(reads).toEqual(reader === "image" ? ["image"] : ["image", "text"]);
+	}
+	expect(f.begins).toBe(0);
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).interactions).toEqual([]);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("cancelling the local paste request discards its late image result without reading text", async () => {
+	const entered = Promise.withResolvers<void>();
+	const image = Promise.withResolvers<null>();
+	let imageReads = 0;
+	let textReads = 0;
+	const f = await fixture({ readClipboardImage: () => { imageReads++; entered.resolve(); return image.promise; }, readClipboardText: async () => { textReads++; return "private text"; } });
+	const controller = new AbortController();
+	const capturing = f.api("/v1/captures/clipboard", { kind: "clipboard" }, controller.signal);
+	const cancelled = capturing.then(() => false, () => true);
+	await entered.promise;
+	controller.abort();
+	expect(await cancelled).toBe(true);
+	await f.api("/v1/state");
+	image.resolve(null);
+	const state = UiStateSchema.parse((await f.api("/v1/state")).value);
+	expect(state.connected).toBe(true);
+	expect(state.interactions).toEqual([]);
+	expect(state.transfers).toEqual([]);
+	expect([imageReads, textReads]).toEqual([1, 0]);
+	expect(f.begins).toBe(0);
+	await expect(stat(join(f.root, "client", "captures"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("releasing a cancelled clipboard snapshot prevents a later upload", async () => {
+	const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII=", "base64");
+	const f = await fixture({ readClipboardImage: async () => ({ data: bytes, mimeType: "image/png" }) });
+	const destination = await f.resolveView();
+	const capture = CaptureSchema.parse((await f.api("/v1/captures/clipboard", { kind: "clipboard" })).value);
+	expect((await f.api("/v1/captures/release", { id: capture.id })).response.ok).toBe(true);
+	expect((await f.api("/v1/transfers", { ...destination, captureId: capture.id })).value).toMatchObject({ code: "CAPTURE_MISSING" });
+	expect(f.begins).toBe(0);
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).transfers).toEqual([]);
 });
 
 test("local HTTP is authenticated, rejects browser origins and preserves replacement control metadata", async () => {
@@ -342,11 +461,10 @@ test("captured bytes and empty-file digests upload incrementally to the original
 	const destination = await f.resolveView();
 	const transfer = TransferSchema.parse((await f.api("/v1/transfers", { ...destination, captureId: capture.id })).value);
 	expect(transfer.source.id).toBe(f.identity.device.id);
-	expect(transfer.frame).toBeUndefined();
 	const receipt = await f.attachment.promise;
 	await f.peer.request("context.close", { contextId: "attachment-reply-barrier" });
 	const state = UiStateSchema.parse((await f.api("/v1/state")).value);
-	expect(state.transfers[0]).toMatchObject({ id: transfer.id, phase: "ready", bytesSent: bytes.length, totalBytes: bytes.length, frame: receipt.frame });
+	expect(state.transfers[0]).toMatchObject({ id: transfer.id, phase: "ready", bytesSent: bytes.length, totalBytes: bytes.length });
 	const imported = f.uploads.completed(f.identity.device.id, transfer.id);
 	expect(imported.sessionId).toBe(destination.expectedSessionId);
 	expect(imported.draftToken).toBe(destination.expectedDraftToken);
@@ -357,7 +475,7 @@ test("captured bytes and empty-file digests upload incrementally to the original
 	f.peer.notify("intent.finished", { id: receipt.id, viewId: destination.viewId, kind: "attach", error: "Native handoff outcome unknown; do not retry" });
 	await f.peer.request("context.close", { contextId: "finished-event-barrier" });
 	const failed = UiStateSchema.parse((await f.api("/v1/state")).value).transfers[0]!;
-	expect(failed.phase).toBe("failed"); expect(failed.error).toContain("outcome unknown"); expect(failed.frame).toBeUndefined();
+	expect(failed.phase).toBe("failed"); expect(failed.error).toContain("outcome unknown");
 	expect(await readFile(input, "utf8")).toBe("later human content");
 	expect(await readFile(imported.files[0]!.path)).toEqual(bytes);
 });
@@ -366,6 +484,7 @@ for (const replacement of [
 	{ name: "survives a same-draft handshake refresh", sessionId: "conversation", draftToken: "draft", allowed: true },
 	{ name: "rejects a replacement conversation during initialization", sessionId: "another-conversation", draftToken: "draft", allowed: false },
 	{ name: "rejects a replacement draft during initialization", sessionId: "conversation", draftToken: "another-draft", allowed: false },
+	{ name: "rejects a replacement channel with the same conversation and draft", sessionId: "conversation", draftToken: "draft", destinationId: "replacement-destination", allowed: false },
 ]) {
 	test(`admitted upload ${replacement.name}`, async () => {
 		const entered = Promise.withResolvers<void>();
@@ -380,7 +499,7 @@ for (const replacement of [
 		const starting = f.api("/v1/transfers", { ...original, captureId: capture.id });
 		try {
 			await entered.promise;
-			const refreshed = await f.resolveView(original.viewId, replacement.sessionId, replacement.draftToken);
+			const refreshed = await f.resolveView(original.viewId, replacement.sessionId, replacement.draftToken, "destinationId" in replacement ? replacement.destinationId : undefined);
 			expect(refreshed.expectedResolveIntentId).not.toBe(original.expectedResolveIntentId);
 			release.resolve();
 			const result = await starting;
@@ -419,7 +538,7 @@ test("stale captured resolve IDs fail before upload and capture release never de
 	expect((await f.api("/v1/transfers", { ...current, captureId: capture.id })).response.ok).toBe(false);
 });
 
-test("destination changes cancel only the owned partial upload without an attach frame", async () => {
+test("destination changes cancel only the owned partial upload before attachment", async () => {
 	const chunkStarted = Promise.withResolvers<void>();
 	const f = await fixture({ beforeChunk: async context => {
 		chunkStarted.resolve();
@@ -438,7 +557,6 @@ test("destination changes cancel only the owned partial upload without an attach
 	await f.peer.request("context.close", { contextId: "cancel-reply-barrier" });
 	const item = UiStateSchema.parse((await f.api("/v1/state")).value).transfers[0]!;
 	expect(["failed", "cancelled"]).toContain(item.phase);
-	expect(item.frame).toBeUndefined();
 	expect((await readdir(join(f.root, "imports"))).some(name => name.startsWith(transfer.id))).toBe(false);
 	expect((await stat(input)).size).toBe(300000);
 });
@@ -452,7 +570,7 @@ test("remote checksum mismatches never produce an attach intent or ready UI", as
 	expect(await f.cancelled.promise).toBe(transfer.id);
 	await f.peer.request("context.close", { contextId: "checksum-failure-barrier" });
 	const item = UiStateSchema.parse((await f.api("/v1/state")).value).transfers[0]!;
-	expect(item.phase).toBe("failed"); expect(item.frame).toBeUndefined(); expect(item.error).toContain("verification");
+	expect(item.phase).toBe("failed"); expect(item.error).toContain("verification");
 });
 
 test("native background completion keeps its original invocation after a transport-only reconnect", async () => {
@@ -482,13 +600,13 @@ test("service stays available offline and does not queue local intents", async (
 	const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("unused") });
 	const remote = { url: `http://127.0.0.1:${reservation.port}`, token: randomBytes(32).toString("hex") };
 	await reservation.stop(true);
-	const identity = await loadClientIdentity(join(root, "identity"), { name: "Offline synthetic client", capabilities: [] });
+	const identity = await loadClientIdentity(join(root, "identity"), { name: "Offline synthetic client" });
 	const client = await startClientService({ identity, stateDir: join(root, "client"), serverName: "Unavailable server", connection: { kind: "loopback", endpoint: remote } });
 	cleanup.push(() => client.close());
 	const headers = { authorization: `Bearer ${client.endpoint.token}`, "content-type": "application/json" };
 	const state = UiStateSchema.parse(await (await fetch(client.endpoint.url + "/v1/state", { headers })).json());
 	expect(state.connected).toBe(false);
-	const intent = await fetch(client.endpoint.url + "/v1/intents", { method: "POST", headers, body: JSON.stringify({ kind: "resolve", viewId: "offline-view" }) });
+	const intent = await fetch(client.endpoint.url + "/v1/intents", { method: "POST", headers, body: JSON.stringify({ kind: "resolve", viewId: "offline-view", destinationId: "offline-destination" }) });
 	expect(intent.status).toBe(503);
 	const controller = new AbortController();
 	const aborted = client.waitForConnection(controller.signal);
@@ -512,7 +630,7 @@ test("verified attachment completion becomes attached without removing source or
 	f.peer.notify("intent.finished", { id: receipt.id, viewId: destination.viewId, kind: "attach" });
 	await f.peer.request("context.close", { contextId: "attachment-completed-barrier" });
 	const item = UiStateSchema.parse((await f.api("/v1/state")).value).transfers[0]!;
-	expect(item.phase).toBe("attached"); expect(item.frame).toBeUndefined();
+	expect(item.phase).toBe("attached");
 	expect((await f.api("/v1/transfers/cancel", { id: transfer.id })).response.ok).toBe(false);
 	const remote = f.uploads.completed(f.identity.device.id, transfer.id).files[0]!.path;
 	await f.client.close();
@@ -537,7 +655,7 @@ test("releasing an uploading capture cancels its own remote partial and preserve
 	expect((await f.api("/v1/captures/release", { id: capture.id })).response.ok).toBe(true);
 	expect(await f.cancelled.promise).toBe(transfer.id);
 	const item = UiStateSchema.parse((await f.api("/v1/state")).value).transfers[0]!;
-	expect(item.phase).toBe("cancelled"); expect(item.frame).toBeUndefined();
+	expect(item.phase).toBe("cancelled");
 	expect((await stat(input)).size).toBe(100);
 	expect((await readdir(join(f.root, "imports"))).some(name => name.startsWith(transfer.id))).toBe(false);
 });
@@ -555,7 +673,6 @@ test("broker instance changes dispose old native contexts and invalidate resolve
 	const state = UiStateSchema.parse((await f.api("/v1/state")).value);
 	expect(state.connected).toBe(true); expect(state.views).toEqual({});
 	expect(state.transfers[0]).toMatchObject({ id: transfer.id, phase: "failed" });
-	expect(state.transfers[0]!.frame).toBeUndefined();
 	expect(state.transfers[0]!.error).toContain("broker restarted");
 	const fresh = ToolResultSchema.parse(await reconnected.request("execute", f.invocation("eval", { language: "js", code: "display(typeof oldBrokerState)" })));
 	expect(text(fresh)).toContain("undefined");
@@ -574,7 +691,7 @@ test("too-late cancellation stays uncertain across repeated clicks and later acc
 		const cancellation = await f.api("/v1/transfers/cancel", { id: transfer.id });
 		expect(cancellation.response.ok).toBe(false);
 		const item = UiStateSchema.parse((await f.api("/v1/state")).value).transfers[0]!;
-		expect(item.phase).toBe("failed"); expect(item.error).toContain("uncertain"); expect(item.frame).toBeUndefined();
+		expect(item.phase).toBe("failed"); expect(item.error).toContain("uncertain");
 	}
 	f.peer.notify("intent.finished", { id: receipt.id, viewId: destination.viewId, kind: "attach" });
 	await f.peer.request("context.close", { contextId: "late-handoff-confirmation" });
@@ -591,7 +708,7 @@ test("closing during a pending WebSocket handshake aborts the owned connection w
 	const release = Promise.withResolvers<Response>();
 	const remote = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { entered.resolve(); return release.promise; } });
 	cleanup.push(async () => { release.resolve(new Response("handshake ended", { status: 503 })); await remote.stop(true); });
-	const identity = await loadClientIdentity(join(root, "identity"), { name: "Handshake fixture", capabilities: [] });
+	const identity = await loadClientIdentity(join(root, "identity"), { name: "Handshake fixture" });
 	const client = await startClientService({ identity, stateDir: join(root, "client"), serverName: "Pending server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${remote.port}`, token: randomBytes(32).toString("hex") } } });
 	cleanup.push(() => client.close());
 	await entered.promise;
@@ -629,4 +746,158 @@ test("registered broker generation rejects retired view/state events and resets 
 	replacement.notify("state", { sessionId: freshView.sessionId, state: next });
 	await replacement.request("context.close", { contextId: "replacement-state-barrier" });
 	expect(UiStateSchema.parse((await f.api("/v1/state")).value).views[destination.viewId]!.state).toEqual(next);
+}, 30000);
+
+test("resolve events before receipts preserve their destination and intervening authoritative binding state", async () => {
+	let early = false;
+	let template: z.infer<typeof UiStateSchema>["views"][string] | undefined;
+	const f = await fixture({ beforeIntentReceipt: async (peer, input, receipt) => {
+		if (!early || input.kind !== "resolve" || !template) return;
+		const view = { ...template, viewId: input.viewId, destinationId: input.destinationId, resolveIntentId: receipt.id };
+		peer.notify("view.resolved", view);
+		peer.notify("state", { sessionId: view.sessionId, state: { ...view.state, binding: { ...view.state.binding, revision: 3 } } });
+		peer.notify("intent.finished", { id: receipt.id, viewId: input.viewId, kind: "resolve" });
+		await peer.request("context.close", { contextId: "early-resolve-delivery-barrier" });
+	} });
+	const base = await f.resolveView("base-view");
+	template = UiStateSchema.parse((await f.api("/v1/state")).value).views[base.viewId]!;
+	early = true;
+	const result = await f.api("/v1/intents", { kind: "resolve", viewId: "early-view", destinationId: "directed-target" });
+	expect(result.response.ok).toBe(true);
+	const receipt = ReceiptSchema.parse(result.value);
+	const view = UiStateSchema.parse((await f.api("/v1/state")).value).views["early-view"]!;
+	expect(view).toMatchObject({ destinationId: "directed-target", resolveIntentId: receipt.id, state: { binding: { revision: 3 } } });
+	const input = join(f.root, "early-resolve.txt"); await writeFile(input, "captured bytes");
+	const capture = CaptureSchema.parse((await f.api("/v1/captures", { kind: "files", paths: [input] })).value);
+	expect((await f.api("/v1/transfers", { viewId: view.viewId, captureId: capture.id, expectedSessionId: view.sessionId, expectedDraftToken: view.draftToken, expectedResolveIntentId: receipt.id })).response.ok).toBe(true);
+	await f.attachment.promise;
+});
+
+test("out-of-order resolve receipts and late duplicate events cannot retarget the latest local view", async () => {
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let template: z.infer<typeof UiStateSchema>["views"][string] | undefined;
+	let oldView: z.infer<typeof UiStateSchema>["views"][string] | undefined;
+	const f = await fixture({ beforeIntentReceipt: async (peer, input, receipt) => {
+		if (!template || input.kind !== "resolve") return;
+		const view = { ...template, viewId: input.viewId, destinationId: input.destinationId, resolveIntentId: receipt.id };
+		peer.notify("view.resolved", view);
+		if (input.destinationId === "slow-target") { oldView = view; entered.resolve(); await release.promise; }
+	} });
+	cleanup.push(async () => { release.resolve(); });
+	const base = await f.resolveView("base-view");
+	template = UiStateSchema.parse((await f.api("/v1/state")).value).views[base.viewId]!;
+	const slow = f.api("/v1/intents", { kind: "resolve", viewId: "racing-view", destinationId: "slow-target" });
+	await entered.promise;
+	const latest = ReceiptSchema.parse((await f.api("/v1/intents", { kind: "resolve", viewId: "racing-view", destinationId: "latest-target" })).value);
+	release.resolve(); await slow;
+	f.peer.notify("view.resolved", oldView);
+	await f.peer.request("context.close", { contextId: "late-resolution-barrier" });
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).views["racing-view"]).toMatchObject({ destinationId: "latest-target", resolveIntentId: latest.id });
+});
+
+test("a draft revoked before its resolve receipt never regains upload admission", async () => {
+	let template: z.infer<typeof UiStateSchema>["views"][string] | undefined;
+	let revoked: z.infer<typeof UiStateSchema>["views"][string] | undefined;
+	const f = await fixture({ beforeIntentReceipt: async (peer, input, receipt) => {
+		if (!template || input.kind !== "resolve") return;
+		revoked = { ...template, viewId: input.viewId, destinationId: input.destinationId, resolveIntentId: receipt.id };
+		peer.notify("view.resolved", revoked);
+		peer.notify("intent.finished", { id: receipt.id, viewId: input.viewId, kind: "resolve" });
+		peer.notify("view.revoked", { viewId: input.viewId, destinationId: input.destinationId, resolveIntentId: receipt.id });
+		await peer.request("context.close", { contextId: "early-revocation-barrier" });
+	} });
+	const base = await f.resolveView("base-view");
+	template = UiStateSchema.parse((await f.api("/v1/state")).value).views[base.viewId]!;
+	const receipt = ReceiptSchema.parse((await f.api("/v1/intents", { kind: "resolve", viewId: "revoked-view", destinationId: "revoked-target" })).value);
+	f.peer.notify("view.resolved", revoked);
+	await f.peer.request("context.close", { contextId: "duplicate-revocation-barrier" });
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).views["revoked-view"]).toBeUndefined();
+	const input = join(f.root, "revoked.txt"); await writeFile(input, "never upload");
+	const capture = CaptureSchema.parse((await f.api("/v1/captures", { kind: "files", paths: [input] })).value);
+	expect((await f.api("/v1/transfers", { viewId: "revoked-view", captureId: capture.id, expectedSessionId: template.sessionId, expectedDraftToken: template.draftToken, expectedResolveIntentId: receipt.id })).value).toMatchObject({ code: "DESTINATION_CHANGED" });
+	expect(f.begins).toBe(0);
+});
+
+for (const error of [undefined, "Native draft rejected this attachment"]) {
+	test(`attachment completion before its receipt is retained exactly once (${error ? "failure" : "success"})`, async () => {
+		const f = await fixture({ beforeIntentReceipt: async (peer, input, receipt) => {
+			if (input.kind !== "attach") return;
+			peer.notify("intent.finished", { id: receipt.id, viewId: input.viewId, kind: "attach", ...(error ? { error } : {}) });
+			await peer.request("context.close", { contextId: "early-attachment-barrier" });
+		} });
+		const input = join(f.root, "early-attachment.txt"); await writeFile(input, "verified native handoff");
+		const capture = CaptureSchema.parse((await f.api("/v1/captures", { kind: "files", paths: [input] })).value);
+		const view = await f.resolveView();
+		const transfer = TransferSchema.parse((await f.api("/v1/transfers", { ...view, captureId: capture.id })).value);
+		const receipt = await f.attachment.promise;
+		await f.peer.request("context.close", { contextId: "early-receipt-barrier" });
+		const state = UiStateSchema.parse((await f.api("/v1/state")).value);
+		expect(state.transfers.find(item => item.id === transfer.id)?.phase).toBe(error ? "failed" : "attached");
+		expect(state.transfers.find(item => item.id === transfer.id)?.error).toBe(error);
+		f.peer.notify("intent.finished", { id: receipt.id, viewId: view.viewId, kind: "attach", ...(error ? {} : { error: "duplicate must not overwrite success" }) });
+		await f.peer.request("context.close", { contextId: "duplicate-finish-barrier" });
+		expect(UiStateSchema.parse((await f.api("/v1/state")).value).transfers.find(item => item.id === transfer.id)?.phase).toBe(error ? "failed" : "attached");
+		expect(await readFile(f.uploads.completed(f.identity.device.id, transfer.id).files[0]!.path, "utf8")).toBe("verified native handoff");
+	});
+}
+
+for (const kind of ["bind", "paste"] as const) for (const early of [true, false]) {
+	test(`${kind} outcome is correlated once when completion is ${early ? "before" : "after"} the receipt`, async () => {
+		const failure = `Native ${kind} rejected the captured draft`;
+		const f = await fixture({ beforeIntentReceipt: async (peer, input, receipt) => {
+			if (input.kind !== kind || !early) return;
+			peer.notify("intent.finished", { id: "unadmitted-early-id", viewId: input.viewId, kind, error: "not our receipt" });
+			peer.notify("intent.finished", { id: receipt.id, viewId: input.viewId, kind, error: failure });
+			await peer.request("context.close", { contextId: "early-outcome-barrier" });
+		} });
+		const view = await f.resolveView();
+		const input = { kind, viewId: view.viewId, sessionId: view.expectedSessionId, draftToken: view.expectedDraftToken, ...(kind === "bind" ? { clientId: null, expectedRevision: 0 } : { text: "never submit" }) };
+		const receipt = ReceiptSchema.parse((await f.api("/v1/intents", input)).value);
+		if (!early) {
+			f.peer.notify("intent.finished", { id: receipt.id, viewId: "wrong-view", kind, error: "foreign finish" });
+			await f.peer.request("context.close", { contextId: "wrong-outcome-barrier" });
+			expect(UiStateSchema.parse((await f.api("/v1/state")).value).outcomes.some(item => item.id === receipt.id)).toBe(false);
+			f.peer.notify("intent.finished", { id: receipt.id, viewId: view.viewId, kind, error: failure });
+		}
+		await f.peer.request("context.close", { contextId: "outcome-receipt-barrier" });
+		const outcome = { id: receipt.id, viewId: view.viewId, kind, error: failure };
+		expect(UiStateSchema.parse((await f.api("/v1/state")).value).outcomes).toContainEqual(outcome);
+		f.peer.notify("intent.finished", { id: receipt.id, viewId: view.viewId, kind });
+		f.peer.notify("intent.finished", { id: "unadmitted-late-id", viewId: view.viewId, kind });
+		await f.peer.request("context.close", { contextId: "duplicate-outcome-barrier" });
+		const outcomes = UiStateSchema.parse((await f.api("/v1/state")).value).outcomes;
+		expect(outcomes.filter(item => item.id === receipt.id)).toEqual([outcome]);
+		expect(outcomes.some(item => item.id.startsWith("unadmitted-"))).toBe(false);
+	});
+}
+
+test("unconfirmed intent outcomes survive disconnect without replay or late success rewriting uncertainty", async () => {
+	let requests = 0;
+	const f = await fixture({ beforeIntentReceipt: async (_peer, input) => { if (input.kind === "paste") requests++; } });
+	const view = await f.resolveView();
+	const receipt = ReceiptSchema.parse((await f.api("/v1/intents", { kind: "paste", viewId: view.viewId, sessionId: view.expectedSessionId, draftToken: view.expectedDraftToken, text: "captured text" })).value);
+	const current = await f.reconnect();
+	const before = UiStateSchema.parse((await f.api("/v1/state")).value).outcomes.find(item => item.id === receipt.id)!;
+	expect(before).toMatchObject({ id: receipt.id, kind: "paste", viewId: view.viewId });
+	expect(before.error).toContain("unknown");
+	current.notify("intent.finished", { id: receipt.id, viewId: view.viewId, kind: "paste" });
+	await current.request("context.close", { contextId: "post-disconnect-outcome-barrier" });
+	expect(UiStateSchema.parse((await f.api("/v1/state")).value).outcomes.find(item => item.id === receipt.id)).toEqual(before);
+	expect(requests).toBe(1);
+}, 30000);
+
+test("completed intent outcome history is bounded without dropping pending receipt correlation", async () => {
+	const f = await fixture({ beforeIntentReceipt: async (peer, input, receipt) => {
+		if (input.kind !== "paste") return;
+		peer.notify("intent.finished", { id: receipt.id, viewId: input.viewId, kind: input.kind });
+	} });
+	const view = await f.resolveView();
+	const ids: string[] = [];
+	for (let index = 0; index < 260; index++) ids.push(ReceiptSchema.parse((await f.api("/v1/intents", { kind: "paste", viewId: view.viewId, sessionId: view.expectedSessionId, draftToken: view.expectedDraftToken, text: `capture ${index}` })).value).id);
+	await f.peer.request("context.close", { contextId: "bounded-outcomes-barrier" });
+	const outcomes = UiStateSchema.parse((await f.api("/v1/state")).value).outcomes;
+	expect(outcomes).toHaveLength(256);
+	expect(outcomes.map(item => item.id)).toEqual(ids.slice(-256));
+	expect(outcomes.every(item => item.error === undefined)).toBe(true);
 }, 30000);

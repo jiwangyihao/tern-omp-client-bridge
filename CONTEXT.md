@@ -34,12 +34,12 @@ A Tern view of a running program. Its identity provides UI context, not by itsel
 an OMP conversation identity.
 
 **Authorized device**:
-A client device whose operator has enabled a defined set of capabilities for the
-bridge. Authorization is distinct from selection as a session's target.
+A paired client device manually bound to an OMP session for agent operations.
+Its native Agent safety rules and operating-system permissions still apply.
 
 **Binding**:
-An OMP session's human-selected association with an authorized client device.
-A session can also be unbound.
+An OMP session's human-selected association with a paired client device that
+authorizes agent operations on that device. A session can also be unbound.
 _Avoid_: last connected client, active window.
 
 **Bound client**:
@@ -84,5 +84,5 @@ message or an automatically executed tool result.
 
 **Pairing**:
 The established relationship between a client executor and a remote bridge.
-Pairing establishes identity and capability access; binding selects a target for
-one OMP session.
+Pairing establishes device identity and a trusted transport relationship; binding
+authorizes use of the device for one OMP session.

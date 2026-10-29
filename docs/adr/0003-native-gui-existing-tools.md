@@ -13,5 +13,7 @@ selection, while client filesystem location is expressed by the client URI
 namespace. Plugin integration is preferred where the verified interfaces allow
 it; a missing stable hook must be demonstrated before proposing a host change.
 
-A client executor may run as a companion process. It executes capabilities and
-enforces their local access contract; it is not an additional reasoning agent.
+A client executor may run as a companion process. It executes native tools under
+the client's native Agent policy and OS permissions; it is not an additional
+reasoning agent. The plugin must not replace local policy with server settings,
+force allow/deny lists, or add a second capability-grant system.

@@ -1,83 +1,67 @@
 # Tern / OMP Client Bridge
 
-Use a manually selected client device's files and execution capabilities from a
-remote OMP session, without replacing Tern's native OMP GUI. A companion process
-on each client connects **outbound over SSH** to an agent-host relay. It runs native
-OMP tools, not another reasoning agent.
+**Beta 预发布版 `v0.5.0-beta.1`** · [下载与版本说明](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.1) · [安装指南](docs/installation.md)
 
-## Status and scope
+让远端 OMP 会话使用你手动绑定的客户端设备上的文件与原生工具，同时保留 Tern 的原生 OMP 界面。客户端主动通过 SSH 连接远端主机，只负责工具执行，不运行额外的推理 Agent。
 
-This repository contains the broker, outbound client, native OMP extension, Tern
-plugin, and finite installation commands. macOS and native Windows are client
-targets; implementation is not the same as completed platform acceptance. Read
-[Compatibility and evidence boundaries](docs/compatibility.md) before deployment.
-In particular, same-machine integration coverage does not establish three-device,
-Windows GUI, native paste/drop, desktop, or attached-Android acceptance.
+当前为测试版。**已实现功能不等于所有平台均已通过验收**，部署前请阅读下方的验证范围与[兼容性说明](docs/compatibility.md)。
 
-- Each OMP session starts unbound. Humans select its shared target; all viewers
-  see the binding, switch actor, and online/offline status. Switching changes the
-  next invocation, not a running operation.
-- Existing `eval` and `bash` accept `target: "client"`; the agent host remains the
-  default. Existing file tools use `client:///absolute/path` on the bound device.
-- Client JS/Python, shell, browser, desktop, and ADB usage retain their native
-  prerequisites, permissions, and device/context ownership. These are not
-  interchangeable backends or a sandbox for arbitrary execution.
-- Native text/image paste remains unchanged: no bridge override, asynchronous
-  classification or replay. Native input does not need bridge validation.
-- **OMP: Paste image to remote** is an explicit local command/status action.
-  After local confirmation, one clipboard image is snapshotted and uploaded;
-  native Cmd/Ctrl+V remains untouched. No agent clipboard tool or watcher is added.
-- Local file drops originate on **this device**, independently of agent binding.
-  Uploaded images enter OMP's native image-paste handling. Ordinary files become
-  quoted paths into a private temporary inbox, with a README, draft reminder and
-  user notice to archive/copy them into project storage before working on them.
-  Existing drafts remain unsent; referenced uploads are not automatically deleted.
-- PNG/JPEG/GIF/WebP image paths use native attachment handling. Native preview
-  completion remains the host's responsibility. No OMP host patch is used.
-- Disconnects never select another device or replay a side-effecting operation.
+## 在哪台机器安装
 
-## Start here
+| 机器 | 预先准备 | Bridge 安装内容 |
+| --- | --- | --- |
+| 本机客户端 | 已登录的 Tern 原生 GUI、本机 Tern CLI、原生 SSH | 先安装本仓库的 Tern 插件；初始化后运行客户端后台服务。 |
+| 远端 Agent 主机 | 支持 POSIX 的 Linux/macOS 主机，已安装兼容的原生 OMP 与 Tern | 初始化安装 broker、OMP 扩展与 Tern 主机插件，并启动 broker 后台服务。 |
 
-Install Bun **1.4.3 or newer** and this checkout with its pinned dependencies on
-both the agent host and each client. The bridge uses OMP SDK **18.10.4**. From the
-checkout on each machine:
+本机须能通过已信任、支持非交互认证的 SSH 别名连接远端主机，无需开放入站 SSH 服务。初始化不会安装 Tern 或 OMP，也不会代替你确认 SSH 主机密钥。
 
-```sh
-bun install --frozen-lockfile --ignore-scripts
-bun src/cli.ts --help
-```
+推荐安装路径由 **Set up Bridge** 为两端准备专用 Bun（`>=1.4.3`）和固定版本 OMP SDK（`18.10.4`），无需全局 Bun。发布包保留源码与资源，不包含 `node_modules` 或独立原生可执行文件；依赖按目标平台安装。
 
-Then follow [Setup and usage](docs/usage.md) for the complete two-machine sequence:
-install the OMP loader on the agent host, run its broker, install the Tern plugin
-on the client, and start the client with an explicit capability grant and SSH
-relay command. The installers do **not** start services or reload applications.
-Keep the checkout installed: the OMP loader refers to its source entrypoint.
+## 三步开始
 
-Read [Security](docs/security.md) before granting access. A shared server account
-or root is not per-person isolation. `files` and `exec` are coarse grants, and
-separately authorized code can access the OS account's resources.
+1. **在本机安装原生插件**。从[版本下载页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.1)选择 `.tar.gz` 或 `.zip` 附件，按 `SHA256SUMS` 校验并解压，再用本机 Tern 的原生 `tern plugin install` 安装包目录。完整命令见[安装指南](docs/installation.md)。仅加载插件不会下载运行时或启动服务。
+2. **选择 OMP → Set up Bridge**。在 Tern 命令面板打开常驻原生侧栏，核对远端主机并完成 SSH 检查。首次准备远端设置界面与完整 Bridge 安装分别征求明确授权；完整安装获准后才准备运行时、依赖和后台服务。
+3. **新建远端 OMP 会话并显式绑定设备**。新会话加载扩展后，在 Bridge 面板中手动选择供 Agent 使用的客户端。**Awaiting OMP session** 仅表示安装和客户端注册完成，仍需真实会话握手与就绪检查。初始化不会重启现有会话，也不会自动绑定设备。
 
-## Specification and repository
+## 已实现的操作
 
-The product specification is
-[Issue #1: Native Tern client bridge for OMP](https://github.com/jiwangyihao/tern-omp-client-bridge/issues/1).
-The latest approved scope preserves native paste and permits an explicit image
-command, image/file drops, and ordinary-file inboxes with archival guidance.
-Implementation work is tracked in
-[GitHub Issues](https://github.com/jiwangyihao/tern-omp-client-bridge/issues).
-Source: [tern-omp-client-bridge](https://github.com/jiwangyihao/tern-omp-client-bridge).
+- **设备绑定与状态**。每个 OMP 会话默认未绑定，所有查看者共享目标、切换者与在线状态。切换只影响下一次调用，运行中的操作保留原目标。状态入口打开原生 PiP 面板，关闭面板不会取消已开始的上传。
+- **文件与代码执行**。现有 `eval`、`bash` 可使用 `target: "client"`，文件工具通过 `client://` 路由访问已绑定设备。普通远端路径和未指定客户端的调用仍由 Agent 主机执行。浏览器、桌面和 ADB 沿用客户端的原生后端、设备上下文与权限要求。
+- **人工传输**。本地用户触发 **Paste to remote** 后读取一次剪贴板文本或图片；**Upload file** 打开本机文件选择器，也提供本地文件拖放路径。传输源始终是发起操作的这台设备，与 Agent 绑定目标无关。这些显式手势无需第二次 Bridge 确认，原生工具与系统权限仍然有效。
+- **草稿与附件**。上传的图片交给 OMP 原生附件处理；普通文件进入远端私有临时收件目录，并附归档提醒。草稿不会自动发送，引用文件不会自动删除。处理普通文件前，请先将其复制或归档到项目存储。
 
-## Reading map
+原生文本与图片粘贴保持不变。Bridge 不拦截、分类或重放 `Cmd/Ctrl+V`，也不添加 Agent 剪贴板工具或监听器。操作细节与高级维护命令见[使用指南](docs/usage.md)。
 
-- [Setup and usage](docs/usage.md)
-- [Security and trust boundaries](docs/security.md)
-- [Compatibility and evidence boundaries](docs/compatibility.md)
-- [Verification record and open acceptance gates](docs/verification.md)
-- [Domain glossary](CONTEXT.md)
-- [Architecture decisions](docs/adr/)
-- [Interface research and limits](docs/research/interface-verification.md)
-- [Agent workflow](AGENTS.md)
+## 信任边界
 
-## License
+**绑定设备允许该会话按设备自身的 Agent 策略和操作系统权限调用原生工具，不提供沙箱隔离。** 绑定前请阅读[安全与信任边界](docs/security.md)。
 
-[Mozilla Public License 2.0](LICENSE), SPDX identifier `MPL-2.0`.
+- 仅连接可信主机和设备。共享远端账号或 root 权限不构成按人的访问隔离，broker 与客户端控制端点不得公开暴露。
+- 原生授权、应用登录、浏览器配置和桌面控制的本地确认仍然有效。设备注册成功不代表已经授权 Agent 使用它。
+- 断连不会自动改选其他设备，也不会重放已派发的有副作用操作。结果不明确时，应先检查原目标状态。
+
+## Beta 验证范围
+
+验证记录与实现范围分开维护，不作跨平台通用保证。
+
+- **已有验证记录**。macOS 普通 GUI 使用的原生 daemon 转发已通过最小 `PATH` 下的 `ctl state` 检查，并验证拒绝无效窗口。另有 Luau 边界、客户端解析与设置单元测试、原生 Linux 解析、源码安装及真实隔离初始化的通过记录。既有真实 SSH 传输和原生未发送草稿交接记录，不等同于全部系统剪贴板或鼠标拖放手势通过验收。
+- **仍待实际验收**。主窗口 PiP 的打开、尺寸与焦点仍待授权后的桌面验收；原生 Windows 进程与 GUI、三台物理客户端共同使用、跨设备桌面控制、完整粘贴与拖放，以及真实 Android 设备操作尚未完成验收。Windows 实现要求原生运行环境，不能以 WSL 结果替代。
+
+具体环境、历史结果与未完成项见[兼容性与验证边界](docs/compatibility.md)和[验证记录](docs/verification.md)。Linux 主机或安装检查通过，不代表全部客户端交互能力可用。
+
+## 文档与项目
+
+- [安装指南](docs/installation.md)
+- [使用与维护](docs/usage.md)
+- [安全与信任边界](docs/security.md)
+- [兼容性与验证边界](docs/compatibility.md)
+- [验证记录与待验收项](docs/verification.md)
+- [领域术语](https://github.com/jiwangyihao/tern-omp-client-bridge/blob/v0.5.0-beta.1/CONTEXT.md)与[架构决策](docs/adr/)
+- [接口调研与限制](docs/research/interface-verification.md)
+- [Agent 工作约定](https://github.com/jiwangyihao/tern-omp-client-bridge/blob/v0.5.0-beta.1/AGENTS.md)
+
+[源代码](https://github.com/jiwangyihao/tern-omp-client-bridge) · [问题反馈与实现跟踪](https://github.com/jiwangyihao/tern-omp-client-bridge/issues) · [产品规格 Issue #1](https://github.com/jiwangyihao/tern-omp-client-bridge/issues/1)
+
+## 许可证
+
+[Mozilla Public License 2.0](LICENSE)，SPDX 标识符为 `MPL-2.0`。

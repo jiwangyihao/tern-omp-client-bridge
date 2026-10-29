@@ -19,7 +19,7 @@ class BackgroundEvent extends Event {
 
 function result(contextId = "omp-main:Main", sessionId = "root", deviceId = "original-device"): BackgroundResult {
 	return {
-		target: { requestId: "request-1", sessionId, contextId, bindingRevision: 3, device: { id: deviceId, name: deviceId, platform: "darwin", arch: "arm64", capabilities: ["exec"] } },
+		target: { requestId: "request-1", sessionId, contextId, bindingRevision: 3, device: { id: deviceId, name: deviceId, platform: "darwin", arch: "arm64" } },
 		result: { content: [{ type: "text", text: "native process exited with status 7\nartifact://client-result" }], details: { exitCode: 7, jobId: "native-job-1" } },
 	};
 }

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { validateAgentToolArguments, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { getDaemonRuntimeDir, VERSION } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { all as allSettings } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { createTools, createXdevState, createBrowserPrelude, createComputerPrelude, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
@@ -16,7 +17,8 @@ import { disposeVmContextsByOwner } from "@oh-my-pi/pi-coding-agent/eval/js/cont
 import { disposeKernelSessionsByOwner } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { releaseShellSessions } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { armIdleCloseForOwner, cancelIdleCloseForOwner, releaseTabsForOwner } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import { cfgBrowserIdleCloseSec } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgBrowserEnabled, cfgBrowserIdleCloseSec } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { releaseComputerSessionsForOwner, revokeComputerControlForOwner } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { closeDaemonClients, daemonClientForProject } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { hasLiveOwnedService, listServices, stopService } from "@oh-my-pi/pi-coding-agent/launch/services";
@@ -166,24 +168,25 @@ async function initialize(input: Extract<WorkerInput, { type: "init" }>): Promis
 	contextId = input.contextId;
 	hasInteractions = input.hasInteractions;
 	await mkdir(join(input.stateDir, "artifacts"), { recursive: true, mode: 0o700 });
-	const files = input.capabilities.includes("files");
-	const exec = input.capabilities.includes("exec");
-	const settings = await Settings.init({
-		cwd: input.cwd, agentDir: join(input.stateDir, "native", "agent"), inMemory: true,
-		overrides: {
-			"eval.py": exec, "eval.js": exec, "eval.autoProvision": false,
-			"python.kernelMode": "session", "task.maxRecursionDepth": 0,
-			"computer.enabled": input.capabilities.includes("computer"), "browser.enabled": input.capabilities.includes("browser"),
-			"browser.cmux": false, "browser.tern": false, "async.enabled": true, "launch.enabled": exec,
-			// Native auto-background Bash creates a fresh shell; explicit async remains available.
-			"bash.autoBackground.enabled": false, "tools.approvalMode": "always-ask",
-			"tools.approval": {
-				read: files ? "allow" : "deny", write: files ? "allow" : "deny", edit: files ? "allow" : "deny",
-				grep: files ? "allow" : "deny", glob: files ? "allow" : "deny", bash: exec ? "allow" : "deny", eval: exec ? "allow" : "deny",
-				computer: "prompt", browser: "prompt",
-			},
-		},
+	// Read the client's native global → project → config-overlay policy without
+	// opening its agent.db or persisting migrations. inMemory initialization alone
+	// skips the global layer in SDK 18.10.4, so it cannot load the client's policy.
+	const localSettings = await Settings.loadReadOnly({ cwd: input.cwd, agentDir: input.agentDir, configFiles: input.configFiles });
+	const settings = localSettings.overlay({
+		"eval.autoProvision": false, "python.kernelMode": "session", "task.maxRecursionDepth": 0,
+		"browser.cmux": false, "browser.tern": false,
+		// Native auto-background Bash creates a fresh shell; explicit async remains available.
+		"bash.autoBackground.enabled": false,
 	});
+	// Bash and Python internals still call Settings.init() without a session.
+	// Seed that isolated singleton with the same resolved native configuration,
+	// not an empty policy or the user's writable global storage.
+	const configured: Record<string, unknown> = {};
+	for (const setting of allSettings()) {
+		const value = settings.rawValue(setting);
+		if (value !== undefined) configured[setting.id] = value;
+	}
+	await Settings.init({ cwd: input.cwd, agentDir: join(input.stateDir, "native", "agent"), inMemory: true, overrides: configured });
 	const artifacts = new ArtifactManager(join(input.stateDir, "artifacts"));
 	// SessionManager is the SDK's data journal, not AgentSession or a model loop.
 	// Adopt the same real artifact store used by native tools so centralized spills
@@ -205,7 +208,7 @@ async function initialize(input: Extract<WorkerInput, { type: "init" }>): Promis
 	const nativeSession: ToolSession = {
 		cwd: input.cwd, hasUI: hasInteractions, canPromptUser: hasInteractions, settings,
 		sessionManager: storageSession,
-		enableLsp: false, enableMCP: false, enableIrc: false, hasEditTool: files, restrictToolNames: true,
+		enableLsp: false, enableMCP: false, enableIrc: false, hasEditTool: true, restrictToolNames: true,
 		taskDepth: 0, skipPythonPreflight: true,
 		getSessionId: () => owner, getEvalSessionId: () => owner, getEvalKernelOwnerId: () => owner, getAgentId: () => owner,
 		getSessionFile: () => null, getSessionSpawns: () => "",
@@ -229,35 +232,32 @@ async function initialize(input: Extract<WorkerInput, { type: "init" }>): Promis
 		},
 	};
 	session = nativeSession;
-	const names = [...(files ? ["read", "write", "edit", "grep", "glob"] : []), ...(exec ? ["bash", "eval"] : [])];
+	const names = ["read", "write", "edit", "grep", "glob", "bash", "eval"];
 	tools = new Map((await createTools(nativeSession, names)).map(tool => [tool.name, guardedTool(tool)]));
 	nativeSession.toolRegistry = tools;
 	nativeSession.xdev = createXdevState(nativeSession, tools, new Set(tools.keys()));
-	if (exec) {
-		for (const language of ["js", "py"] as const) {
-			const runtime: EvalRuntime = { kernelOwner: `${owner}:${language}`, queue: Promise.resolve(), tracked: new Set(), tools: new Map(), preludes: [] };
-			evalRuntimes[language] = runtime;
-			// Native JS/Python bridges retain the ToolSession on each pending run. A
-			// language queue owns this facade through full settlement, not foreground return.
-			// Mutable file stores still delegate to the one context's base ToolSession.
-			const overrides: Partial<ToolSession> = {
-				toolRegistry: runtime.tools, xdev: undefined, isToolActive: () => false,
-				getEvalKernelOwnerId: () => runtime.kernelOwner,
-				getToolByName: name => runtime.tools.get(name), getToolForEvalBridge: name => runtime.tools.get(name),
-				getEvalBridgeToolNames: () => [...runtime.tools.keys()], getToolContext: () => nativeContext(runtime.current),
-				getEvalPreludes: () => runtime.preludes, getAdvertisedEvalPreludes: () => runtime.preludes,
-				trackEvalExecution: <T>(execution: Promise<T>, controller: AbortController): Promise<T> => trackExecution(execution, controller, runtime.current, runtime),
-			};
-			const scoped = new Proxy(nativeSession, {
-				get: (target, key) => Object.hasOwn(overrides, key) ? Reflect.get(overrides, key) : Reflect.get(target, key),
-				set: (target, key, value) => Reflect.set(Object.hasOwn(overrides, key) ? overrides : target, key, value),
-			});
-			if (input.capabilities.includes("computer")) runtime.preludes.push(createComputerPrelude(scoped));
-			if (input.capabilities.includes("browser")) runtime.preludes.push(createBrowserPrelude(scoped));
-			runtime.tools = new Map((await createTools(scoped, names)).map(tool => [tool.name, guardedTool(tool, () => runtime.current)]));
-			scoped.toolRegistry = runtime.tools;
-			scoped.xdev = createXdevState(scoped, runtime.tools, new Set(runtime.tools.keys()));
-		}
+	for (const language of ["js", "py"] as const) {
+		const runtime: EvalRuntime = { kernelOwner: `${owner}:${language}`, queue: Promise.resolve(), tracked: new Set(), tools: new Map(), preludes: [] };
+		evalRuntimes[language] = runtime;
+		// Native JS/Python bridges retain the ToolSession on each pending run. A
+		// language queue owns this facade through full settlement, not foreground return.
+		// Mutable file stores still delegate to the one context's base ToolSession.
+		const overrides: Partial<ToolSession> = {
+			toolRegistry: runtime.tools, xdev: undefined, isToolActive: () => false,
+			getEvalKernelOwnerId: () => runtime.kernelOwner,
+			getToolByName: name => runtime.tools.get(name), getToolForEvalBridge: name => runtime.tools.get(name),
+			getEvalBridgeToolNames: () => [...runtime.tools.keys()], getToolContext: () => nativeContext(runtime.current),
+			getEvalPreludes: () => runtime.preludes, getAdvertisedEvalPreludes: () => runtime.preludes,
+			trackEvalExecution: <T>(execution: Promise<T>, controller: AbortController): Promise<T> => trackExecution(execution, controller, runtime.current, runtime),
+		};
+		const scoped = new Proxy(nativeSession, {
+			get: (target, key) => Object.hasOwn(overrides, key) ? Reflect.get(overrides, key) : Reflect.get(target, key),
+			set: (target, key, value) => Reflect.set(Object.hasOwn(overrides, key) ? overrides : target, key, value),
+		});
+		runtime.preludes.push(createComputerPrelude(scoped), createBrowserPrelude(scoped));
+		runtime.tools = new Map((await createTools(scoped, names)).map(tool => [tool.name, guardedTool(tool, () => runtime.current)]));
+		scoped.toolRegistry = runtime.tools;
+		scoped.xdev = createXdevState(scoped, runtime.tools, new Set(runtime.tools.keys()));
 	}
 	const shell = settings.getShellConfig();
 	const adb = Bun.which("adb");
@@ -266,8 +266,8 @@ async function initialize(input: Extract<WorkerInput, { type: "init" }>): Promis
 		ordinaryShell: { backend: "native-brush", syntax: "POSIX", persistence: "per-context", automaticBackgrounding: false },
 		serviceShell: { executable: shell.shell, args: shell.args, ...(shell.prefix ? { prefix: shell.prefix } : {}) },
 		adb: { executable: adb, available: adb !== null, deviceAccess: "not-probed", requirement: "Use the local adb executable with an explicit -s serial; USB/wireless debugging authorization remains OS/device-owned." },
-		browser: { defaultBackend: "headless-chromium", availability: "not-probed", ownership: "context", requirement: "Native Chromium or an explicitly selected app/CDP/relay backend; no profile or cookie migration. Backend startup errors are returned unchanged." },
-		computer: { availability: "not-probed", requirement: "Interactive desktop session, native addon and OS screen/accessibility permissions; local human confirmation is mandatory." },
+		browser: { defaultBackend: "headless-chromium", availability: cfgBrowserEnabled.get(settings) ? "not-probed" : "disabled", ownership: "context", requirement: "Native Chromium or an explicitly selected app/CDP/relay backend; no profile or cookie migration. Backend startup errors are returned unchanged." },
+		computer: { availability: cfgComputerEnabled.get(settings) ? "not-probed" : "disabled", requirement: "Interactive desktop session, native addon and OS screen/accessibility permissions; local human confirmation is mandatory." },
 		limits: [
 			"Ordinary Bash uses native embedded brush POSIX syntax, including on Windows; it does not run WSL or pretend to be cmd/PowerShell.",
 			"Automatic Bash backgrounding is disabled because SDK 18.10.4 creates a new shell for each auto-background candidate; explicit async jobs remain native and isolated.",
@@ -331,6 +331,9 @@ function guardedTool(tool: Tool, resolveOwner?: () => Invocation | undefined): T
 				if (!current) throw new Error("Native tool call has no invocation owner");
 				signal?.throwIfAborted();
 				if (tool.name === "bash" && params.pty === true && !params.name) throw new BridgeError("interactive_pty_unavailable", "Unnamed PTY commands require OMP's terminal overlay, not a permission dialog. Supply a unique name to use a real native managed PTY and proc:// stdin/output/kill.");
+				// The language-scoped Eval tool applies policy once, after acquiring its
+				// invocation owner. Prompting here too would duplicate native approval.
+				if (tool.name === "eval" && !resolveOwner) return invokeEval(current, id, params, signal, onUpdate);
 				const policy = resolveApprovalFromContext(context);
 				const approval = resolveApproval(target, params, policy.approvalMode, policy.userPolicies);
 				if (approval.policy === "deny") throw denyError(approval, target.name);
@@ -361,9 +364,7 @@ function guardedTool(tool: Tool, resolveOwner?: () => Invocation | undefined): T
 					}
 				};
 				const update = (result: ToolResult) => { rememberOwner(result); onUpdate?.(result); };
-				const result = tool.name === "eval" && !resolveOwner
-					? await invokeEval(current, id, params, signal, update)
-					: await invocation.run(current, () => target.execute(id, params, signal, update, context));
+				const result = await invocation.run(current, () => target.execute(id, params, signal, update, context));
 				rememberOwner(result);
 				return result;
 			};
@@ -379,7 +380,7 @@ async function execute(request: ExecuteRequest, current: Invocation): Promise<vo
 		if (request.target.contextId !== contextId) throw new BridgeError("context_mismatch", "Invocation belongs to another device context");
 		current.controller.signal.throwIfAborted();
 		const tool = tools.get(request.tool);
-		if (!tool) throw new BridgeError("capability_denied", `Native tool ${request.tool} is not enabled on this device`);
+		if (!tool) throw new BridgeError("native_tool_unavailable", `Native tool ${request.tool} is disabled by client-local settings or unavailable`);
 		const params = { ...request.params };
 		delete params.target;
 		delete params.i;
