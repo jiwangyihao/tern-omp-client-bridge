@@ -44,12 +44,22 @@ afterEach(async () => {
 			if (record.pid === process.pid) throw new Error("A fixture-owned service unexpectedly identifies the test runner");
 			const endpoint = await readEndpoint(path.join(state.stateDir, `${state.kind}.json`));
 			if (endpoint.pid !== record.pid) throw new Error("Fixture service ownership changed before teardown");
-			await serviceHealth(state.kind, state.stateDir);
+			const health = await serviceHealth(state.kind, state.stateDir);
+			if (health.endpoint.pid !== record.pid || health.endpoint.url !== endpoint.url || health.endpoint.token !== endpoint.token) throw new Error("Fixture service ownership changed during authentication");
 			process.kill(record.pid, "SIGTERM");
 			const deadline = Date.now() + 5000;
-			// A detached OS process cannot share fake timers; await its actual graceful-shutdown record removal.
-			while (await readOptionalJson(recordFile) !== undefined && Date.now() < deadline) await Bun.sleep(20);
-			if (await readOptionalJson(recordFile) !== undefined) throw new Error(`Managed ${state.kind} did not complete graceful shutdown within 5s; retained fixture: ${state.stateDir}`);
+			// Windows SIGTERM terminates the OS process without running JS signal/finally cleanup.
+			// POSIX must still remove its record gracefully; neither platform may leave a live listener.
+			// Detached OS process exit cannot be advanced by the test runner's fake timers.
+			while (Date.now() < deadline && (processExists(record.pid) || (process.platform !== "win32" && await readOptionalJson(recordFile) !== undefined))) await Bun.sleep(20);
+			if (processExists(record.pid)) throw new Error(`Managed ${state.kind} did not exit within 5s; retained fixture: ${state.stateDir}`);
+			const remaining = await readOptionalJson(recordFile);
+			if (process.platform !== "win32" && remaining !== undefined) throw new Error(`Managed ${state.kind} did not remove its record during graceful shutdown; retained fixture: ${state.stateDir}`);
+			if (remaining !== undefined && JSON.stringify(remaining) !== JSON.stringify(saved)) throw new Error("Fixture service ownership changed after termination");
+			const reachable = await fetch(endpoint.url + (state.kind === "server" ? "/v1/health" : "/v1/state"), {
+				headers: { authorization: `Bearer ${endpoint.token}` }, redirect: "error", signal: AbortSignal.timeout(2000),
+			}).then(async response => { await response.arrayBuffer(); return true; }, () => false);
+			if (reachable) throw new Error(`Managed ${state.kind} endpoint remained reachable after process exit; retained fixture: ${state.stateDir}`);
 		} catch (error) { errors.push(error instanceof Error ? error : new Error(String(error))); }
 	}
 	// Preserve private logs/ownership metadata on failure instead of hiding a live-service defect.

@@ -17,8 +17,125 @@ and work on those copies. The bridge neither selects that destination nor
 submits a prompt or automatically deletes referenced assets.
 
 The broader original specification remains open for platform/GUI acceptance;
-this record does not claim three physical clients, Windows GUI, or attached-device
-ADB acceptance.
+the limited Windows setup-sidebar check below does not establish three physical
+clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
+
+## 2026-10-30：v0.5.0-beta.2 发布前验证
+
+此修复版包含下文的原生 Windows 适配和通用 SSH 设置修复，继续标记为 Beta。
+旧版附件、历史 CI 失败和未验收的跨设备 GUI 范围均不改写为成功。
+
+- 独立状态目录中的原生 Windows x64 / Bun 1.4.3 验证正常退出：273 通过、
+  19 个平台条件跳过、0 失败；共 30 个文件、292 个用例、1988 个断言。
+  TypeScript 类型检查、源码保留型构建和构建后 CLI help 均通过。
+- 原生 Luau：1670 个 SSH 发现断言、44 个协调器场景、27 个设置视图场景、
+  219 个窗口路由场景、9 个宿主面板场景、432 个目标协议断言通过。
+  最后一项在 Windows 只执行 Luau 边界，不把它当成 POSIX shell 实机探测。
+- README 与安装指南中的 25 个本地文件链接有效。版本、发行附件名称和安装
+  示例统一为 `v0.5.0-beta.2`；固定依赖及最低 Bun 要求未改变。
+
+本版本 GitHub Actions 与发行附件的验证回执见对应发行说明；不使用 beta.1
+的 macOS CI 代替新提交的结果。真实 Tern 设置流程与平台限制保留在下文。
+
+## 2026-10-30：通用 SSH 识别、多候选与手动修正
+
+本轮修改产品代码，不以手工修改本机映射代替修复；已移除上一轮临时添加的
+直接地址映射，保留其他已有映射。`setup-ssh.luau` 是逐步执行的有界发现模块，
+`setup-controller.luau` 负责预检顺序与生命周期，设置视图负责输入与公开结果。
+
+### 行为与根因
+
+- 通过本机 `ssh -G -v` 找到实际配置文件及有效参数；仅把关联的字面 Host 别名
+  加入认证候选，保存映射、配置别名、原生地址按顺序尝试。最多 6 个认证候选，
+  配置发现 30 秒、整轮检查 90 秒；不登录无关配置主机，不自动安装。
+- 相同目标的更高 revision 曾无条件重置手动输入及选区；现在只有目标真正变化
+  或输入得到权威确认才重置。手动失败不回退旧地址，可直接修改并再次检查。
+- Windows 新开窗口使用 Git OpenSSH 时，原生日志给出 `/c/Users/...` 和
+  `/etc/ssh/...`，原先被文件 API 当成 `C:/c/...`、`C:/etc/...`。现在定位实际
+  SSH 程序，使用同工具链 `cygpath.exe` 转换路径；Windows 原生路径及 POSIX
+  系统路径不被错误转换。诊断日志的反斜杠和八进制 UTF-8 转义只解码一次。
+- 原有手动 `check` 动作语义保留，自动候选使用独立动作；旧控制端的快照没有
+  新能力字段时，渲染器仍发送原有手动动作，不破坏共享远端界面的旧客户端。
+
+### 已执行证据
+
+- 原生 Luau：1670 个发现断言、44 个协调器场景、27 个设置视图场景、219 个
+  窗口路由场景通过。覆盖多候选失败后成功、手动不回退、过期回调、输入保留、
+  Include 跟踪、模式排除和 Windows/MSYS 路径转换。
+- 类型检查与构建通过；精确路径的安装套件为 15 通过、3 个平台条件跳过、0 失败。
+  曾误用无 `./` 的 Bun 过滤器而额外运行 dist 中的测试；该重复运行没有独立依赖，
+  其失败不作为安装验证结果，已用项目规定的精确测试入口复验。
+- 真实 Windows Tern 窗口：没有人工地址映射时，从本机配置识别正确别名，显示
+  `Local SSH config` 与 `Passed`；系统/Git OpenSSH 的路径差异已实际诊断并修复。
+- 独立可见测试窗口实际执行“错误目标失败 → 输入保留 → 正确别名成功”，显示
+  `Manual SSH`；输入后立即检查也使用了新目标，没有复用旧的成功结果。
+- Linux 原生 OpenSSH 用隔离配置验证 Include（含空格路径）、Match、User、Port
+  和 ProxyJump 的有效参数解析；不对合成地址发起认证，临时配置已清除。
+- 本机插件与远端共享设置渲染器均已部署，远端原生 catalog 报告 ready。部署前后
+  共享 broker 的 PID/instance 和 Windows 客户端 PID 均保持不变；客户端健康检查
+  确认仍连接且已有真实会话握手。本轮未重启这些服务或用户 OMP 会话。
+  自建验证窗口、临时发布脚本及截图已清理，SSH 配置与密钥未修改。
+
+macOS 分支采用同一 POSIX/OpenSSH 规则并有路径边界覆盖，本轮未执行 macOS
+桌面实机测试。配置匹配不是 Tern/SSH 同机身份认证；模糊或无法枚举的配置保留
+人工确认与手动入口。没有把任何用户主机名、IP 或密钥路径写进产品源码。
+
+## 2026-10-30：原生 Windows 适配与本机安装
+
+环境：Windows x64 10.0.26340、Tern 0.9.7（`c2f7563`）、独立 Bun 1.4.3、
+锁定 OMP SDK 18.10.4。未替换全局 Bun、用户 SSH 配置或密钥；未重启现有
+Tern 或 OMP 会话。安装器先保留健康的共享 broker，随后经用户单独授权，
+核验归属后仅升级该 broker。以下证据不改变已发布附件或历史 CI 结果。
+
+### 修复与真实行为证据
+
+- Windows PowerShell 5.1 继承 PowerShell 7 模块路径时，Security 自动加载失败。
+  私有 ACL 改用直接 .NET API；实测所有者、禁止继承、仅当前 SID FullControl、
+  Unicode/空格/元字符路径及权限拒绝后不落盘。引导只调整自身模块路径。
+- PowerShell 将传给 `File.Replace` 的 `$null` 绑定为空字符串；改用
+  `NullString.Value` 保持原子替换。子进程 stderr 不再将成功或具体后端失败
+  误写成笼统的运行时失败；回归覆盖退出码 0 与 23、进度保留与诊断不外泄。
+- Tern 的真实 Windows 端点是 `\\.\pipe\tern-<USERNAME>`。安装器和窗口侧均
+  接受本机命名管道，但不将它视为可执行文件。清除端点环境变量后，自动发现
+  `.exe` 和管道仍能通过实际 daemon 执行 `ctl state`。
+- ConPTY cooked stdin 使用 CR 提交行，原测试的 LF 只回显。产品保留原始字节，
+  回归改为真实 Enter，并保留同名服务的上下文隔离、退出回调和处置行为。
+  任意 CMD 内嵌引号仍受锁定 SDK 的 argv 转义限制，未以脚本包装掩盖该限制。
+- Bun 1.4.3 的 Windows `rename(directory, existingFile)` 会覆盖原文件。
+  Windows 上传发布改用原子、拒绝覆盖的 `Directory.Move`；实测碰撞保留原字节，
+  正常上传及暂存/发布 ACL 另有原生断言。
+- Windows Git 的 CRLF 导致传到 Linux 的 `.sh` 在 `set -eu` 处失败；
+  `.gitattributes` 固定 POSIX 脚本、清单及归属标记为 LF，现有相关文件已规范化。
+  修复后的真实脚本开头已通过目标主机 shell 执行。
+- SSH 主机显示名称、Tern 地址和 OpenSSH `Host` 别名分别处理。按用户明确选择
+  保存目标到别名的映射后，插件原样预检参数通过公钥认证并返回
+  `TERN_OMP_SSH_PREFLIGHT_V1\tLinux\tx86_64`；错误提示指向 **Edit SSH**，
+  不再将使用直接 IP 丢失别名配置误导为需要重新配置免密登录。
+
+### 已执行验证
+
+- 完整原生 Windows 套件：273 通过、19 个平台条件跳过、0 失败，覆盖 30 个文件、
+  292 个用例；TypeScript 类型检查通过。源码保留型 `dist` 构建及其 CLI help 运行通过。
+- 权限、引导、路由、上传发布的聚焦原生回归：43 通过、5 个非当前平台跳过、0 失败。
+- Luau：219 个窗口行为场景、9 个 host-panel 场景、37 个设置协调器场景、
+  22 个设置视图场景、432 个目标选择/协议断言通过。它们是 SDK 边界测试，
+  不冒充系统剪贴板、桌面或完整远端 GUI 验收。
+- 本机插件目录安装成功，原生 catalog 报告 `omp-client-bridge: ready`、无问题；
+  两个既有插件仍为 ready，首次安装后 Tern `settings.json` 的 SHA-256 未变。
+  实际窗口截图确认 **OMP → Set up Bridge** 入口及设置侧栏显示。
+- 使用已配置的 SSH 别名重试真实初始化成功：本机新客户端签名注册并连接，
+  远端插件 ready；安装器没有自动停止旧 broker。用户授权升级后，重新核对
+  managed record、认证端点及 `/proc` 命令行，只向匹配的旧 broker 发送 SIGTERM，
+  从已安装的新包启动替代服务。健康检查通过，Windows/macOS 客户端均重新在线。
+  broker API 不暴露全局活动调用数，未将本机空闲误报为全部客户端空闲。
+
+### 当前部署边界
+
+共享 broker 升级后的实际回执为 `status=awaiting_session`、`stage=awaiting-session`。
+客户端和 broker 均为 `connected=true`、`upgradeRequired=false`，远端插件为
+`reloaded`。服务升级阻塞已消除；仍需新的原生 OMP 会话完成握手，并由用户
+手动绑定设备。安装和注册成功不等于已经授权该会话使用客户端。
+三台物理客户端、跨设备桌面/浏览器、真实剪贴板/拖放和 Android 设备仍未验收。
 
 ## October 29: v0.5.0-beta.1 prerelease checks
 

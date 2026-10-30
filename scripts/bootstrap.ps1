@@ -8,15 +8,23 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Native callers may inherit PowerShell 7's module search path. Use only this
+# engine's bundled modules; this changes the bootstrap process, not user settings.
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $message = 'Cannot prepare private runtime storage. Check plugin data permissions.'
 $work = $null
+$privateStorageReady = $false
+function Publish-File([string]$source, [string]$destination) {
+    # PowerShell 5.1 converts $null to an empty string for .NET string parameters.
+    if ([IO.File]::Exists($destination)) { [IO.File]::Replace($source, $destination, [System.Management.Automation.Language.NullString]::Value) }
+    else { [IO.File]::Move($source, $destination) }
+}
 function Set-State([string]$status) {
     $state = @{ schema=1; status=$status; stage='runtime'; message=$script:message; updatedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
     $temporary = Join-Path $DataDir ('.setup-state.' + [Guid]::NewGuid().ToString('N'))
     [IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
     $destination = Join-Path $DataDir 'setup-state.json'
-    if ([IO.File]::Exists($destination)) { [IO.File]::Replace($temporary, $destination, $null) }
-    else { [IO.File]::Move($temporary, $destination) }
+    Publish-File $temporary $destination
 }
 function Assert-RealDirectory([string]$directory) {
     if (Test-Path -LiteralPath $directory) {
@@ -42,7 +50,8 @@ try {
     $acl.SetOwner($sid)
     $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $DataDir -AclObject $acl
+    [IO.Directory]::SetAccessControl($DataDir, $acl)
+    $privateStorageReady = $true
     Set-State 'installing'
     $runtime = Join-Path $DataDir 'runtime'
     Assert-RealDirectory $runtime
@@ -73,8 +82,7 @@ try {
             $downloaded = Join-Path (Join-Path $work $asset) 'bun.exe'
             $message = 'Downloaded Bun cannot run on this Windows version. Check Bun platform requirements.'
             if (-not (Test-Bun $downloaded)) { throw 'Unsupported runtime' }
-            if ([IO.File]::Exists($bun)) { [IO.File]::Replace($downloaded, $bun, $null) }
-            else { [IO.File]::Move($downloaded, $bun) }
+            Publish-File $downloaded $bun
         }
     }
     $message = 'Cannot launch package preparation. Reinstall the complete Tern plugin and retry.'
@@ -82,12 +90,22 @@ try {
     if (-not [IO.File]::Exists($preparer)) { throw 'Missing preparer' }
     $arguments = @($preparer, 'bootstrap', $PluginRoot, $DataDir, $HostAlias)
     if ($RecoverLock) { $arguments += '--recover-lock' }
-    & $bun @arguments 2>$null
-    $code = $LASTEXITCODE
+    # Windows PowerShell turns redirected native stderr into ErrorRecords. The
+    # preparer owns detailed progress now; preserve its exit code and state.
+    try {
+        $ErrorActionPreference = 'Continue'
+        $LASTEXITCODE = $null
+        & $bun @arguments 2>$null
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = 'Stop' }
+    if ($null -eq $code) { throw 'Cannot launch preparer' }
     if ($code -ne 0) { exit $code }
 } catch {
     # Never surface raw exceptions, URLs with credentials, environment, or child stderr.
-    try { Set-State 'failed' } catch { }
+    if ($privateStorageReady) {
+        try { Set-State 'failed' }
+        catch { [Console]::Error.WriteLine('Cannot record setup failure in private runtime storage.') }
+    }
     [Console]::Error.WriteLine($message)
     exit 1
 } finally {

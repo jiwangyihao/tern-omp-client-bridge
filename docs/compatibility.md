@@ -40,11 +40,12 @@ Unsupported platforms and missing download/extraction tools fail explicitly;
 setup does not bypass host trust, OS permissions, or application sign-in.
 Windows implementation is not evidence of a real Windows initialization run.
 
-For `v0.5.0-beta.1`, [GitHub Actions run 40898284516](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)
-passed the macOS native job but failed Windows: PowerShell could not load the
-Security module for `Set-Acl`, and the native PTY test timed out. These are known
-failures, not skipped acceptance checks. Windows is experimental and is not
-recommended for daily use in this beta. No ACL or permission check was bypassed.
+已发布 `v0.5.0-beta.1` 的 [GitHub Actions 记录](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)
+显示 macOS 通过、Windows 失败：PowerShell Security 模块无法加载，原生 PTY
+测试超时。`v0.5.0-beta.2` 改用直接 .NET ACL API，隔离引导进程的模块路径，
+修正 PowerShell 5.1 原子替换的空字符串绑定，并让 ConPTY 测试使用原生 Enter
+字节 `\r`。权限检查未被绕过，产品仍保留 PTY 原始输入。旧发布包和历史 CI
+结果不因此改变；修复版验证证据与未验收能力见 [verification.md](verification.md)。
 
 Native CLI discovery and launch are machine-local on macOS, Linux and Windows.
 Install/setup save an absolute executable path; the window plugin uses it as a
@@ -58,9 +59,11 @@ Native control routing is also machine-local: the window child receives the
 saved `ternPaneSocket` as `TERN_PANE_SOCKET`, alongside its captured window key.
 Linux runtime-directory precedence was checked with the native CLI; macOS
 daemon forwarding was exercised without a standalone control endpoint.
-Windows socket defaults follow the documented settings-directory contract;
-native Windows process/GUI acceptance remains unverified. Isolated file
-installation does not infer a daemon endpoint from its target directory.
+Windows Tern 0.9.7 使用 `\\.\pipe\tern-<USERNAME>` 本机命名管道，
+不是 settings 目录中的 `daemon.sock`。原生 Windows 已验证安装端解析、
+GUI 无端点环境变量时的默认发现，以及通过该管道执行真实窗口 `ctl state`。
+显式或已保存的端点仍优先，隔离安装不会从目标目录推断 daemon。
+这项只读路由验证不等同于远端会话绑定、传输或桌面控制验收。
 
 
 The lockfile uses public npm tarball URLs while preserving pinned versions and
@@ -72,7 +75,7 @@ integrity hashes. A fresh isolated Linux installation used those URLs with
 | Area | Implemented behavior | Prerequisites / evidence limit |
 | --- | --- | --- |
 | macOS filesystem and execution | Native Bun/SDK worker, real absolute paths, per-context state. | Native runtime and broker integration have been exercised on one Mac; this does not establish multiple physical machines. |
-| Windows filesystem and execution | Native drive-letter/UNC handling, Windows file URLs/ACLs, Windows runtime path handling. | Must run native Windows Bun/SDK, not WSL. Source coverage is not a Windows process/GUI acceptance result. |
+| Windows filesystem and execution | Native drive-letter/UNC handling, Windows file URLs/ACLs, Windows runtime path handling. | 原生 Windows 已实测权限、文件发布和本机 daemon 控制；设置侧栏已显示。完整远端/跨设备 GUI 验收仍须单独完成，不以 WSL 替代。 |
 | Other agent-host platforms | Platform state defaults and broker/relay source are present. | This does not claim all client interactive features are supported there. Clipboard capture is a client-local human operation, not an agent-host clipboard tool. |
 | Native shell | Ordinary Bash uses embedded **brush/POSIX** syntax on all platforms, with per-context persistence. | It is not Windows cmd/PowerShell or WSL. Explicitly invoke a different installed shell if needed. |
 | Background/PTY | Explicit async and named native PTY services; provenance-preserving process handles. | Automatic Bash backgrounding disabled; unnamed `pty:true` errors because the execution-only worker has no TUI overlay. Service shell is reported separately. |
@@ -82,6 +85,14 @@ integrity hashes. A fresh isolated Linux installation used those URLs with
 | Native text paste | Original Tern implementation, without a bridge Paste override, classification, delay, or replay. | Native field routes already bypassed command interception. Restoring text does not verify file/bitmap paste, IME, streaming, or platform GUI acceptance. |
 | Human image attachments | Explicit local Paste to remote gesture, or selected-file uploads/drops; supported uploaded images enter native OMP paste handling. | The paste gesture authorizes one capture without a second Bridge dialog. Native paste and OS/tool permissions remain unchanged; actual clipboard/OS gestures still need platform evidence. Handoff does not certify preview completion. |
 | Ordinary human files | Selected-file snapshots, verified transfer, real inbox paths, published README and visible archival reminders. | Copy/archive into project storage before working. Native copied-file clipboard handling is not intercepted; cross-pane drop targeting still needs actual GUI evidence. |
+
+Windows 原生终端验证使用实际配置的 Git Bash 和 PowerShell。锁定 SDK
+18.10.4 的 `PtySession.startArgv` 对 CMD `/c` 内嵌双引号使用 CRT 转义，
+会产生 CMD 不接受的反斜杠引号；这项上游限制尚未修复。不以 `.cmd` 包装
+或简化输入宣称任意 CMD command 已兼容。普通 Bash 仍使用 embedded brush。
+Windows 的 `process.kill(pid, "SIGTERM")` 是强制终止，不保证执行退出钩子；
+恢复流程须按进程归属处理遗留服务记录，而不是把记录存在当成进程仍存活。
+
 
 ## Native backend details
 

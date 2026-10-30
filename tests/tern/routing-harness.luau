@@ -22,7 +22,7 @@ function run(entry, loadModule)
 		f.processes = {}
 		f.windowKey, f.processReceipts = "fixture-window", {}
 		function f.nativePaneSocket()
-			return f.daemonSocket or (tern.runtime.os == "windows" and "C:\\Users\\Fixture\\Tern\\daemon.sock" or "/isolated/Tern Data/daemon.sock")
+			return f.daemonSocket or (tern.runtime.os == "windows" and "\\\\.\\pipe\\tern-Fixture" or "/isolated/Tern Data/daemon.sock")
 		end
 		function f.nativeConfig()
 			return { controlFile = "/isolated/client.json", ternExecutable = tern.runtime.os == "windows" and "C:\\Program Files\\Tern\\tern.exe" or "/isolated/Tern CLI/tern", ternPaneSocket = f.nativePaneSocket() }
@@ -995,6 +995,7 @@ function run(entry, loadModule)
 		{ "windows", "\\Tern\\tern.exe", "root-relative" },
 		{ "windows", "\\\\server\\tern.exe", "incomplete UNC" },
 		{ "windows", "C:\\Tern\\tern.cmd", "command shim" },
+		{ "windows", "\\\\.\\pipe\\tern.exe", "pipe is not an executable" },
 		{ "windows", "C:\\Tern\\tern.exe --help", "Windows command arguments" },
 		{ "macos", '"/Applications/Tern CLI/tern"', "quoted command" },
 		{ "linux", "/opt/tern\n", "control character" },
@@ -1044,6 +1045,8 @@ function run(entry, loadModule)
 		{ "windows", "//client-server/shared tools/Tern/daemon.sock" },
 		{ "windows", "\\\\?\\C:\\Tern Data\\daemon.sock" },
 		{ "windows", "\\\\?\\UNC\\client-server\\shared tools\\daemon.sock" },
+		{ "windows", "\\\\.\\pipe\\tern-Fixture" },
+		{ "windows", "\\\\.\\PIPE\\tern-安装 with spaces" },
 	} do
 		case("machine-local " .. location[1] .. " socket is passed unchanged: " .. location[2], function(f)
 			tern.runtime.os = location[1]
@@ -1071,7 +1074,11 @@ function run(entry, loadModule)
 		{ "windows", "C:daemon.sock", "drive-relative" },
 		{ "windows", "\\Tern\\daemon.sock", "root-relative" },
 		{ "windows", "\\\\server\\daemon.sock", "incomplete UNC" },
-		{ "windows", "\\\\.\\pipe\\tern", "device namespace" },
+		{ "windows", "\\\\.\\PhysicalDrive0", "non-pipe device namespace" },
+		{ "windows", "\\\\.\\pipe\\", "empty pipe" },
+		{ "windows", "\\\\.\\pipe\\nested\\name", "nested pipe" },
+		{ "windows", "\\\\.\\pipe\\tern*", "pipe wildcard" },
+		{ "windows", "//./pipe/tern", "non-native pipe separators" },
 		{ "windows", "C:\\Tern\\daemon:sock", "alternate stream" },
 		{ "windows", "C:\\Tern\\daemon?.sock", "wildcard" },
 		{ "windows", "C:\\Tern\\", "directory suffix" },

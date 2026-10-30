@@ -106,24 +106,18 @@ download runtimes, contact an SSH host, or start background services.
    no new SSH connection, Bun, SDK dependencies, broker/client, or OMP restart.
    The separate `omp-bridge-setup` package cannot replace a full Bridge installation.
    Choosing the local sidebar instead retains the intended remote installation target.
-3. The sidebar shows the selected host once. **Change** expands the connected-host
-   list, including one manual SSH option; **Cancel** closes it without retargeting.
-   Selecting a server with a known SSH address automatically starts one read-only
-   check. Manual or unmapped addresses still require entry and **Check SSH**.
-   Merely opening, refreshing or reopening setup does not repeat a successful check.
-   This SSH check belongs to the existing full Bridge installation/execution channel,
-   not to preparation of the native UI. Display names and opaque device identifiers
-   are not inferred as SSH addresses; remembered mappings are exact-address scoped.
-4. **Check SSH** performs a bounded read-only check. Authentication, host trust,
-   network and platform/tool failures remain beside their retry/edit controls.
-   No failure opens a misleading next-step dialog or starts installation.
-5. Review the exact destination and scope, then click **Install** in the sidebar.
-   Only this action authorizes runtimes, dependencies, integrations and services.
-   Unknown-lock recovery is a separate explicit action. Editing the address requires
-   another check before installation can be authorized.
-   **Edit SSH** returns to the inline field without changing the selected host.
-   Review, failure and completion show only their relevant actions, not a disabled
-   copy of the whole setup form. **Details** expands optional stage explanations.
+3. 侧栏区分 Tern 主机和本机 SSH 连接配置。打开已选主机时先用本机 OpenSSH
+   解析配置，不进行 SSH 登录；字面 `Host` 别名与有效 hostname、显式账号及端口
+   相符时成为候选。已保存映射优先，关联配置别名其次，原生地址最后。
+   **Change** 选择另一主机后会开始有界预检；显示名称不会直接当成 SSH 地址。
+4. 未编辑的 **Check SSH** 按顺序尝试最多 6 个关联候选，首个通过后进入审核，
+   保留各次失败原因。**Find SSH alternatives** 显式重新发现候选。
+   在 **SSH destination** 中编辑或选择 **Edit SSH** 后，检查只使用输入的目标；
+   失败保留该值，不悄悄换回 IP 或其他别名。相同目标的心跳和无关状态更新
+   不再覆盖正在编辑的文本、光标、选区或撤销历史。
+5. 核对实际 SSH 目标与安装范围，再点击 **Install** 才授权下载运行时、依赖、
+   安装集成或启动服务。改变地址后必须重新检查，未知锁恢复仍须单独确认。
+   失败直接显示可编辑输入和具体错误；**Details** 展开额外说明。
 6. Progress, failure and readiness stay in the sidebar. Hiding it does not cancel
    an approved background installation; reopening retains its state. Missing
    completion callbacks are marked unverified/interrupted, never inferred successful.
@@ -132,6 +126,18 @@ download runtimes, contact an SSH host, or start background services.
    conversation is sufficient; a local OMP conversation is not that remote target.
    Waiting for local endpoint metadata, host-plugin reload or service upgrades is
    shown separately and does not turn verified installation into a reinstall request.
+
+**跨平台配置解析**：`ssh -G -v` 提供真正的有效配置和已读取文件路径；插件只枚举
+安全的字面别名，`Include`、`Match`、`IdentityFile`、`ProxyJump` 等语义交给
+OpenSSH。Windows 同时支持系统 OpenSSH 与 Git/MSYS 工具链：POSIX 风格配置
+路径由实际 SSH 程序同目录的 `cygpath.exe` 转成 Windows 路径，不猜安装盘符。
+macOS/Linux 保留原生 POSIX 路径。解析可能执行用户自己配置的 `Match exec`，
+因此不能称为完全没有本机副作用；插件不修改 SSH 配置、信任文件或复制密钥。
+
+发现最多读取 16 个配置文件、累计 256 KiB、枚举 64 个字面别名；发现限时 30 秒，
+整轮自动检查限时 90 秒。无法安全枚举的模式、读取/转换失败、超限或不透明
+Tern 地址无法唯一关联时会提示，并保留手动入口。匹配配置或登录成功不是两条
+通道同机的密码学证明，安装前仍须审核目标。
 
 The target is captured at selection: switching tabs or the current host does not
 retarget installation. Replacing/disconnecting the selected native host before
@@ -301,12 +307,13 @@ machine-local setting between operating systems. If the CLI moves, rerun setup o
 the installer with its new path, then reload the plugin. Missing/invalid CLI
 metadata blocks new PiP initialization, not independent paste/upload commands.
 
-Native PiP control also needs this machine's daemon socket. Install/setup resolve
-`ternPaneSocket` from an explicit `--tern-pane-socket`, a valid saved route,
-`TERN_PANE_SOCKET`, `TERN_DAEMON_SOCKET`, then the native default. Linux uses
-`$XDG_RUNTIME_DIR/tern/daemon.sock` when that environment variable is set;
-otherwise the socket is `daemon.sock` in Tern's settings directory (also the
-macOS and native Windows default). Saved routes remain valid during daemon downtime.
+原生 PiP 控制还需要本机 daemon 端点。安装与初始化依次采用显式
+`--tern-pane-socket`、有效的已保存路由、`TERN_PANE_SOCKET`、
+`TERN_DAEMON_SOCKET`，最后采用原生默认值。Windows Tern 0.9.7 使用
+`\\.\pipe\tern-<USERNAME>` 命名管道，不是配置目录中的 `daemon.sock`；
+命名管道只可用作端点，不可用作 `ternExecutable`。Linux 优先使用
+`$XDG_RUNTIME_DIR/tern/daemon.sock`，否则与 macOS 一样使用配置目录中的
+`daemon.sock`。已保存的路由在 daemon 暂停期间仍然有效。
 An isolated `--target` alone does not identify a daemon: without an explicit or
 saved route, installation omits it and PiP initialization requires configuration.
 The client socket is never forwarded over SSH. For a custom native daemon:
@@ -463,6 +470,12 @@ companion has no OMP TUI overlay. Automatic Bash backgrounding is disabled to
 retain ordinary shell state; explicit `async` remains available. Use returned
 `proc://` handles for owned service input/output/termination and preserve their
 complete provenance. See the native tool documentation for command options.
+
+Windows ConPTY 的交互行输入使用 `\r` 表示 Enter。例如向所属服务写入
+`{ path: "proc://my-service", content: "hello\r" }`。单独的 `\n` 可能只回显而
+不会提交输入行；Bridge 不会自动转换任意 PTY 输入字节。命令的引用规则须
+遵循运行时报告的服务 shell（Git Bash、cmd 或 PowerShell），与普通 Bash
+工具始终使用 embedded brush/POSIX 的规则分开。
 
 ### Client filesystem paths
 

@@ -2,7 +2,7 @@
 schema = 1
 id = "omp-client-bridge"
 name = "OMP Client Bridge"
-version = "0.5.0-beta.1"
+version = "0.5.0-beta.2"
 description = "Explicit client selection and local-human transfers for remote OMP drafts"
 host = "tern/host.luau"
 window = "tern/window.luau"

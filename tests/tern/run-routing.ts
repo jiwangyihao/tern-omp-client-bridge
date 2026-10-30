@@ -15,6 +15,7 @@ try {
 	const helper = await readFile(new URL("../../tern/setup-target.luau", import.meta.url), "utf8");
 	await writeFile(join(directory, "setup-target.luau"), helper);
 	await writeFile(join(directory, "setup-controller.luau"), await readFile(new URL("../../tern/setup-controller.luau", import.meta.url), "utf8"));
+	await writeFile(join(directory, "setup-ssh.luau"), await readFile(new URL("../../tern/setup-ssh.luau", import.meta.url), "utf8"));
 	const path = join(directory, "routing.luau");
 	await writeFile(path, `${harness}\nrun(function(require)\n${plugin}\nend, require)\n`);
 	const child = Bun.spawn([executable, path], { stdout: "inherit", stderr: "inherit" });

@@ -151,7 +151,7 @@ function target.preflightArgs(host)
 end
 
 local messages = {
-	authentication = "SSH authentication failed. Configure passwordless SSH for this destination in your terminal, then retry.",
+	authentication = "SSH authentication failed for this destination. Use Edit SSH to enter the same Host alias used in your terminal; a direct IP may bypass its IdentityFile or ProxyJump settings. Then check again.",
 	host_key = "SSH host-key verification failed. Independently verify and trust the host key in your terminal, then retry. Bridge did not change SSH trust.",
 	network = "Cannot reach this SSH destination. Check the address, port, VPN or network, and SSH service, then retry.",
 	timeout = "SSH checking timed out. Check the address, network, and SSH service, then retry.",

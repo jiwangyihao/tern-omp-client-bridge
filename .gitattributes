@@ -1,0 +1,4 @@
+# POSIX launchers are transferred byte-for-byte to Linux/macOS hosts.
+*.sh text eol=lf
+*.toml text eol=lf
+.bridge-setup-owned text eol=lf

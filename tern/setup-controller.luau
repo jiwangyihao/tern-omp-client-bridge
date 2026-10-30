@@ -1,6 +1,7 @@
 -- SPDX-License-Identifier: MPL-2.0
 -- Window-side setup coordinator. Process callbacks are receipt-only; native UI runs in staged ticks.
 local target = require('./setup-target')
+local Discovery = require('./setup-ssh')
 local M = {}
 local function text(value, fallback)
 	if type(value) ~= 'string' then return fallback or '' end
@@ -16,7 +17,7 @@ local function decode(value)
 end
 
 function M.new(api, options)
-	local s = { phase = 'choose', stage = 'Choose host', message = 'Select the intended host and check SSH before installing.', revision = 1, run = 0, view = 0, hosts = {}, jobs = {}, owner = options.owner }
+	local s = { phase = 'choose', stage = 'Choose host', message = 'Select the intended host and check SSH before installing.', revision = 1, run = 0, view = 0, hosts = {}, jobs = {}, attempts = {}, owner = options.owner }
 	local controller = {}
 	local armed = false
 	local tick
@@ -51,7 +52,7 @@ function M.new(api, options)
 	end
 	local function fail(message, interrupted)
 		s.phase, s.stage, s.message, s.error = interrupted and 'interrupted' or 'failed', interrupted and 'Outcome needs checking' or 'Needs attention', message, message
-		s.probe = nil
+		s.probe, s.auto, s.discovery, s.checkQueued = nil, nil, nil, false
 		notify()
 	end
 	local function arm()
@@ -93,16 +94,14 @@ function M.new(api, options)
 		local saved = mappings()
 		local ssh = not selection.manual and ((saved and selection.address and saved.hosts[selection.address]) or target.candidate(selection.address)) or nil
 		local previous = s.selection
-		if previous and previous.id == selection.id and previous.address == selection.address and previous.manual == selection.manual and s.ssh == ssh and (s.probe or s.completed) then return end
+		if previous and previous.id == selection.id and previous.address == selection.address and previous.manual == selection.manual and (s.probe or s.completed) then return end
 		if not table.isfrozen(selection) then table.freeze(selection) end
 		s.selection, s.ssh = selection, ssh
+		s.sshSource = selection.manual and 'manual' or (saved and selection.address and saved.hosts[selection.address] and 'saved' or 'address')
 		s.probe, s.error, s.completed, s.approved, s.notice, s.nextConnection = nil, nil, nil, nil, nil, nil
-		s.phase, s.stage, s.message = 'choose', 'Check SSH', 'Enter the SSH address, then run the read-only check.'
-		if explicit and ssh then
-			s.checkQueued = true
-			s.phase, s.stage, s.message = 'checking', 'Checking SSH', 'The selected server is queued for a read-only SSH check; nothing will be installed.'
-			queue('probe')
-		end
+		s.discovery, s.auto, s.candidates, s.attempts = nil, nil, nil, {}
+		s.phase, s.stage, s.message = 'choose', 'Check SSH', 'Enter an SSH alias or find a profile for this host. Installation always requires approval.'
+		if not selection.manual then s.checkQueued = true; queue('discover', explicit == true) end
 		notify()
 	end
 	local function start(kind, argv, timeout)
@@ -113,9 +112,9 @@ function M.new(api, options)
 		s.receipt = nil
 		local ok = pcall(api.process.run, argv, { timeout_ms = timeout, env = { TERN_OMP_SETUP_DATA = api.plugin.data } }, function(result)
 			-- No context, UI, filesystem, JSON, host enumeration, timers or refresh here.
-			if s.pending and s.pending.run == run then s.receipt = result end
+			if s.pending and s.pending.run == run then s.receipt = result or { status = -1, stdout = '', stderr = 'ssh: not found', timed_out = false } end
 		end)
-		if not ok then s.pending = nil; fail(kind == 'probe' and target.preflightResult(nil).message or 'Cannot start the setup launcher. Check the installed plugin package and local process support.') end
+		if not ok then s.receipt = { status = -1, stdout = '', stderr = 'ssh: not found', timed_out = false } end
 		notify()
 	end
 	local function launchArgs()
@@ -137,9 +136,12 @@ function M.new(api, options)
 		local busy = s.pending ~= nil or s.launchQueued == true or s.checkQueued == true
 		return {
 			owner = s.owner, panelId = s.panelId, revision = s.revision, phase = s.phase,
-			stage = s.stage, message = s.message .. (s.notice and (' ' .. s.notice) or '') .. (s.viewNotice and (' ' .. s.viewNotice) or ''), error = s.error,
+			stage = s.stage, message = s.message .. (s.notice and (' ' .. s.notice) or '') .. (s.viewNotice and (' ' .. s.viewNotice) or ''), error = s.error and (s.error .. (s.notice and (' ' .. s.notice) or '')),
 			hosts = rows, selectedLabel = s.selection and text(s.selection.name, 'Manual SSH target'), selectedAddress = s.selection and s.selection.address,
 			ssh = s.ssh or '', platform = s.probe and (s.probe.system .. '/' .. s.probe.arch), busy = busy,
+			targetKey = s.selection and (s.selection.manual and 'manual' or tostring(s.selection.id) .. ':' .. (s.selection.address or '')),
+			sshSource = s.sshSource or 'manual', attempts = s.attempts,
+			canDiscover = not busy and s.selection ~= nil and not s.selection.manual and not s.completed,
 			canChoose = not busy, canCheck = not busy and s.selection ~= nil,
 			canInstall = not busy and s.phase == 'review' and s.probe ~= nil,
 			canRecover = not busy and s.phase == 'review' and s.probe ~= nil and s.recoveryRequired == true,
@@ -154,14 +156,20 @@ function M.new(api, options)
 		queue('local')
 	end
 	local function consume(result, kind)
-		if kind == 'probe' then
+		if kind == 'discovery' then
+			if s.discovery then s.discovery.accept(result); queue('discover-step') end
+		elseif kind == 'probe' or kind == 'auto-probe' then
 			local checked = target.preflightResult(result)
+			local attempt = s.attempts[#s.attempts]
+			if attempt then attempt.status, attempt.message = checked.ok and 'passed' or 'failed', checked.ok and 'SSH and platform checks passed.' or checked.message end
 			if not checked.ok then
-				fail(checked.message)
+				if kind == 'auto-probe' and s.auto then queue('auto-probe'); notify()
+				else fail(checked.message) end
 				return
 			end
+			s.auto, s.checkQueued = nil, false
 			s.probe = { ssh = s.ssh, system = checked.system, arch = checked.arch }
-			s.phase, s.stage, s.error, s.message = 'review', 'Review installation', nil, 'SSH passed. Review the target and installation scope; nothing is installed until you click Install.'
+			s.phase, s.stage, s.error, s.message = 'review', 'Review installation', nil, 'SSH passed. Review this SSH destination against the selected Tern host; no installation has started.'
 			queue('verify-target')
 			notify()
 		elseif kind == 'ui-native' then
@@ -261,11 +269,60 @@ function M.new(api, options)
 			s.opening, s.suspended = false, false
 			s.viewDeadline = api.now() + 10000
 			notify()
+		elseif job.kind == 'discover' then
+			if not validSelection(cx) or s.selection.manual then s.checkQueued = false; fail('Select the intended connected Tern host before finding SSH profiles.'); return end
+			local saved = mappings()
+			s.discovery = Discovery.new(s.selection, saved, api.runtime.os)
+			s.discoveryDeadline, s.searchDeadline = api.now() + 30000, api.now() + 90000
+			s.probeAfterDiscovery = job.value == true
+			s.probe, s.error, s.auto, s.attempts, s.candidates = nil, nil, nil, {}, nil
+			s.phase, s.stage, s.message = 'checking', 'Finding SSH profiles', 'Resolving this device’s OpenSSH configuration; no SSH login or installation yet.'
+			s.checkQueued = true
+			queue('discover-step'); notify()
+		elseif job.kind == 'discover-step' then
+			if not s.discovery then return end
+			if not validSelection(cx) then fail('Selected host changed during SSH profile discovery. Select it again.'); return end
+			if api.now() >= s.discoveryDeadline then fail('SSH profile discovery reached its time limit. Enter the intended SSH alias manually.'); return end
+			local operation = s.discovery.next()
+			if not operation then
+				local found = s.discovery.result()
+				s.discovery, s.candidates, s.notice = nil, found.candidates, found.notice
+				s.checkQueued = false
+				if s.probeAfterDiscovery then
+					s.auto = { index = 0, deadline = s.searchDeadline }; s.checkQueued = true; queue('auto-probe')
+				else
+					local first = s.candidates[1]
+					if first then s.ssh, s.sshSource = first.destination, first.source end
+					s.phase, s.stage, s.message = 'choose', 'Check SSH', first and 'A local SSH profile is suggested. Check SSH tries related candidates; editing the destination checks only your input.' or 'No related SSH profile was found. Enter the alias used in your terminal.'
+				end
+				notify()
+			elseif operation.kind == 'read' then
+				local ok, value = pcall(api.fs.read, operation.path, operation.limit)
+				s.discovery.accept({ ok = ok, text = ok and value or nil }); queue('discover-step')
+			else
+				s.stage = text(operation.label, 'Resolving SSH profile')
+				start('discovery', operation.argv, math.max(1, math.min(operation.timeout_ms, s.discoveryDeadline - api.now())))
+			end
+		elseif job.kind == 'auto-probe' then
+			if not s.auto then return end
+			if not validSelection(cx) then fail('Selected host changed during SSH checks. Select it again.'); return end
+			local remaining = s.auto.deadline - api.now()
+			s.auto.index += 1
+			local candidate = s.candidates and s.candidates[s.auto.index]
+			if not candidate or s.auto.index > 6 or remaining <= 0 then
+				fail(remaining <= 0 and 'Related SSH checks reached their time limit. Edit the SSH destination and check it directly.' or 'No related SSH candidate passed. Review the results, then edit the SSH destination or find alternatives again.'); return
+			end
+			s.ssh, s.sshSource = candidate.destination, candidate.source
+			s.phase, s.stage, s.message = 'checking', 'Checking SSH ' .. tostring(s.auto.index) .. '/' .. tostring(math.min(#s.candidates, 6)), 'Trying a related SSH profile with strict host-key checking; no remote writes.'
+			table.insert(s.attempts, { ssh = s.ssh, source = s.sshSource, status = 'checking' })
+			s.checkQueued = true
+			start('auto-probe', target.preflightArgs(s.ssh), math.max(1, math.min(30000, remaining)))
 		elseif job.kind == 'probe' then
 			s.checkQueued = false
 			if s.pending then return end
 			if not validSelection(cx) then fail('Selected host changed or disconnected. Select it again; nothing was installed.'); return end
 			if not target.validHost(s.ssh) then fail('Enter a valid SSH alias, user@host, or SSH URI.'); return end
+			s.attempts = { { ssh = s.ssh, source = 'manual', status = 'checking' } }
 			s.phase, s.stage, s.message, s.error, s.probe = 'checking', 'Checking SSH', 'Checking authentication, host trust, platform and basic tools; no remote writes.', nil, nil
 			start('probe', target.preflightArgs(s.ssh), 30000)
 		elseif job.kind == 'verify-target' then
@@ -412,8 +469,14 @@ function M.new(api, options)
 				consume(result, kind)
 			elseif s.pending and api.now() > s.pending.deadline then
 				s.run += 1
-				s.pending, s.receipt, s.awaitNative, s.preparing, s.uiState = nil, nil, nil, nil, nil
-				fail('No completion callback arrived before the deadline. Outcome is unknown; inspect the private setup log before retrying. Nothing will advance automatically.', true)
+				local kind = s.pending.kind
+				s.pending, s.receipt = nil, nil
+				if kind == 'discovery' or kind == 'probe' or kind == 'auto-probe' then
+					consume({ status = -1, stdout = '', stderr = '', timed_out = true }, kind)
+				else
+					s.awaitNative, s.preparing, s.uiState = nil, nil, nil
+					fail('No completion callback arrived before the deadline. Outcome is unknown; inspect the private setup log before retrying. Nothing will advance automatically.', true)
+				end
 			elseif #s.jobs > 0 then activeJob = table.remove(s.jobs, 1); execute(activeJob, cx)
 			elseif s.chromeDirty then
 				s.chromeDirty = false
@@ -482,11 +545,25 @@ function M.new(api, options)
 		if value ~= '' then if value:sub(1, 1) ~= '/' then return { handled = true } end; value = decode(value:sub(2)); if not value then return { handled = true } end end
 		if s.pending or s.launchQueued or s.checkQueued or #s.jobs > 0 then return { handled = true } end
 		if verb == 'select' then queue('select', value)
+		elseif verb == 'discover' then
+			if s.completed or not s.selection or s.selection.manual then return { handled = true } end
+			s.checkQueued = true; queue('discover', true)
+		elseif verb == 'checkprofiles' then
+			if s.completed then return { handled = true } end
+			if value ~= s.ssh or s.sshSource == 'manual' or not s.candidates or #s.candidates == 0 then
+				fail('The suggested SSH profiles changed. Find alternatives again or check a manual destination.')
+			else
+				s.auto, s.attempts, s.checkQueued = { index = 0, deadline = api.now() + 90000 }, {}, true; queue('auto-probe')
+			end
 		elseif verb == 'check' then
 			local destination = target.candidate(value)
 			if not destination then fail('Enter one SSH alias, user@host or SSH URI, not a shell command.')
 			elseif s.completed or (s.probe and s.probe.ssh == destination) then return { handled = true }
-			else s.ssh, s.probe, s.checkQueued = destination, nil, true; queue('probe') end
+			else
+				s.notice = nil
+				s.ssh, s.sshSource, s.probe, s.auto, s.candidates, s.checkQueued = destination, 'manual', nil, nil, nil, true
+				queue('probe')
+			end
 		elseif verb == 'install' or verb == 'recover' then
 			if s.phase ~= 'review' or not s.probe or value ~= s.ssh or (verb == 'recover' and not s.recoveryRequired) then return { handled = true } end
 			s.recover, s.launchQueued = verb == 'recover', true
@@ -494,7 +571,8 @@ function M.new(api, options)
 			queue('install')
 		elseif verb == 'retry' then
 			if s.phase ~= 'failed' and s.phase ~= 'interrupted' then return { handled = true } end
-			s.probe, s.checkQueued = nil, true; queue('probe')
+			if s.sshSource == 'manual' then s.probe, s.checkQueued = nil, true; queue('probe')
+			else s.checkQueued = true; queue('discover', true) end
 		elseif verb == 'refresh' then queue('hosts'); if s.completed then queue('connected') end end
 		arm()
 		return { handled = true }

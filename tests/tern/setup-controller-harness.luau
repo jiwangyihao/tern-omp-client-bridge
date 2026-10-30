@@ -5,6 +5,7 @@ function run(Controller)
  local function fixture(remoteUi)
   local f={clock=1,timers={},processes={},picks={},snapshots={},writes={},splits=0,resizes=0,remoteUi=remoteUi~=false,inProcess=false,connected=0,session=1,tab=1,views={},closed={},focuses={},nativeCalls=0,maxNative=0}
   f.awaits,f.terminals,f.launches={},{},{}
+  f.configProcesses,f.effective,f.configFiles={},{},{}
   local serial,encoded=0,{}
   local function copy(x) if type(x)~='table' then return x end local r={} for k,v in x do r[k]=copy(v) end return r end
   local function native() assert(not f.inProcess,'process callback performed synchronous native/UI work') end
@@ -16,8 +17,17 @@ function run(Controller)
    timer=function(_,callback) native();table.insert(f.timers,callback) end,
    kv={get=function() native();return copy(f.mapping) end,set=function(_,value) native();f.mapping=copy(value);table.insert(f.writes,copy(value)) end},
    json={encode=function(v) native();return json(v) end,decode=function(v) native();return copy(assert(encoded[v],'invalid JSON')) end},
-   fs={read=function() native();return json(assert(f.progress,'missing progress')) end},
-   process={run=function(argv,opts,callback) native();table.insert(f.processes,{argv=argv,options=opts,callback=callback}) end}}
+   fs={read=function(file) native();if f.configFiles[file] then return f.configFiles[file] end return json(assert(f.progress,'missing progress')) end},
+   process={run=function(argv,opts,callback)
+    native()
+    if table.find(argv,'-G') then
+     table.insert(f.configProcesses,{argv=argv,options=opts})
+     local destination=argv[#argv]
+     local user,host=destination:match('^([^@]+)@(.+)$');host=host or destination
+     local resolved=f.effective[destination] or ('hostname '..host..'\nuser '..(user or 'fixture')..'\nport 22\n')
+     f.inProcess=true;callback({status=0,stdout=resolved,stderr=f.configPath and ('debug1: Reading configuration data '..f.configPath..'\n') or '',timed_out=false});f.inProcess=false
+    else table.insert(f.processes,{argv=argv,options=opts,callback=callback}) end
+   end}}
   local controller=Controller.new(api,{owner='window-test',bootstrap={new=function()return {step=function()return f.payload or 'native-ui-fixture-command'end}end},onState=function() end,refresh=function() native() end,onConnected=function() native();f.connected+=1;return f.readiness or 'awaiting',f.readinessMessage end})
   local function invoke(callback)
    local alive=true
@@ -95,8 +105,8 @@ function run(Controller)
  case('selected target replacement blocks approved launch',function()
   local f=fixture();f.review();f.remote.address='replacement.example';f.action('install','agent.example');f.display();assert(f.latest().phase=='failed' and #f.processes==0 and #f.writes==0)
  end)
- case('missing completion becomes interrupted and late receipt is inert',function()
-  local f=fixture();f.open();f.display();f.action('check','agent.example');f.until_(function()return #f.processes==1 end);f.clock+=34000;f.tick();f.display();assert(f.latest().phase=='interrupted' and not f.latest().canInstall);f.probe();f.tick();assert(f.status().phase=='interrupted')
+ case('read-only check timeout fails and late success cannot authorize installation',function()
+  local f=fixture();f.open();f.display();f.action('check','agent.example');f.until_(function()return #f.processes==1 end);f.clock+=34000;f.tick();f.display();assert(f.latest().phase=='failed' and not f.latest().canInstall);f.probe();f.tick();assert(f.status().phase=='failed')
  end)
  case('opaque native address can use local sidebar without guessing SSH name',function()
   local f=fixture(false);f.remote.address=string.rep('a',64);f.remote.name='do-not-use-as-ssh';f.open();f.until_(function()return #f.picks==1 end);assert(#f.processes==0);f.choice('local');f.display();assert(f.current.id==1 and f.kind=='omp-client-bridge.setup' and f.latest().ssh=='' and #f.processes==0)
@@ -194,6 +204,37 @@ function run(Controller)
  end)
  case('approved installation rejects a target replaced between staged validation and launch',function()
   local f=fixture();f.review();f.action('install','agent.example');f.until_(function()return #f.writes==1 end);f.remote.address='replacement.example';f.display();assert(f.latest().phase=='failed' and #f.processes==0)
+ end)
+ local function profiles()
+  local f=fixture();f.remote.address='root@192.0.2.8';f.configPath='/ssh/config'
+  f.configFiles[f.configPath]='Host first-profile second-profile\n HostName 192.0.2.8\n User root\nHost unrelated\n HostName 192.0.2.99\n'
+  for _,alias in {'first-profile','second-profile'} do f.effective[alias]='hostname 192.0.2.8\nuser root\nport 2222\n' end
+  f.effective.unrelated='hostname 192.0.2.99\nuser root\nport 22\n'
+  return f
+ end
+ case('cold native address discovers a configured alias without a saved mapping or SSH login',function()
+  local f=profiles();f.open();f.display();assert(f.latest().ssh=='first-profile' and f.latest().sshSource=='config');assert(f.latest().canDiscover and #f.processes==0 and #f.writes==0)
+ end)
+ case('automatic checks advance from failed profile to related success and preserve the evidence',function()
+  local f=profiles();f.open();f.display();f.action('checkprofiles','first-profile');f.until_(function()return #f.processes==1 end);assert(f.processes[1].argv[#f.processes[1].argv-1]=='first-profile');f.probe(false)
+  f.until_(function()return #f.processes==1 end);assert(f.processes[1].argv[#f.processes[1].argv-1]=='second-profile');f.probe();f.display()
+  local s=f.latest();assert(s.phase=='review' and s.ssh=='second-profile' and s.canInstall and not s.busy);assert(#s.attempts==2 and s.attempts[1].status=='failed' and s.attempts[2].status=='passed');assert(not s.attempts[1].message:find('SECRET',1,true) and #f.processes==0 and #f.writes==0)
+ end)
+ case('manual check of the suggested profile never falls back and a corrected alias becomes authoritative',function()
+  local f=profiles();f.open();f.display();f.action('check','first-profile');f.until_(function()return #f.processes==1 end);f.probe(false);f.display();assert(f.latest().phase=='failed' and f.latest().ssh=='first-profile' and f.latest().sshSource=='manual' and #f.processes==0 and #f.latest().attempts==1)
+  f.action('check','second-profile');f.until_(function()return #f.processes==1 end);assert(f.processes[1].argv[#f.processes[1].argv-1]=='second-profile');f.probe();f.display();assert(f.latest().phase=='review' and f.latest().sshSource=='manual' and f.status().probe.ssh=='second-profile')
+ end)
+ case('explicit alternatives can recover from a saved obsolete SSH mapping',function()
+  local f=profiles();f.mapping={schema=1,hosts={[f.remote.address]='obsolete-alias'}};f.open();f.display();assert(f.latest().ssh=='obsolete-alias');f.action('discover');f.until_(function()return #f.processes==1 end);f.probe(false);f.until_(function()return #f.processes==1 end);assert(f.processes[1].argv[#f.processes[1].argv-1]=='first-profile');f.probe();f.display();assert(f.latest().phase=='review' and f.latest().ssh=='first-profile' and #f.writes==0)
+ end)
+ case('selected-host replacement during local discovery stops before authentication',function()
+  local f=profiles();f.open();f.until_(function()return f.status().discovery~=nil end);f.remote.address='other.example';f.display();assert(f.latest().phase=='failed' and not f.latest().canInstall and #f.processes==0)
+ end)
+ case('automatic checks stop at the overall deadline without installing or retrying',function()
+  local f=profiles();f.open();f.display();f.action('checkprofiles','first-profile');f.until_(function()return #f.processes==1 end);f.probe(false);f.clock+=90001;f.display();assert(f.latest().phase=='failed' and not f.latest().busy and not f.latest().canInstall and #f.processes==0 and #f.writes==0)
+ end)
+ case('missing installation receipt remains interrupted and late success is inert',function()
+  local f=fixture();f.review();f.action('install','agent.example');f.until_(function()return #f.processes==1 end);f.clock+=904000;f.tick();f.display();assert(f.latest().phase=='interrupted' and not f.latest().canInstall);f.result();f.tick();assert(f.status().phase=='interrupted' and not f.status().completed)
  end)
  print('Setup coordinator scenarios passed: '..passed)
 end

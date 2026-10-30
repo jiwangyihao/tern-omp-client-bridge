@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { UploadStore } from "../../src/uploads.ts";
@@ -26,8 +26,11 @@ test("verified multi-chunk Unicode files and an empty file are published intact 
 		const inbox = dirname(result.files[0]!.path);
 		expect(await readdir(directory)).toEqual([upload.id]);
 		expect(await readFile(join(inbox, "README"), "utf8")).toBe(INBOX_README);
-		expect((await stat(inbox)).mode & 0o777).toBe(0o700);
-		expect((await stat(join(inbox, "README"))).mode & 0o777).toBe(0o600);
+		// Windows owner/DACL behavior is covered by windows-private-storage.test.ts.
+		if (process.platform !== "win32") {
+			expect((await stat(inbox)).mode & 0o777).toBe(0o700);
+			expect((await stat(join(inbox, "README"))).mode & 0o777).toBe(0o600);
+		}
 		await store.cancel("client-a", upload.id);
 		await store.close();
 		expect(await readFile(result.files[0]!.path)).toEqual(data);
@@ -110,6 +113,7 @@ test("inbox README does not collide with an uploaded README and publication fail
 		await writeFile(collision, "unrelated destination");
 		await expect(store.finish("client-a", failing.id, [digest(bytes)])).rejects.toBeDefined();
 		expect(() => store.completed("client-a", failing.id)).toThrow("checksum-verified");
+		expect(await readFile(collision, "utf8")).toBe("unrelated destination");
 		expect(await readFile(join(root, failing.id + ".partial", "README"), "utf8")).toBe(INBOX_README);
 		await store.cancel("client-a", failing.id);
 		expect((await readdir(root)).sort()).toEqual([upload.id, failing.id].sort());
@@ -118,3 +122,30 @@ test("inbox README does not collide with an uploaded README and publication fail
 		expect(await readFile(source)).toEqual(bytes);
 	} finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform !== "win32")("Windows publication preserves case-insensitive file and directory collisions", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "bridge-inbox-图片 '-"));
+	const store = new UploadStore(directory);
+	try {
+		for (const kind of ["case-insensitive-file", "empty-directory", "nonempty-directory"]) {
+			const upload = await store.begin("client-a", { viewId: "view", sessionId: "session", draftToken: "draft", files: [{ name: "empty.txt", size: 0 }] });
+			const collision = join(directory, kind === "case-insensitive-file" ? upload.id.toUpperCase() : upload.id);
+			if (kind === "case-insensitive-file") await writeFile(collision, "unrelated destination");
+			else {
+				await mkdir(collision);
+				if (kind === "nonempty-directory") await writeFile(join(collision, "existing.txt"), "unrelated destination");
+			}
+			await expect(store.finish("client-a", upload.id, [digest(Buffer.alloc(0))])).rejects.toBeDefined();
+			expect(() => store.completed("client-a", upload.id)).toThrow("checksum-verified");
+			expect(await readFile(join(directory, upload.id + ".partial", "README"), "utf8")).toBe(INBOX_README);
+			await store.cancel("client-a", upload.id);
+			expect(await readdir(directory)).toEqual([basename(collision)]);
+			if (kind === "case-insensitive-file") expect(await readFile(collision, "utf8")).toBe("unrelated destination");
+			else if (kind === "nonempty-directory") {
+				expect(await readdir(collision)).toEqual(["existing.txt"]);
+				expect(await readFile(join(collision, "existing.txt"), "utf8")).toBe("unrelated destination");
+			} else expect(await readdir(collision)).toEqual([]);
+			await rm(collision, { recursive: true, force: true });
+		}
+	} finally { await store.close(); await rm(directory, { recursive: true, force: true }); }
+}, 30000);

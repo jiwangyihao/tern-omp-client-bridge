@@ -13,12 +13,13 @@ const platform = process.platform;
 if (platform !== "darwin" && platform !== "win32" && platform !== "linux") throw new Error(`Unsupported test platform ${platform}`);
 const device: DeviceDescriptor = { id: "fixture-client", name: "Fixture client", platform, arch: process.arch };
 
-async function fixture(onInteraction?: OmpRuntimeOptions["onInteraction"], autoBackground = false) {
+async function fixture(onInteraction?: OmpRuntimeOptions["onInteraction"], autoBackground = false, shellPath?: string) {
 	const root = await mkdtemp(join(tmpdir(), "client-runtime-"));
 	const cwd = join(root, "workspace 空间");
 	await mkdir(cwd);
 	await mkdir(join(cwd, ".omp"));
 	await writeFile(join(cwd, ".omp", "config.yml"), Bun.YAML.stringify({
+		...(shellPath ? { shellPath } : {}),
 		tools: { approvalMode: "yolo", approval: { read: "allow", write: "allow", edit: "allow", grep: "allow", glob: "allow", bash: "allow", eval: "allow", computer: "prompt", browser: "prompt" } },
 		eval: { js: true, py: true, ...(autoBackground ? { autoBackground: { enabled: true, thresholdMs: 5000 } } : {}) }, computer: { enabled: true }, browser: { enabled: true },
 	}));
@@ -212,28 +213,56 @@ test("unnamed PTY calls fail explicitly rather than silently losing terminal sem
 	await expect(runtime.execute(request("bash", { command: "unused", pty: true }))).rejects.toThrow("native managed PTY");
 }, 60_000);
 
-test("real managed PTYs accept stdin and keep same-named services isolated", async () => {
-	const { runtime, cwd } = await fixture();
-	const program = join(cwd, "terminal.ts");
-	await writeFile(program, 'console.log("PTY-ready:" + process.stdin.isTTY); process.stdin.on("data", bytes => { const value = bytes.toString().trim(); process.stdout.write("accepted:" + value + "\\n", () => process.exit(0)); });');
-	const command = `${JSON.stringify(process.execPath.replaceAll("\\", "/"))} ${JSON.stringify(program.replaceAll("\\", "/"))}`;
-	const accepted = Promise.withResolvers<void>();
-	const survived = Promise.withResolvers<void>();
+const serviceShells = [
+	{ label: "configured shell", shellPath: undefined },
+	...(platform === "win32" ? ["powershell.exe"].map(name => ({ label: name, shellPath: Bun.which(name) ?? name })) : []),
+];
+
+test.each(serviceShells)("real managed PTYs accept stdin and isolate same-named services using $label", async ({ shellPath }) => {
+	const { runtime, cwd } = await fixture(undefined, false, shellPath);
+	const environment = await inspectRuntimeEnvironment(cwd);
+	const shell = environment.serviceShell.executable.split(/[\\/]/).pop()?.toLowerCase();
+	const program = join(cwd, "terminal fixture.ts");
+	await writeFile(program, 'import { createInterface } from "node:readline"; console.log("PTY-ready:" + process.stdin.isTTY); createInterface({ input: process.stdin }).once("line", value => { process.stdout.write("accepted:" + value + "\\n", () => process.exit(0)); });');
+	const argv = [process.execPath, program].map(path => path.replaceAll("\\", "/"));
+	// Managed services use the configured OS shell, not ordinary Bash's embedded brush.
+	const command = shell === "powershell.exe" || shell === "powershell" || shell === "pwsh.exe" || shell === "pwsh"
+		? `& ${argv.map(arg => `'${arg.replaceAll("'", "''")}'`).join(" ")}`
+		: argv.map(arg => `'${arg.replaceAll("'", "'\\''")}'`).join(" ");
+	// ConPTY's cooked console input needs Enter (CR); LF alone only echoes on Windows.
+	// Preserve raw proc:// input in the product: terminal applications may distinguish them.
+	const enter = platform === "win32" ? "\r" : "\n";
+	const accepted = Promise.withResolvers<ToolResult>();
+	const survived = Promise.withResolvers<ToolResult>();
+	const completions: Record<string, ToolResult[]> = { a: [], b: [] };
 	for (const contextId of ["a", "b"]) {
-		const started = await runtime.execute(request("bash", { command, name: "fixture-terminal", pty: true, ready: { log: "PTY-ready:true", timeout: 10 } }, contextId), { onBackgroundResult: () => { if (contextId === "a") accepted.resolve(); else survived.resolve(); } });
+		const started = await runtime.execute(request("bash", { command, name: "fixture-terminal", pty: true, ready: { log: "PTY-ready:true", timeout: 10 } }, contextId), { onBackgroundResult: result => {
+			completions[contextId]!.push(result);
+			if (contextId === "a") accepted.resolve(result); else survived.resolve(result);
+		} });
 		expect(text(started)).toContain("PTY-ready:true");
 		expect(started.isError).not.toBe(true);
 	}
-	await runtime.execute(request("write", { path: "proc://fixture-terminal", content: "owner-a\n" }, "a"));
-	await accepted.promise;
+	expect((await runtime.execute(request("write", { path: "proc://fixture-terminal", content: `owner-a${enter}` }, "a"))).isError).not.toBe(true);
+	expect((await accepted.promise).details).toMatchObject({ daemon: { state: "exited", exitCode: 0 } });
 	expect(text(await runtime.execute(request("read", { path: "proc://fixture-terminal" }, "a")))).toContain("accepted:owner-a");
 	expect(text(await runtime.execute(request("read", { path: "proc://fixture-terminal" }, "b")))).not.toContain("accepted:owner-a");
-	await runtime.execute(request("bash", { command, name: "fixture-terminal", pty: true, ready: { log: "PTY-ready:true", timeout: 10 } }, "a"));
-	await runtime.execute(request("write", { path: "proc://fixture-terminal/kill" }, "a"));
+	const restarted = await runtime.execute(request("bash", { command, name: "fixture-terminal", pty: true, ready: { log: "PTY-ready:true", timeout: 10 } }, "a"));
+	expect(restarted.isError).not.toBe(true);
+	expect(text(restarted)).toContain("PTY-ready:true");
+	// Dispose A while its replacement PTY is live, rather than killing it before disposal.
 	await runtime.disposeContext("a");
-	await runtime.execute(request("write", { path: "proc://fixture-terminal", content: "owner-b\n" }, "b"));
-	await survived.promise;
-	expect(text(await runtime.execute(request("read", { path: "proc://fixture-terminal" }, "b")))).toContain("accepted:owner-b");
+	expect(completions.a).toHaveLength(1);
+	expect(completions.b).toHaveLength(0);
+	expect(text(await runtime.execute(request("read", { path: "proc://fixture-terminal" }, "b")))).toContain("ready=true");
+	expect((await runtime.execute(request("write", { path: "proc://fixture-terminal", content: `owner-b${enter}` }, "b"))).isError).not.toBe(true);
+	expect((await survived.promise).details).toMatchObject({ daemon: { state: "exited", exitCode: 0 } });
+	const final = text(await runtime.execute(request("read", { path: "proc://fixture-terminal" }, "b")));
+	expect(final).toContain("accepted:owner-b");
+	expect(final).not.toContain("accepted:owner-a");
+	expect(completions.b).toHaveLength(1);
+	// Selecting PowerShell for services must not change ordinary Bash syntax.
+	expect(text(await runtime.execute(request("bash", { command: "printf '%s' brush-still-posix" }, "b")))).toContain("brush-still-posix");
 }, 120_000);
 
 test("native prelude approvals reach the local interaction channel and respect denial", async () => {

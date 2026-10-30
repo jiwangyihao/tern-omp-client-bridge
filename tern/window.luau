@@ -129,6 +129,12 @@ local function configuredNativePath(value, executable)
 	if not valid or controls then return nil end
 	if tern.runtime.os == "windows" then
 		local path = value:gsub("\\", "/")
+		if path:sub(1, 4) == "//./" then
+			local name = path:sub(10)
+			if not executable and not value:find("/", 1, true) and path:sub(1, 9):lower() == "//./pipe/"
+				and name ~= "" and not name:find('[/\\:"<>|?*]') then return value end
+			return nil
+		end
 		-- Extended Windows paths retain their original prefix in the launched argv.
 		if path:sub(1, 4) == "//?/" then
 			path = path:sub(5)
@@ -559,12 +565,13 @@ local function setupBridge(cx)
 	local origin = cx.sessions:current()
 	-- Keep module IO/compilation out of the load hook and out of the UI turn.
 	-- Preload the dependency separately, so requiring the controller is not a chain.
-	tern.timer(0, function(fresh)
-		if not setupModule('./setup-target', fresh) then return end
+	local modules = { './setup-target', './setup-ssh', './setup-controller' }
+	local function preload(index)
 		tern.timer(0, function(current)
-			local SetupController = setupModule('./setup-controller', current)
-			if not SetupController then return end
-			setupController = SetupController.new(tern, {
+			local module = setupModule(modules[index], current)
+			if not module then return end
+			if index < #modules then preload(index + 1); return end
+			setupController = module.new(tern, {
 				owner = windowId,
 				onState = function(value)
 					setupBusy = value.pending ~= nil or value.launchQueued == true
@@ -589,7 +596,8 @@ local function setupBridge(cx)
 				setupController.open(fresh)
 			end)
 		end)
-	end)
+	end
+	preload(1)
 end
 
 local function sameSnapshot(a, b)

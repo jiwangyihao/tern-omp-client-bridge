@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 import { createHash, type Hash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdir, open, rename, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { ImportedFile } from "./api.ts";
 import { protectPrivatePath } from "./config.ts";
 import { INBOX_README } from "./inbox-guidance.ts";
 import { BridgeError } from "./protocol.ts";
+
+const runFile = promisify(execFile);
 
 export interface UploadInput {
 	readonly viewId: string;
@@ -137,7 +141,14 @@ export class UploadStore {
 			finally { await readme.close(); }
 			if (upload.cancelled) throw new BridgeError("CANCELLED", "Upload cancelled before publication");
 			const destination = path.join(this.root, id);
-			await rename(upload.directory, destination);
+			if (process.platform === "win32") {
+				// Bun 1.4.3 rename can replace an unrelated file with this directory on Windows.
+				// Directory.Move uses a same-volume move without replacement, not a check/copy.
+				const sourcePath = Buffer.from(path.resolve(upload.directory), "utf8").toString("base64");
+				const destinationPath = Buffer.from(path.resolve(destination), "utf8").toString("base64");
+				const script = `$ErrorActionPreference = 'Stop'; [IO.Directory]::Move([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${sourcePath}')), [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${destinationPath}')))`;
+				await runFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true });
+			} else await rename(upload.directory, destination);
 			upload.directory = destination;
 			if (upload.cancelled) throw new BridgeError("CANCELLED", "Upload cancelled before attachment became available");
 			upload.completed = Object.freeze({ id, viewId: upload.input.viewId, sessionId: upload.input.sessionId, draftToken: upload.input.draftToken, files: Object.freeze(verified.map(file => Object.freeze(file))) });

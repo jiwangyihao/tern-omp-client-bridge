@@ -109,12 +109,12 @@ test.each(["TERN_PANE_SOCKET", "TERN_DAEMON_SOCKET"])("invalid authoritative %s 
 	await expect(resolveInFixture(root, {}, { [variable]: "relative-daemon.sock" })).rejects.toThrow(variable);
 });
 
-test("fallback is daemon.sock in the supplied native settings directory", async () => {
+test.skipIf(process.platform === "win32")("POSIX fallback uses daemon.sock in the supplied native settings directory", async () => {
 	const root = await fixture();
 	expect(await resolveInFixture(root)).toBe(path.join(root, "settings", "daemon.sock"));
 });
 
-test("a relative settings directory cannot produce a relative persisted route", async () => {
+test.skipIf(process.platform === "win32")("a relative settings directory cannot produce a relative persisted route", async () => {
 	const root = await fixture();
 	await expect(resolveInFixture(root, { configDirectory: "relative-settings" })).rejects.toThrow("--tern-pane-socket");
 });
@@ -136,13 +136,23 @@ test.skipIf(process.platform !== "darwin")("macOS uses settings rather than a fo
 	expect(await resolveInFixture(root, { configDirectory }, { XDG_RUNTIME_DIR: path.join(root, "runtime") })).toBe(path.join(configDirectory, "daemon.sock"));
 });
 
-test.skipIf(process.platform !== "win32")("Windows uses supplied roaming settings, not local app data or an XDG runtime directory", async () => {
+test.skipIf(process.platform !== "win32")("Windows selects the native per-user pipe independently of filesystem settings", async () => {
 	const root = await fixture();
-	const configDirectory = path.join(root, "Roaming", "Tern");
-	expect(await resolveInFixture(root, { configDirectory }, {
+	expect(await resolveInFixture(root, { configDirectory: path.join(root, "Roaming", "Tern") }, {
+		USERNAME: "Fixture 安装",
 		LOCALAPPDATA: path.join(root, "Local"),
 		XDG_RUNTIME_DIR: path.join(root, "runtime"),
-	})).toBe(path.join(configDirectory, "daemon.sock"));
+	})).toBe("\\\\.\\pipe\\tern-Fixture 安装");
+});
+
+test.skipIf(process.platform !== "win32")("Windows requires a known user or an authoritative pipe, never a guessed filesystem socket", async () => {
+	const root = await fixture();
+	await expect(resolveInFixture(root, {}, { USERNAME: "" })).rejects.toThrow("USERNAME");
+	await expect(resolveInFixture(root, {}, { USERNAME: "bad\\name" })).rejects.toThrow("--tern-pane-socket");
+	const pipe = "\\\\.\\pipe\\tern-Fixture";
+	expect(await resolveInFixture(root, {}, { TERN_PANE_SOCKET: pipe })).toBe(pipe);
+	expect(await resolveInFixture(root, { saved: pipe, isolated: true })).toBe(pipe);
+	expect(await resolveInFixture(root, { explicit: pipe, saved: "C:\\old.sock" })).toBe(pipe);
 });
 
 test("Windows endpoint policy accepts fully qualified drive and UNC paths without an executable suffix", () => {
@@ -150,12 +160,15 @@ test("Windows endpoint policy accepts fully qualified drive and UNC paths withou
 		"C:\\Users\\安装 with spaces\\daemon.sock", "D:/Tern/daemon.sock",
 		"\\\\server\\share\\Tern\\daemon.sock", "//server/share/Tern/daemon.sock",
 		"\\\\?\\C:\\Tern\\daemon.sock", "\\\\?\\UNC\\server\\share\\daemon.sock",
+		"\\\\.\\pipe\\tern-Fixture", "\\\\.\\PIPE\\tern-安装 with spaces",
 	]) expect(isAbsoluteTernPaneSocketPath(value, "win32")).toBe(true);
 	for (const value of [
 		"daemon.sock", "C:daemon.sock", "\\Tern\\daemon.sock", "/Tern/daemon.sock",
 		"\\\\server", "\\\\server\\share", "C:\\", "\"C:\\Tern\\daemon.sock\"",
 		"C:\\Tern\\bad\npath", "C:\\Tern\\bad\u0000path", "C:\\Tern\\bad\u0085path", null, 42,
-		"C:\\Tern\\daemon.sock\\", "C:\\Tern\\daemon:stream", "C:\\Tern\\*.sock", "\\\\.\\pipe\\tern",
+		"C:\\Tern\\daemon.sock\\", "C:\\Tern\\daemon:stream", "C:\\Tern\\*.sock",
+		"\\\\.\\pipe\\", "\\\\.\\pipe\\nested\\name", "\\\\.\\pipe\\tern*", "\\\\.\\pipe\\tern:stream", "\\\\.\\PhysicalDrive0",
+		"//./pipe/tern", "\\\\.\\pipe\\bad\nname",
 	]) expect(isAbsoluteTernPaneSocketPath(value, "win32")).toBe(false);
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "@jiwangyihao/tern-omp-client-bridge",
-  "version": "0.5.0-beta.1",
+  "version": "0.5.0-beta.2",
   "description": "Client capabilities and human transfers for Tern's native remote OMP GUI",
   "license": "MPL-2.0",
   "type": "module",

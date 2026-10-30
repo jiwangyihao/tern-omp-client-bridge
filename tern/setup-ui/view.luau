@@ -9,6 +9,8 @@ local PHASES = {
 	installing = "Installing", ready = "Ready", awaiting_session = "Waiting for an OMP session",
 	failed = "Setup needs attention", interrupted = "Setup interrupted",
 }
+local SOURCES = { manual = "Manual SSH", saved = "Saved SSH mapping", config = "Local SSH config", address = "Tern address" }
+local STATUSES = { checking = "Checking", passed = "Passed", failed = "Failed" }
 
 local function object(v) return type(v) == "table" and v ~= tern.json.null end
 local function integer(v) return type(v) == "number" and v >= 0 and v <= 9007199254740991 and v % 1 == 0 end
@@ -25,6 +27,9 @@ local function plain(v, fallback)
 end
 local function fieldText(v)
 	return type(v) == "string" and #v <= 255 and not v:find("%c") and utf8.len(v) ~= nil
+end
+local function targetKey(v)
+	return type(v) == "string" and #v > 0 and #v <= 512 and not v:find("%c") and utf8.len(v) ~= nil
 end
 local function destination(v)
 	-- Accept the controller's normalized SSH URI, but no other scheme, path,
@@ -47,8 +52,11 @@ local function parse(value, state)
 		selectedLabel = plain(value.selectedLabel, "No host selected"),
 		selectedAddress = destination(value.selectedAddress) and value.selectedAddress or nil,
 		ssh = destination(value.ssh) and value.ssh or "", platform = plain(value.platform, nil),
+		targetKey = targetKey(value.targetKey) and value.targetKey or nil,
+		sshSource = type(value.sshSource) == "string" and SOURCES[value.sshSource] and value.sshSource or nil,
+		attempts = {},
 	}
-	for _, name in { "canCheck", "canInstall", "canRecover", "canRetry", "canChoose", "busy" } do result[name] = value[name] == true end
+	for _, name in { "canCheck", "canInstall", "canRecover", "canRetry", "canChoose", "canDiscover", "busy" } do result[name] = value[name] == true end
 	if object(value.hosts) then
 		local seen, manual = {}, false
 		for index = 1, math.min(#value.hosts, 32) do
@@ -61,6 +69,15 @@ local function parse(value, state)
 					table.insert(result.hosts, { key = host.key, label = plain(host.label, "Unnamed host"), detail = plain(host.detail, ""), manual = isManual })
 				end
 				manual = manual or isManual
+			end
+		end
+	end
+	if object(value.attempts) then
+		for index = 1, math.min(#value.attempts, 6) do
+			local attempt = value.attempts[index]
+			if object(attempt) and destination(attempt.ssh) and type(attempt.source) == "string" and SOURCES[attempt.source]
+				and type(attempt.status) == "string" and STATUSES[attempt.status] then
+				table.insert(result.attempts, { ssh = attempt.ssh, source = attempt.source, status = attempt.status, message = plain(attempt.message, nil) })
 			end
 		end
 	end
@@ -80,10 +97,17 @@ end
 local function frozen(current)
 	return current.busy or current.phase == "checking" or current.phase == "installing"
 end
+local function sameTarget(previous, current)
+	if previous.targetKey or current.targetKey then return previous.targetKey == current.targetKey end
+	-- Compatibility with old owners; display labels are not identities when an address exists.
+	if previous.selectedAddress or current.selectedAddress then return previous.selectedAddress == current.selectedAddress end
+	return previous.selectedLabel == current.selectedLabel
+end
 local function showsInput(state)
 	local current = state.snapshot
 	return current ~= nil and not state.picker and ((current.phase == "choose" and current.canCheck) or current.phase == "checking"
-		or (state.editing == true and (current.phase == "review" or current.phase == "failed" or current.phase == "interrupted")))
+		or ((current.phase == "failed" or current.phase == "interrupted") and current.canCheck)
+		or (state.editing == true and current.phase == "review"))
 end
 local function editable(state)
 	return live(state) and showsInput(state) and not frozen(state.snapshot) and state.snapshot.canCheck
@@ -253,11 +277,19 @@ local function register(kind)
 				local nextSnapshot = parse(value, state)
 				if not nextSnapshot then return end
 				if not state.snapshot or nextSnapshot.revision > state.revision then
-					state.picker, state.editing, state.details = false, false, false
-					if state.focused then state.focused = false; cx:frame({ { "focus", tern.json.null } }) end
-					state.ssh, state.dirty, state.history, state.anchor = nextSnapshot.ssh, false, {}, nil
-					local _, _, length = boundaries(state.ssh)
-					state.cursor = length
+					local previous = state.snapshot
+					local changedTarget = not previous or not sameTarget(previous, nextSnapshot) or previous.ssh ~= nextSnapshot.ssh
+					local checkAck = previous and previous.phase ~= "checking" and nextSnapshot.phase == "checking" and state.ssh == nextSnapshot.ssh
+					state.picker, state.details = false, false
+					if changedTarget or checkAck then
+						state.editing = false
+						state.ssh, state.dirty, state.history, state.anchor = nextSnapshot.ssh, false, {}, nil
+						local _, _, length = boundaries(state.ssh)
+						state.cursor = length
+					end
+					if state.focused and (changedTarget or checkAck or frozen(nextSnapshot)) then
+						state.focused = false; cx:frame({ { "focus", tern.json.null } })
+					end
 				end
 				state.snapshot, state.revision = nextSnapshot, nextSnapshot.revision
 				state.expiresAt, state.expired = tern.now() + 15000, false
@@ -326,6 +358,7 @@ local function register(kind)
 				end
 				if #metadata == 0 and input then table.insert(metadata, "Separate Bridge SSH connection") end
 				if current.platform then table.insert(metadata, current.platform) end
+				if current.sshSource then table.insert(metadata, SOURCES[current.sshSource]) end
 				if #metadata > 0 then table.insert(target, with(label(table.concat(metadata, " · ")), { key = "meta", role = "setup-target-meta" })) end
 				if not needsHost then table.insert(main, with(ui.col(target), { key = "target", role = "setup-target" })) end
 				if (needsHost or state.picker) and not complete then
@@ -343,6 +376,16 @@ local function register(kind)
 					table.insert(main, ui.node("input", { key = "ssh", role = "setup-ssh", aria = "SSH destination", text = state.ssh,
 						cursor = state.cursor, anchor = state.anchor, readonly = not editable(state), placeholder = "alias or user@host", sendable = false }))
 				end
+				if #current.attempts > 0 then
+					local attempts = { label("SSH candidates", "strong") }
+					for index, attempt in current.attempts do
+						local summary = STATUSES[attempt.status] .. " · " .. attempt.ssh .. " · " .. SOURCES[attempt.source]
+						local rows = { label(summary, attempt.status == "failed" and "error" or "muted") }
+						if attempt.message then table.insert(rows, label(attempt.message)) end
+						table.insert(attempts, with(ui.col(rows), { key = "attempt-" .. tostring(index), role = "setup-message" }))
+					end
+					table.insert(main, with(ui.col(attempts), { key = "attempts", role = "setup-target" }))
+				end
 				if frozen(current) then
 					table.insert(main, with(ui.progress(nil, current.stage), { key = "progress", role = "setup-progress" }))
 				elseif failed then
@@ -353,7 +396,8 @@ local function register(kind)
 				if state.dirty then table.insert(main, with(label("Check the edited destination before installing."), { key = "dirty", role = "setup-message" })) end
 				local actions = {}
 				if input and not frozen(current) then
-					table.insert(actions, button(state, "check", "Check SSH", enabled and current.canCheck and destination(state.ssh), state.ssh, nil, "primary"))
+					local action = not state.dirty and not state.editing and current.sshSource and current.sshSource ~= "manual" and "checkprofiles" or "check"
+					table.insert(actions, button(state, action, "Check SSH", enabled and current.canCheck and destination(state.ssh), state.ssh, "check", "primary"))
 				elseif current.phase == "review" and not state.picker then
 					table.insert(main, with(ui.col({
 						with(label("This device · Private runtime and Bridge client"), { role = "setup-scope-row" }),
@@ -369,7 +413,10 @@ local function register(kind)
 					end
 				elseif failed and not state.picker then
 					table.insert(actions, button(state, "retry", "Retry", enabled and current.canRetry and not state.dirty, nil, nil, "primary"))
-					table.insert(actions, localButton("edit", "Edit SSH", enabled and current.canCheck))
+					if current.canCheck then table.insert(actions, localButton("edit", "Edit SSH", enabled)) end
+				end
+				if current.canDiscover and current.targetKey and not state.picker and not needsHost and not complete and not frozen(current) then
+					table.insert(actions, button(state, "discover", "Find SSH alternatives", enabled))
 				end
 				if #actions > 0 then table.insert(main, with(ui.row(actions), { key = "actions", role = "setup-actions" })) end
 				if not state.picker and not needsHost and not frozen(current) and not failed and not complete and current.message ~= "" then

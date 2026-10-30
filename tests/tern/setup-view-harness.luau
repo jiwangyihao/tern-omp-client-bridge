@@ -151,12 +151,12 @@ function run(moduleEntry, hostEntry)
 			local view, expected = f.view(), nil
 			local n = nodes(view)
 			assert(n["main.target"] and n["main.subtitle"] and not n["main.phase"] and not n["main.steps"] and not n["main.hosts"])
-			assert((n["main.ssh"] ~= nil) == (phase == "choose" or phase == "checking"))
+			assert((n["main.ssh"] ~= nil) == (phase == "choose" or phase == "checking" or phase == "failed" or phase == "interrupted"))
 			assert((n["main.consent"] ~= nil) == (phase == "review"))
 			assert((n["main.progress"] ~= nil) == (phase == "checking" or phase == "installing"))
 			if phase == "choose" then expected = "main.actions.check"
 			elseif phase == "review" then expected = "main.actions.install"
-			elseif phase == "failed" or phase == "interrupted" then expected = "main.actions.retry" end
+			elseif phase == "failed" or phase == "interrupted" then expected = "main.actions.check" end
 			local primaries = 0
 			for id, node in n do
 				if node.p and node.p.class and node.p.class:find("setup-primary", 1, true) then
@@ -200,13 +200,14 @@ function run(moduleEntry, hostEntry)
 	test("review and failure edit preserve target and require a new SSH check", function()
 		for _, phase in { "review", "failed", "interrupted" } do
 			local f = fixture(); local s = sample(phase); s.canRecover = true; f.send(s)
-			click(f, "main.actions.edit")
+			if phase == "review" then click(f, "main.actions.edit") end
 			assert(f.state.snapshot.selectedLabel == s.selectedLabel and f.state.ssh == s.ssh)
 			assert(nodes(f.view())["main.ssh"] and not nodes(f.view())["main.actions.install"] and not nodes(f.view())["main.actions.retry"])
 			f.focus(); f.key({ name = "x", text = "x" })
 			assert(f.state.dirty and nodes(f.view())["main.actions.check"].p.href:find("/check/", 1, true))
 			f.send(s); assert(f.state.dirty and nodes(f.view())["main.ssh"])
-			f.send(sample("review", 2)); assert(not nodes(f.view())["main.ssh"] and nodes(f.view())["main.actions.install"].p.href)
+			local ack = sample("review", 2); ack.ssh = f.state.ssh; f.send(ack)
+			assert(not f.state.dirty and not nodes(f.view())["main.ssh"] and nodes(f.view())["main.actions.install"].p.href)
 		end
 	end)
 	test("details remain disclosed locally instead of repeating stage explanations", function()
@@ -285,13 +286,111 @@ function run(moduleEntry, hostEntry)
 		f.key({ name = "right", meta = true }); assert(f.state.cursor == 9)
 		f.key({ name = "left", meta = true }); assert(f.state.cursor == 0)
 	end)
-	test("dirty input selection survives heartbeat but newer revision replaces it", function()
-		local f = fixture(); local s = sample("review"); s.canRecover = true; f.send(s)
-		click(f, "main.actions.edit"); f.focus(); f.key({ name = "x", text = "x" }); f.key({ name = "left", shift = true })
-		local before = { f.state.ssh, f.state.cursor, f.state.anchor }
-		f.send(s); assert(f.state.ssh == before[1] and f.state.cursor == before[2] and f.state.anchor == before[3])
-		assert(nodes(f.view())["main.actions.install"] == nil and nodes(f.view())["main.actions.recover"] == nil)
-		f.send(sample("review", 2)); assert(not f.state.dirty and f.state.ssh == "dev@remote.example" and f.state.anchor == nil)
+	test("dirty input selection and editing survive heartbeat and unrelated revisions", function()
+		for _, explicitKey in { false, true } do
+			local f = fixture(); local s = sample("review"); s.canRecover = true
+			if explicitKey then s.targetKey = "remote/a %中" end
+			f.send(s); click(f, "main.actions.edit"); f.focus()
+			f.key({ name = "a", ctrl = true }); f.key({ name = "paste", text = "a😀中z" }); f.key({ name = "left", shift = true })
+			local before = { f.state.ssh, f.state.cursor, f.state.anchor, #f.state.history, #f.frames }
+			for revision = 1, 3 do
+				s.revision, s.message, s.stage = revision, "Unrelated progress", "Heartbeat"
+				if explicitKey then s.selectedLabel = "Renamed display label" end
+				f.send(s)
+				assert(f.state.ssh == before[1] and f.state.cursor == before[2] and f.state.anchor == before[3])
+				assert(f.state.dirty and f.state.editing and f.state.focused and #f.state.history == before[4] and #f.frames == before[5])
+				assert(nodes(f.view())["main.actions.install"] == nil and nodes(f.view())["main.actions.recover"] == nil)
+			end
+			f.event({ ev = "edit", id = "main.ssh", from = 1, to = 3, text = "b", cursor = 2, len = 5 })
+			assert(f.state.ssh == "ab中z" and f.state.cursor == 2)
+		end
+	end)
+	test("target changes clear edits even when both hosts share an SSH destination", function()
+		for _, explicitKey in { false, true } do
+			local f = fixture(); local s = sample("review")
+			if explicitKey then s.targetKey = "host-one" end
+			f.send(s); click(f, "main.actions.edit"); f.focus(); f.key({ name = "x", text = "x" }); f.key({ name = "left", shift = true })
+			local nextHost = copy(s); nextHost.revision = 2
+			if explicitKey then nextHost.targetKey = "host-two" else nextHost.selectedAddress = "192.0.2.9" end
+			f.send(nextHost)
+			assert(f.state.ssh == s.ssh and not f.state.dirty and not f.state.editing and not f.state.focused)
+			assert(f.state.anchor == nil and #f.state.history == 0 and f.frames[#f.frames][1][2] == tern.json.null)
+			assert(nodes(f.view())["main.actions.install"].p.href == "omp-bridge-setup://window-1/panel-1/2/install/dev%40remote.example")
+		end
+	end)
+	test("manual check acknowledgment and failure retain the typed alias without Retry fallback", function()
+		local f = fixture(); local s = sample("review"); s.targetKey = "remote/a %中"; s.sshSource = "config"; f.send(s)
+		click(f, "main.actions.edit"); f.focus(); f.key({ name = "a", ctrl = true }); f.key({ name = "paste", text = "typed-alias" })
+		assert(nodes(f.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/1/check/typed-alias")
+		s.revision, s.phase, s.ssh, s.sshSource, s.busy = 2, "checking", "typed-alias", "manual", true; f.send(s)
+		assert(f.state.ssh == "typed-alias" and not f.state.dirty and not f.state.editing)
+		assert(nodes(f.view())["main.ssh"].p.readonly and not f.key({ name = "x", text = "x" }))
+		s.revision, s.phase, s.busy, s.canRetry, s.error = 3, "failed", false, true, "SSH authentication failed"; f.send(s)
+		assert(nodes(f.view())["main.ssh"].p.text == "typed-alias" and not nodes(f.view())["main.ssh"].p.readonly)
+		assert(nodes(f.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/3/check/typed-alias")
+		assert(not nodes(f.view())["main.actions.retry"] and not nodes(f.view())["main.actions.install"])
+		f.focus(); f.key({ name = "a", ctrl = true }); f.key({ name = "paste", text = "fixed-alias" })
+		s.revision, s.message = 4, "Unrelated heartbeat"; f.send(s)
+		assert(nodes(f.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/4/check/fixed-alias")
+		s.revision, s.phase, s.ssh, s.busy = 5, "checking", "fixed-alias", true; f.send(s)
+		s.revision, s.phase, s.busy, s.canInstall = 6, "review", false, true; f.send(s)
+		assert(nodes(f.view())["main.actions.install"].p.href == "omp-bridge-setup://window-1/panel-1/6/install/fixed-alias")
+		assert(not nodes(f.view())["main.ssh"] and not f.state.dirty)
+	end)
+	test("bounded candidate history exposes only public statuses and sources", function()
+		local f = fixture(); local s = sample("review"); s.sshSource = "saved"; s.attempts = {}
+		local statuses = { "failed", "passed", "checking" }
+		local sources = { "saved", "config", "address", "manual" }
+		for i = 1, 12 do
+			s.attempts[i] = { ssh = "build-alias-" .. tostring(i), source = sources[(i - 1) % 4 + 1], status = statuses[(i - 1) % 3 + 1],
+				message = string.rep("m", 1000), stderr = "SECRET_STDERR", config = "SECRET_CONFIG", raw = "SECRET_RAW", password = "SECRET_PASSWORD" }
+		end
+		f.send(s)
+		assert(#f.state.snapshot.attempts == 6)
+		for _, attempt in f.state.snapshot.attempts do assert(#attempt.message <= 243) end
+		for _, secret in { "SECRET_STDERR", "SECRET_CONFIG", "SECRET_RAW", "SECRET_PASSWORD", "build-alias-7" } do
+			excludes(f.state, secret); excludes(f.view(), secret)
+		end
+		for _, value in { "Saved SSH mapping", "Local SSH config", "Tern address", "Manual SSH", "Failed", "Passed", "Checking" } do contains(f.view(), value) end
+		assert(nodes(f.view())["main.attempts.attempt-1"] and nodes(f.view())["main.attempts.attempt-6"])
+		assert(nodes(f.view())["main.actions.install"].p.href and not f.state.picker)
+		for _, id in actionable(f.view()) do assert(not id:find("attempt", 1, true)) end
+		s.revision = 2; s.sshSource = "SECRET_SOURCE"
+		s.attempts = {
+			{ ssh = "ssh://user:SECRET_PASSWORD@host", source = "config", status = "passed" },
+			{ ssh = "safe", source = "SECRET_SOURCE", status = "passed" },
+			{ ssh = "safe", source = "config", status = "SECRET_STATUS" },
+		}
+		f.send(s); assert(#f.state.snapshot.attempts == 0)
+		for _, secret in { "SECRET_PASSWORD", "SECRET_SOURCE", "SECRET_STATUS" } do excludes(f.state.snapshot, secret); excludes(f.view(), secret) end
+	end)
+	test("discover is explicit selected-host capability and never installation consent", function()
+		local f = fixture(); local s = sample("failed"); s.targetKey = "stable-host-id:192.0.2.8"; s.sshSource = "manual"; s.canDiscover = true; f.send(s)
+		local function discover() return nodes(f.view())["main.actions.discover"] end
+		assert(discover().p.href == "omp-bridge-setup://window-1/panel-1/1/discover")
+		assert(nodes(f.view())["main.actions.check"].p.href and not nodes(f.view())["main.actions.install"])
+		f.event({ ev = "action", act = "discover" }); assert(f.state.snapshot.phase == "failed" and not f.state.picker)
+		click(f, "main.target.heading.change"); assert(not discover()); click(f, "main.target.heading.cancel")
+		f.advance(15000); f.tick(); assert(discover().p.href == nil)
+		s.revision = 2; s.canDiscover = false; f.send(s); assert(not discover())
+		s.revision, s.canDiscover, s.busy = 3, true, true; f.send(s); assert(not discover())
+		s.revision, s.busy, s.phase = 4, false, "checking"; f.send(s); assert(not discover())
+		s.revision, s.phase, s.targetKey, s.canDiscover = 5, "choose", "manual", false; f.send(s); assert(not discover())
+		s.revision, s.targetKey, s.canCheck, s.canDiscover = 6, nil, true, true; f.send(s); assert(not discover())
+		s.revision, s.targetKey, s.canCheck, s.phase, s.canDiscover = 7, "stable-host-id:192.0.2.8", true, "ready", true; f.send(s); assert(not discover())
+	end)
+	test("only untouched automatic candidates use the multi-candidate Check action", function()
+		local f = fixture(); local s = sample(); s.sshSource = "config"; f.send(s)
+		assert(nodes(f.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/1/checkprofiles/dev%40remote.example")
+		f.focus(); f.key({ name = "x", text = "x" }); f.key({ name = "z", ctrl = true })
+		assert(f.state.ssh == s.ssh and f.state.dirty)
+		assert(nodes(f.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/1/check/dev%40remote.example")
+		s.revision, s.phase, s.busy = 2, "checking", true; f.send(s)
+		assert(not f.state.dirty and not f.state.editing)
+		s.revision, s.phase, s.busy, s.sshSource = 3, "failed", false, "manual"; f.send(s)
+		assert(nodes(f.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/3/check/dev%40remote.example")
+		local legacy = fixture(); legacy.send(sample())
+		assert(nodes(legacy.view())["main.actions.check"].p.href == "omp-bridge-setup://window-1/panel-1/1/check/dev%40remote.example")
 	end)
 	test("wrong owner panel stale revision and malformed snapshots are inert", function()
 		local f = fixture(); f.send(sample("review", 4))
@@ -331,7 +430,7 @@ function run(moduleEntry, hostEntry)
 	end)
 	test("expiration freezes disclosures edits and routes until a fresh snapshot", function()
 		local f = fixture(); local s = sample("failed"); s.error = "SSH check rejected"; f.send(s)
-		click(f, "main.actions.edit"); f.focus(); click(f, "main.target.heading.change")
+		f.focus(); click(f, "main.target.heading.change")
 		f.advance(15000); f.tick()
 		assert(f.renders() == 1 and #actionable(f.view()) == 1)
 		contains(f.view(), "SSH check rejected"); contains(f.view(), "Connection lost")
@@ -342,15 +441,16 @@ function run(moduleEntry, hostEntry)
 		click(f, "main.target.heading.cancel"); assert(not f.state.picker and not nodes(f.view())["main.ssh"].p.readonly)
 		f.close(); f.tick(); assert(f.timerCount() == 0)
 	end)
-	test("errors and retry/edit persist through repeated views", function()
+	test("failures keep direct editing and checks while recovery-only failures retain Retry", function()
 		for _, phase in { "failed", "interrupted" } do
 			local f = fixture(); local s = sample(phase); s.error = "Installation needs attention"; s.message = s.error; f.send(s)
 			for _ = 1, 3 do
 				local view = f.view(); contains(view, s.error)
-				assert(renderedCount(view, s.error) == 1)
-				assert(nodes(view)["main.actions.retry"].p.href ~= nil)
-				assert(nodes(view)["main.actions.edit"].p.actions.click == "setup-edit" and nodes(view)["main.actions.edit"].p.href == nil)
+				assert(renderedCount(view, s.error) == 1 and nodes(view)["main.ssh"])
+				assert(nodes(view)["main.actions.check"].p.href ~= nil and not nodes(view)["main.actions.retry"])
 			end
+			s.revision, s.canCheck = 2, false; f.send(s)
+			assert(nodes(f.view())["main.actions.retry"].p.href and not nodes(f.view())["main.ssh"])
 		end
 	end)
 	test("bounded snapshots whitelist public state and never persist secrets", function()

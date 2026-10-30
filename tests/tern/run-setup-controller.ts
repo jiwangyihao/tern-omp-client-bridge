@@ -6,7 +6,7 @@ const executable=process.argv[2];
 if(!executable) throw Error('Usage: bun tests/tern/run-setup-controller.ts /path/to/luau');
 const dir=await mkdtemp(join(tmpdir(),'bridge-setup-controller-'));
 try {
- for(const file of ['setup-controller.luau','setup-target.luau']) await writeFile(join(dir,file),await readFile(new URL('../../tern/'+file,import.meta.url),'utf8'));
+ for(const file of ['setup-controller.luau','setup-target.luau','setup-ssh.luau']) await writeFile(join(dir,file),await readFile(new URL('../../tern/'+file,import.meta.url),'utf8'));
  const harness=await readFile(new URL('./setup-controller-harness.luau',import.meta.url),'utf8');
  const runner=join(dir,'run.luau');
  await writeFile(runner,harness+'\nrun(require("./setup-controller"))\n');

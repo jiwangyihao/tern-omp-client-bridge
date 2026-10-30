@@ -6,6 +6,8 @@ import { BridgeError } from "./protocol.ts";
 export function isAbsoluteTernPaneSocketPath(value: unknown, platform: NodeJS.Platform = process.platform): value is string {
 	if (typeof value !== "string" || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return false;
 	if (platform !== "win32") return value.startsWith("/") && !value.endsWith("/");
+	// Windows Tern uses a local named pipe, not a UNC file or device executable.
+	if (value.startsWith("\\\\.\\")) return /^\\\\\.\\pipe\\[^\\/:"<>|?*]+$/iu.test(value);
 	let native = value.replaceAll("\\", "/");
 	if (native.startsWith("//?/")) {
 		native = native.slice(4);
@@ -38,15 +40,15 @@ export async function resolveTernPaneSocket({ explicit, saved, configDirectory, 
 		if (value) return requireEndpoint(value, variable);
 	}
 
-	// Official contract: $TERN_DAEMON_SOCKET, else daemon.sock in runtime/settings.
+	// Native Tern 0.9.7 uses \\.\pipe\tern-$USERNAME on Windows. Confirmed
+	// with `tern ls` in a clean environment, including an overridden USERNAME.
+	if (process.platform === "win32") {
+		const username = process.env.USERNAME;
+		if (!username) throw new BridgeError("INVALID_TERN_PANE_SOCKET", "Windows Tern needs USERNAME or an explicit --tern-pane-socket local named pipe.");
+		return requireEndpoint(`\\\\.\\pipe\\tern-${username}`, "Windows Tern named pipe");
+	}
+	// POSIX: $TERN_DAEMON_SOCKET, else daemon.sock in runtime/settings.
 	// https://docs.stencil.so/tern/reference/cli.md
-	// Settings are supplied by the caller (Windows: %APPDATA%\\Tern, not LOCALAPPDATA):
-	// https://docs.stencil.so/tern/concepts/packages.md#directories
-	// Linux `tern ls --json` (read-only, 2026-10-29) reports
-	// $XDG_RUNTIME_DIR/tern/daemon.sock, or $TERN_CONFIG_DIR/daemon.sock when
-	// XDG_RUNTIME_DIR is unset. No daemon/socket liveness check is appropriate here.
-	// Native Windows fallback follows the documented settings-directory contract;
-	// it has not been acceptance-tested on a Windows host.
 	let directory = configDirectory;
 	if (process.platform === "linux" && process.env.XDG_RUNTIME_DIR) {
 		directory = requireEndpoint(path.join(process.env.XDG_RUNTIME_DIR, "tern"), "XDG_RUNTIME_DIR");

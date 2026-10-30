@@ -41,7 +41,9 @@ $acl.SetOwner($sid)
 $inheritance = [Security.AccessControl.InheritanceFlags]::${directory ? "ObjectInherit -bor [Security.AccessControl.InheritanceFlags]::ContainerInherit" : "None"}
 $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $target -AclObject $acl
+# Use the Windows PowerShell/.NET Framework API directly: inherited PSModulePath
+# may resolve Set-Acl to an incompatible PowerShell 7 module.
+[IO.${directory ? "Directory" : "File"}]::SetAccessControl($target, $acl)
 `;
 	await runFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true });
 }

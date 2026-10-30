@@ -137,7 +137,7 @@ test("real identity storage has native private permissions and retains its key",
 		const acl = await runFile("icacls", [file], { windowsHide: true });
 		expect(acl.stdout).not.toContain("(I)");
 		// Verify numeric broad-group SIDs too, independent of the runner's UI language.
-		const rules = await runFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$a=Get-Acl -LiteralPath $env.BRIDGE_ACL_TEST_FILE; $a.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }"], { env: { ...process.env, BRIDGE_ACL_TEST_FILE: file }, windowsHide: true });
+		const rules = await runFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $a=[IO.File]::GetAccessControl($env:BRIDGE_ACL_TEST_FILE); foreach($rule in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) { [Console]::WriteLine($rule.IdentityReference.Value) }"], { env: { ...process.env, BRIDGE_ACL_TEST_FILE: file }, windowsHide: true });
 		for (const broad of ["S-1-1-0", "S-1-5-11", "S-1-5-32-545"]) expect(rules.stdout.split(/\r?\n/)).not.toContain(broad);
 	} else {
 		expect((await stat(file)).mode & 0o777).toBe(0o600);
