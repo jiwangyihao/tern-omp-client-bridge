@@ -18,6 +18,7 @@ import { JsonLineDecoder, RpcPeer, WireFrameSchema } from "../src/wire.ts";
 import { runRelay } from "../src/relay.ts";
 import { acquireBootstrapLock, packageFiles } from "./build.ts";
 import { installOmp } from "./install.ts";
+import { verifyOmpLoader } from "./verify-omp.ts";
 
 const runFile = promisify(execFile);
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -79,9 +80,8 @@ test("finite installers preserve unrelated settings and write real native plugin
 		expect(await readFile(path.join(tern, "settings.json"), "utf8")).toBe(settings);
 		const native = await installOmp(omp, { hostCommand });
 		expect(native.loader).toBe(path.join(omp, "extensions", "tern-omp-client-bridge", "index.ts"));
-		// installOmp already exercised the native host loader before publishing index.ts.
-		const loaded = await import(native.loader!);
-		expect(typeof loaded.default).toBe("function");
+		// Verify the published entry through the host graph, including cross-volume loaders.
+		await verifyOmpLoader(native.loader, hostCommand);
 	}
 	expect(await readFile(path.join(omp, "settings.json"), "utf8")).toBe("{\"unrelated\":true}\n");
 	expect(await readFile(path.join(omp, "extensions", "unrelated.ts"), "utf8")).toBe("export default () => {};\n");

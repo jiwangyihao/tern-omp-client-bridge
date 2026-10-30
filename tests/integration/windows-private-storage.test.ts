@@ -46,13 +46,14 @@ test.skipIf(process.platform !== "win32")("private storage removes explicit broa
 	} finally { await source.close(); await rm(root, { recursive: true, force: true }); }
 }, 60000);
 
-test.skipIf(process.platform !== "win32")("upload staging and published files retain owner-only ACLs under a broadly shared parent", async () => {
+test.skipIf(process.platform !== "win32")("upload staging and published files retain user-only DACLs under a broadly shared parent", async () => {
 	const root = await mkdtemp(join(tmpdir(), "bridge-upload-acl-"));
 	const imports = join(root, "imports 目录 ' $([throw]) & ` [x]");
 	const store = new UploadStore(imports);
 	const expectPrivate = async (file: string, inherited: boolean) => {
 		const actual = await acl(file);
-		expect(actual.owner).toBe(actual.current);
+		// Only explicitly protected paths set the owner; inherited DACLs still grant this user alone.
+		if (!inherited) expect(actual.owner).toBe(actual.current);
 		expect(actual.protected).toBe(!inherited);
 		expect(actual.rules).toEqual([{ sid: actual.current, inherited, allow: true, rights: 2032127 }]);
 	};

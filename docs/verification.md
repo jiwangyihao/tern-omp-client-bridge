@@ -34,6 +34,24 @@ clients, complete remote Windows GUI behavior, or attached-device ADB acceptance
 - README 与安装指南中的 25 个本地文件链接有效。版本、发行附件名称和安装
   示例统一为 `v0.5.0-beta.2`；固定依赖及最低 Bun 要求未改变。
 
+### 首次 CI 的环境相关断言校正
+
+首次候选 `530af93` 的 [CI 40988893389](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40988893389)
+中，macOS 全部步骤通过；Windows 为 267 通过、19 跳过、6 失败。定位到两类
+回归观察边界，而不是通过跳过失败、放宽 DACL 或更换 SDK 来发布：
+
+- 五项失败检查了普通继承子项的 owner。显式保护的目录和凭据文件所有者检查
+  已通过；Windows 的 DACL 继承并不继承父目录 owner，新对象使用
+  [令牌默认所有者](https://learn.microsoft.com/en-us/dotnet/api/system.security.principal.windowsidentity.owner?view=netframework-4.8.1)，
+  提权令牌可能使用 Administrators 组。删除继承子项的错误 owner 假设，继续严格
+  检查显式保护路径的当前用户所有权，以及所有 DACL 的 SID、权限和继承属性。
+- 一项失败在原生 OMP 已验证候选后，又用普通 Bun import 加载已发布扩展。
+  Windows CI 的源码与临时目录跨卷，会使用依赖宿主模块图的入口；裸 import
+  不是该入口的合法执行环境。改为通过真实 OMP 宿主验证已发布文件及生命周期
+  注册，不复制 SDK、不创建第二个宿主作用域，也不只断言导出是函数。
+- 校正后本机类型检查及三个相关套件通过：25 通过、3 个既有平台条件跳过、
+  0 失败，共 28 个用例、377 个断言。产品权限策略和运行时实现未因此改变。
+
 本版本 GitHub Actions 与发行附件的验证回执见对应发行说明；不使用 beta.1
 的 macOS CI 代替新提交的结果。真实 Tern 设置流程与平台限制保留在下文。
 

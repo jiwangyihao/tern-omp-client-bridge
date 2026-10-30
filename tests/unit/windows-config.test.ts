@@ -22,7 +22,8 @@ async function acl(file: string, directory = false) {
 }
 
 function expectPrivate(actual: z.infer<typeof Acl>, directory = false, inherited = false) {
-	expect(actual.owner).toBe(actual.current);
+	// DACL inheritance does not inherit ownership; elevated tokens may default to Administrators.
+	if (!inherited) expect(actual.owner).toBe(actual.current);
 	expect(actual.protected).toBe(!inherited);
 	expect(actual.rules).toEqual([{ sid: actual.current, inherited, rights: 2032127, inheritance: directory ? 3 : 0, propagation: 0, allow: true }]);
 }
