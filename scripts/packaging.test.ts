@@ -292,7 +292,9 @@ test("finite Tern upgrade retires old manifest entrypoints but preserves neighbo
 	const directory = await fixture();
 	const plugin = path.join(directory, "plugins", "omp-client-bridge");
 	await mkdir(plugin, { recursive: true });
-	const manifest = (await readFile(path.join(root, "plugin.toml"), "utf8")).replaceAll('"tern/', '"');
+	// Model the legacy manifest's ownership independently of the current styles.
+	const manifest = (await readFile(path.join(root, "plugin.toml"), "utf8")).replaceAll('"tern/', '"')
+		.replace(/^styles = .*$/m, 'styles = ["panel.css"]');
 	await writeFile(path.join(plugin, "plugin.toml"), manifest);
 	for (const file of ["host.luau", "window.luau", "panel.css", "unrelated.txt"]) await writeFile(path.join(plugin, file), "preserve only unrelated");
 	await command(["install-tern", "--target", directory], directory);
