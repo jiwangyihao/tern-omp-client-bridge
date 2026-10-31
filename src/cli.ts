@@ -15,7 +15,7 @@ const HELP = `Usage: tern-omp-bridge COMMAND [OPTIONS]
 
   setup --host SSH_ALIAS --plugin-data PATH --package-root PATH
         [--remote-root POSIX_PATH] [--agent-dir POSIX_PATH] [--tern-dir POSIX_PATH]
-        [--tern-executable ABSOLUTE_LOCAL_PATH] [--tern-pane-socket ABSOLUTE_LOCAL_PATH]
+        [--tern-executable ABSOLUTE_LOCAL_PATH]
   server [--state-dir PATH] [--port N]
   relay [--state-dir PATH]
   client --host SSH_ALIAS
@@ -23,7 +23,6 @@ const HELP = `Usage: tern-omp-bridge COMMAND [OPTIONS]
          [--remote-command COMMAND]
   install-omp [--target AGENT_DIRECTORY] [--state-dir PATH]
   install-tern [--target TERN_DIRECTORY] [--control-file PATH] [--tern-executable ABSOLUTE_PATH]
-               [--tern-pane-socket ABSOLUTE_LOCAL_PATH]
   help | --help | -h
 
 The normal flow is Tern's consented Set up Bridge command, which invokes setup.
@@ -50,16 +49,16 @@ an isolated, no-prompt host before replacing extensions/tern-omp-client-bridge/i
 under the native OMP agent directory (or --target). Keep this package installed.
 It never activates bridge lifecycle handlers, contacts the broker, or restarts an existing OMP.
 install-tern copies the plugin and merges connection metadata plus this machine's
-absolute Tern CLI path and native daemon socket. --tern-executable overrides
-executable discovery; --tern-pane-socket sets the native control route explicitly.
-Setup's local overrides are never forwarded to the remote host. An isolated
---target needs an explicit socket before its window plugin can initialize PiP.
+absolute Tern CLI path. --tern-executable overrides executable discovery for
+native host plugin reload. Setup's local override is never forwarded to the
+remote host. PiP uses the native layout API without executable/socket routing.
 Run install-tern on the client AND the remote Tern host: the right-side Bridge
 panel is a native host block, while its controls and clipboard stay on the client.
 --target isolates BOTH Tern config and plugin data beneath that directory;
 without it the native platform config/state directories are used.
---control-file defaults to the local bridge state directory's client.json,
-never identity.json. Existing global settings and other plugins are untouched.
+--control-file preserves an existing saved connection when omitted, otherwise
+defaults to the local bridge state directory's client.json, never identity.json.
+Existing global settings and other plugins are untouched.
 Reload Tern plugins / restart OMP yourself after installation. These commands
 never install/start background services or change unrelated settings.
 `;
@@ -69,9 +68,9 @@ const OPTIONS: Record<string, readonly string[]> = {
 	relay: ["state-dir"],
 	client: ["host", "name", "state-dir", "cwd", "remote-command"],
 	"install-omp": ["target", "state-dir"],
-	"install-tern": ["target", "control-file", "tern-executable", "tern-pane-socket"],
-	setup: ["host", "plugin-data", "package-root", "remote-root", "agent-dir", "tern-dir", "tern-executable", "tern-pane-socket"],
-	"setup-agent": ["remote-root", "package-root", "agent-dir", "tern-dir", "tern-executable", "tern-pane-socket"],
+	"install-tern": ["target", "control-file", "tern-executable"],
+	setup: ["host", "plugin-data", "package-root", "remote-root", "agent-dir", "tern-dir", "tern-executable"],
+	"setup-agent": ["remote-root", "package-root", "agent-dir", "tern-dir", "tern-executable"],
 	"setup-status": ["state-dir", "device-id"],
 	"managed-start": ["kind", "state-dir", "package-root", "host", "remote-command"],
 	"managed-service": ["kind", "state-dir", "package-root", "host", "remote-command"],
@@ -147,11 +146,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 	}
 	switch (command) {
 		case "setup": {
-			console.log(JSON.stringify(await setup({ host: required("host"), pluginData: required("plugin-data"), packageRoot: required("package-root"), remoteRoot: options.get("remote-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable"), ternPaneSocket: options.get("tern-pane-socket") })));
+			console.log(JSON.stringify(await setup({ host: required("host"), pluginData: required("plugin-data"), packageRoot: required("package-root"), remoteRoot: options.get("remote-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable") })));
 			return;
 		}
 		case "setup-agent": {
-			console.log(JSON.stringify(await setupAgent({ remoteRoot: required("remote-root"), packageRoot: required("package-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable"), ternPaneSocket: options.get("tern-pane-socket") })));
+			console.log(JSON.stringify(await setupAgent({ remoteRoot: required("remote-root"), packageRoot: required("package-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable") })));
 			return;
 		}
 		case "setup-status": {
@@ -203,7 +202,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 			return;
 		}
 		case "install-tern": {
-			console.log(JSON.stringify(await installTern({ target: options.get("target"), controlFile: options.get("control-file"), ternExecutable: options.get("tern-executable"), ternPaneSocket: options.get("tern-pane-socket") })));
+			console.log(JSON.stringify(await installTern({ target: options.get("target"), controlFile: options.get("control-file"), ternExecutable: options.get("tern-executable") })));
 			return;
 		}
 	}

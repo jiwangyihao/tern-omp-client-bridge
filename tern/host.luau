@@ -94,23 +94,18 @@ local function muted(value)
 end
 
 local actionIcons = { paste = "clipboard", upload = "file-plus", devices = "monitor", transfers = "history", approvals = "shield", hide = "x" }
-local function icon(name, tone)
-	return ui.node("icon", { name = name, tone = tone or "muted" })
-end
-
-local function button(state, verb, label, enabled, detail)
-	local props = { key = verb, aria = verb == "hide" and "Hide Bridge" or label, title = label, class = "bridge-action bridge-" .. verb, attrs = { ["aria-disabled"] = not enabled } }
-	if enabled and state.owner and state.panelId then
+local function button(state, verb, label, enabled)
+	local admitted = enabled and not state.closed and state.owner ~= nil and state.panelId ~= nil
+	local props = {
+		key = verb, text = verb == "hide" and "" or label, aria = label, title = label,
+		icon = actionIcons[verb], variant = verb == "paste" and "primary" or (verb == "upload" and "default" or "quiet"),
+		disabled = not admitted and "Reconnect Bridge from the owning remote OMP session." or false,
+	}
+	if admitted then
 		props.href = "omp-bridge-panel://" .. state.owner .. "/" .. state.panelId .. "/" .. verb
 		props.actions = { click = "open" }
 	end
-	local children = { icon(actionIcons[verb]) }
-	if verb ~= "hide" then
-		local caption = detail and ui.lines({ muted(detail), ui.text(ui.span(label, "strong")) }) or ui.text(label)
-		table.insert(children, with(caption, { grow = 1 }))
-	end
-	if verb == "devices" then table.insert(children, icon("chev-r")) end
-	return ui.el("button", props, children)
+	return ui.node("button", props)
 end
 
 local function bytes(value)
@@ -154,8 +149,10 @@ tern.on("pane_exited", function(ev)
 end)
 
 local function expire(state)
-	if state.snapshot and tern.now() >= state.expiresAt then
+	if (state.snapshot and tern.now() >= state.expiresAt)
+		or (state.awaitingUntil and tern.now() >= state.awaitingUntil) then
 		state.snapshot = nil
+		state.awaitingUntil = nil
 		state.expired = true
 		return true
 	end
@@ -163,13 +160,14 @@ local function expire(state)
 end
 
 tern.block.define("panel", {
+	font = "sans",
 	init = function(cx, args, _saved)
 		-- These routing locators are not credentials. Never restore a stale snapshot.
 		local owner = type(args) == "table" and args[1] or nil
 		local panelId = type(args) == "table" and args[2] or nil
 		local clientId = type(args) == "table" and args[3] or nil
 		if not routeId(owner) or not routeId(panelId) or not routeId(clientId) then return {} end
-		local state = { owner = owner, panelId = panelId, clientId = clientId }
+		local state = { owner = owner, panelId = panelId, clientId = clientId, awaitingUntil = tern.now() + SNAPSHOT_TTL_MS }
 		owned[cx.pane] = state -- Host lifecycle metadata only; never a window lookup.
 		local function tick()
 			if state.closed then return end
@@ -196,6 +194,7 @@ tern.block.define("panel", {
 						local current = snapshot(value.snapshot, state)
 						if current then
 							state.snapshot, state.expiresAt, state.expired = current, tern.now() + SNAPSHOT_TTL_MS, false
+							state.awaitingUntil = nil
 							cx:render()
 						end
 					end
@@ -212,95 +211,116 @@ tern.block.define("panel", {
 	key = function() return false end,
 	view = function(state, _cx)
 		expire(state)
-		local current = state.snapshot
+		local current = not state.closed and state.snapshot or nil
 		local connected = current ~= nil and current.connected
+		local waiting = current == nil and state.awaitingUntil ~= nil and not state.closed
 		local main = {
 			ui.node("text", { role = "omp.client-bridge.panel-owner", text = (state.owner or "") .. "/" .. (state.panelId or ""), hidden = true }),
-			with(ui.row({
-				with(icon("plug", "accent"), { role = "bridge-mark" }),
-				with(ui.text(ui.span("Bridge", "strong")), { role = "bridge-title", grow = 1 }),
-				with(ui.badge(connected and "Connected" or "Offline", connected and "success" or "muted"), { role = "bridge-status" }),
+			ui.node("row", { key = "header", gap = "sm", align = "center", wrap = true }, {
+				with(ui.text(ui.span("Bridge", "title")), { grow = 1 }),
+				ui.badge(connected and "Connected" or (waiting and "Connecting" or "Offline"), connected and "success" or (waiting and "pending" or "muted")),
 				button(state, "hide", "Hide Bridge", state.owner ~= nil and state.panelId ~= nil),
-			}), { role = "bridge-header" }),
+			}),
 		}
 		if not current then
-			table.insert(main, with(ui.row({
-				icon("link"),
-				ui.lines({
-					ui.text(ui.span(state.expired and "Connection lost" or "No remote session", "strong")),
-					muted("Open Bridge from a remote OMP session."),
-				}),
-			}), { role = "bridge-empty" }))
-			return { main = with(ui.col(main), { role = "omp-client-bridge.panel" }), dock = ui.col({}) }
+			if waiting then
+				table.insert(main, ui.node("col", { key = "session", gap = "sm" }, {
+					ui.node("spinner", { style = "orbit", label = "Connecting to the remote session" }),
+					ui.node("skeleton", { shape = "rows", rows = 3, aria = "Waiting for Bridge session details" }),
+				}))
+			else
+				table.insert(main, ui.node("empty", {
+					key = "session", icon = "link", tone = state.expired and "warning" or "muted",
+					title = state.expired and "Session unavailable" or "No remote session",
+					text = "Open Bridge from the owning remote OMP session. Actions stay unavailable until fresh session details arrive.",
+				}))
+			end
+			return { main = ui.col(main), dock = ui.col({}) }
 		end
-		table.insert(main, with(ui.col({
-			with(ui.row({
-				with(icon("terminal", "accent"), { role = "bridge-workspace-icon" }),
-				with(ui.lines({
-					ui.text(ui.span(current.target, "strong")),
-					muted("Remote OMP workspace"),
-				}), { grow = 1 }),
-			}), { role = "bridge-workspace-heading" }),
-			ui.node("item", { label = current.source, detail = "This device", icon = "laptop", role = "bridge-source" }),
-			with(ui.row({
+		table.insert(main, ui.node("col", { key = "session", gap = "sm" }, {
+			muted("Source · this device"),
+			with(ui.text(current.source), { title = current.source }),
+			muted("Destination · remote OMP workspace"),
+			with(ui.text(ui.span(current.target, "strong")), { title = current.target }),
+			ui.node("buttons", { label = "Send to remote OMP", variant = "joined" }, {
 				button(state, "paste", "Paste to remote", connected),
-				button(state, "upload", "Upload file", connected),
-			}), { role = "bridge-actions" }),
-		}), { role = "bridge-workspace" }))
-		if current.error then
-			table.insert(main, with(ui.row({ icon("warn", "error"), ui.text(ui.span(current.error, "error")) }), { role = "bridge-error" }))
+				button(state, "upload", "Upload file…", connected),
+			}),
+		}))
+		if current.error or not connected then
+			table.insert(main, ui.node("empty", {
+				key = "connection-error", variant = "inline", tone = current.error and "error" or "warning",
+				title = current.error and "Bridge needs attention" or "Remote session offline",
+				text = current.error or "Reconnect from the owning remote OMP session to enable actions.",
+			}))
 		end
-		table.insert(main, button(state, "devices", current.agent, connected, "Agent device"))
-
 		local devices = {}
 		for index, device in current.devices do
-			table.insert(devices, ui.node("item", {
-				key = "device-" .. tostring(index),
-				label = device.name,
-				detail = device.platform .. (device.bound and " · Agent target" or ""),
-				value = ui.span(device.online and "Online" or "Offline", device.online and "success" or "muted"),
-				icon = device.platform == "linux" and "server" or "laptop",
-				role = "bridge-device",
+			table.insert(devices, ui.node("col", { key = "device-" .. tostring(index), gap = "xs" }, {
+				ui.node("row", { gap = "sm", wrap = true }, {
+					with(ui.text(ui.span(device.name, "strong")), { grow = 1, title = device.name }),
+					ui.badge(device.online and "Online" or "Offline", device.online and "success" or "muted"),
+				}),
+				muted(device.platform .. (device.bound and " · Agent target" or " · Not bound")),
 			}))
 		end
 		if current.devicesMore > 0 then table.insert(devices, muted(tostring(current.devicesMore) .. " more; open Devices.")) end
-		if #devices > 0 then
-			table.insert(main, with(ui.section("Available devices", devices), { key = "device-list", collapsible = true, collapsed = true }))
+		if #devices == 0 then
+			table.insert(devices, ui.node("empty", {
+				variant = "inline", icon = "monitor", title = "No devices available",
+				text = "Open Devices to connect an agent device. Binding requires confirmation in this window.",
+			}))
 		end
+		table.insert(main, ui.node("col", { key = "devices", gap = "sm" }, {
+			ui.node("row", { gap = "sm", justify = "between", wrap = true }, {
+				ui.text(ui.span("Agent device", "strong")),
+				button(state, "devices", "Devices…", connected),
+			}),
+			with(muted(current.agent), { title = current.agent }),
+			with(ui.section("Available devices", {
+				ui.node("scroll", { key = "entries", max = { h = "8lines" }, gap = "md", aria = "Available agent devices" }, devices),
+			}), { key = "available", collapsible = true, collapsed = true }),
+		}))
 
 		local transfers = {}
 		local phaseLabels = { captured = "Captured", uploading = "Uploading", ready = "Ready", attached = "Handed to OMP", failed = "Failed", cancelled = "Cancelled" }
 		for index, transfer in current.transfers do
 			local progress = transfer.totalBytes > 0 and math.min(transfer.bytesSent / transfer.totalBytes, 1) or nil
 			local detail = bytes(transfer.bytesSent) .. (transfer.totalBytes > 0 and " / " .. bytes(transfer.totalBytes) or " / unknown")
-			local tone = transfer.phase == "failed" and "error" or (transfer.phase == "attached" and "success" or "muted")
+			local tone = transfer.phase == "failed" and "error" or (transfer.phase == "attached" and "success" or (transfer.phase == "uploading" and "accent" or "muted"))
 			local parts = {
-				with(ui.row({
-					icon("file"),
-					with(ui.text(ui.span(transfer.name, "strong")), { grow = 1 }),
-					ui.badge(phaseLabels[transfer.phase] or transfer.phase, tone),
-				}), { role = "bridge-transfer-heading" }),
-				ui.progress(progress, detail),
+				with(ui.text(ui.span(transfer.name, "strong")), { title = transfer.name }),
+				ui.badge(phaseLabels[transfer.phase] or transfer.phase, tone),
 			}
+			if transfer.phase == "uploading" then
+				table.insert(parts, ui.progress(progress, detail))
+			else
+				table.insert(parts, muted(detail))
+			end
 			if transfer.error then table.insert(parts, ui.text(ui.span(transfer.error, "error"))) end
-			table.insert(transfers, with(ui.col(parts), { key = "transfer-" .. tostring(index), role = "bridge-transfer" }))
+			table.insert(transfers, ui.node("col", { key = "transfer-" .. tostring(index), gap = "xs" }, parts))
 		end
 		if current.transfersMore > 0 then table.insert(transfers, muted(tostring(current.transfersMore) .. " more; open Transfers.")) end
-		table.insert(main, with(ui.row({
-			with(muted("Transfers"), { grow = 1 }),
-			button(state, "transfers", "History", connected),
-		}), { role = "bridge-section-header" }))
 		if #transfers == 0 then
-			table.insert(transfers, with(ui.row({ icon("inbox"), muted("No transfers yet") }), { role = "bridge-empty-transfers" }))
+			table.insert(transfers, ui.node("empty", {
+				variant = "inline", icon = "inbox", title = "No transfers yet",
+				text = "Paste or upload a file to send it to the remote OMP workspace.",
+			}))
 		end
-		table.insert(main, with(ui.col(transfers), { role = "bridge-transfers" }))
+		table.insert(main, ui.node("col", { key = "transfers", gap = "sm" }, {
+			ui.node("row", { gap = "sm", justify = "between", wrap = true }, {
+				ui.text(ui.span("Transfers", "strong")),
+				button(state, "transfers", "History…", connected),
+			}),
+			ui.node("scroll", { key = "entries", max = { h = "12lines" }, gap = "md", aria = "Recent transfers" }, transfers),
+		}))
 		if current.approvals > 0 then
-			table.insert(main, button(state, "approvals", "Review approvals · " .. tostring(current.approvals), connected))
+			table.insert(main, ui.node("row", { key = "approvals", gap = "sm", wrap = true }, {
+				ui.badge(tostring(current.approvals) .. " pending", "pending"),
+				button(state, "approvals", "Review approvals…", connected),
+			}))
 		end
-		return {
-			main = with(ui.col(main), { role = "omp-client-bridge.panel" }),
-			dock = ui.col({}),
-		}
+		return { main = ui.col(main), dock = ui.col({}) }
 	end,
 })
 

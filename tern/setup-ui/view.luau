@@ -1,9 +1,9 @@
 -- SPDX-License-Identifier: MPL-2.0
 -- Display/input only. The clicking window owns consent, SSH and installation.
 -- Input protocol: docs.stencil.so/tern/elements/input.md and /protocol/input.md.
--- Current `tern plugin types` adds BlockDef.features (older website prose does not).
+-- Requires Tern 0.9.8+ native button, field, select and input addon APIs.
 local ui = tern.ui
-local FIELD = "main.ssh"
+local FIELD = "main.form.ssh"
 local PHASES = {
 	choose = "Choose a host", checking = "Checking SSH", review = "Review installation",
 	installing = "Installing", ready = "Ready", awaiting_session = "Waiting for an OMP session",
@@ -103,6 +103,16 @@ local function sameTarget(previous, current)
 	if previous.selectedAddress or current.selectedAddress then return previous.selectedAddress == current.selectedAddress end
 	return previous.selectedLabel == current.selectedLabel
 end
+local function showsHosts(state)
+	local current = state.snapshot
+	return current ~= nil and current.phase ~= "ready" and current.phase ~= "awaiting_session"
+		and (state.picker or (current.phase == "choose" and not current.canCheck and not current.busy))
+end
+local function offeredHost(state, value)
+	for _, host in state.snapshot.hosts do if host.key == value then return host end end
+	return nil
+end
+local function hostField(state) return "main.hosts.choice-" .. string.format("%.0f", state.revision) end
 local function showsInput(state)
 	local current = state.snapshot
 	return current ~= nil and not state.picker and ((current.phase == "choose" and current.canCheck) or current.phase == "checking"
@@ -213,19 +223,26 @@ local function with(node, props)
 	return node
 end
 local function label(value, style) return ui.text(ui.span(value, style or "muted")) end
-local function button(state, action, caption, enabled, value, keyName, style)
-	local props = { key = keyName or action, aria = caption, class = "setup-action setup-" .. (style or "secondary"), attrs = { ["aria-disabled"] = not enabled } }
-	if enabled and state.owner then
+local function disabledReason(state, reason)
+	if not live(state) then return "Waiting for the owner window" end
+	if frozen(state.snapshot) then return "Wait for the current operation to finish" end
+	return reason or "Unavailable in this setup step"
+end
+local function button(state, action, caption, enabled, value, keyName, variant, reason, busy)
+	local props = { key = keyName or action, aria = caption, variant = variant or "default",
+		disabled = not enabled and disabledReason(state, reason) or false, busy = busy == true }
+	if enabled and state.owner and not busy then
 		props.href = "omp-bridge-setup://" .. state.owner .. "/" .. state.panelId .. "/" .. string.format("%.0f", state.revision) .. "/" .. action
 			.. (value ~= nil and "/" .. encode(value) or "")
 		props.actions = { click = "open" }
 	end
-	return ui.el("button", props, { ui.text(caption) })
+	return ui.button(caption, props)
 end
 local function localButton(action, caption, enabled, expanded)
-	return ui.el("button", { key = action, aria = caption, class = "setup-action setup-quiet",
-		attrs = { ["aria-disabled"] = not enabled, ["aria-expanded"] = expanded },
-		actions = enabled and { click = "setup-" .. action } or nil }, { ui.text(caption) })
+	return ui.button(caption, { key = action, aria = caption, variant = "quiet", size = "sm",
+		disabled = not enabled and "Unavailable in this setup step" or false,
+		on = expanded == true,
+		actions = enabled and { click = "setup-" .. action } or nil })
 end
 
 local function nextStep(current)
@@ -244,6 +261,7 @@ local function register(kind)
 	assert(kind == "panel" or kind == "setup", "Unknown setup block kind")
 	local role = tern.plugin.id .. "." .. kind
 	tern.block.define(kind, {
+		font = "sans",
 		features = { "edit", "undo" },
 		init = function(cx, args, _saved)
 			local owner, panelId = object(args) and args[1] or nil, object(args) and args[2] or nil
@@ -264,6 +282,23 @@ local function register(kind)
 		-- No live snapshots, input, credentials or permissions are persisted.
 		save = function() return {} end,
 		key = function(state, k, cx)
+			if live(state) and showsHosts(state) and not frozen(state.snapshot) and state.snapshot.canChoose then
+				local hosts = state.snapshot.hosts
+				if k.name == "escape" then state.hostOpen = false; return true end
+				if (k.name == "up" or k.name == "down") and #hosts > 0 then
+					local index = 0
+					for i, host in hosts do if host.key == (state.hostActive or state.pendingHost) then index = i; break end end
+					index = math.clamp(index + (k.name == "up" and -1 or 1), 1, #hosts)
+					state.hostActive, state.hostOpen = hosts[index].key, true
+					return true
+				end
+				if k.name == "enter" then
+					if state.hostOpen and offeredHost(state, state.hostActive) then
+						state.pendingHost, state.hostOpen = state.hostActive, false
+					else state.hostOpen = true end
+					return true -- Choosing is local; only Use host routes to the owner window.
+				end
+			end
 			local changed = key(state, k)
 			if changed and not state.focused then cx:frame({ { "focus", tern.json.null } }) end
 			return changed
@@ -281,6 +316,7 @@ local function register(kind)
 					local changedTarget = not previous or not sameTarget(previous, nextSnapshot) or previous.ssh ~= nextSnapshot.ssh
 					local checkAck = previous and previous.phase ~= "checking" and nextSnapshot.phase == "checking" and state.ssh == nextSnapshot.ssh
 					state.picker, state.details = false, false
+					state.pendingHost, state.hostActive, state.hostOpen = nil, nil, false
 					if changedTarget or checkAck then
 						state.editing = false
 						state.ssh, state.dirty, state.history, state.anchor = nextSnapshot.ssh, false, {}, nil
@@ -295,11 +331,21 @@ local function register(kind)
 				state.expiresAt, state.expired = tern.now() + 15000, false
 				return
 			end
+			if (ev.ev == "change" or ev.ev == "toggle") and ev.id == hostField(state) then
+				if not live(state) or not showsHosts(state) or frozen(state.snapshot) or not state.snapshot.canChoose then return end
+				if ev.ev == "change" and type(ev.value) == "string" and offeredHost(state, ev.value) then
+					state.pendingHost, state.hostActive, state.hostOpen = ev.value, ev.value, false
+				elseif ev.ev == "toggle" and type(ev.open) == "boolean" then state.hostOpen = ev.open end
+				return
+			end
 			if ev.ev == "action" and live(state) and not frozen(state.snapshot) then
 				if ev.act == "setup-change" and state.snapshot.canChoose and state.snapshot.phase ~= "ready" and state.snapshot.phase ~= "awaiting_session" then
 					state.picker = true
+					state.pendingHost, state.hostActive, state.hostOpen = nil, nil, false
+					if state.focused then state.focused = false; cx:frame({ { "focus", tern.json.null } }) end
 				elseif ev.act == "setup-cancel" then
 					state.picker = false
+					state.pendingHost, state.hostActive, state.hostOpen = nil, nil, false
 				elseif ev.act == "setup-edit" and state.snapshot.canCheck
 					and (state.snapshot.phase == "review" or state.snapshot.phase == "failed" or state.snapshot.phase == "interrupted") then
 					state.editing, state.picker = true, false
@@ -323,16 +369,20 @@ local function register(kind)
 			local current = state.snapshot
 			local enabled = connected and not frozen(current)
 			local close = button(state, "hide", "Close setup", state.owner ~= nil, nil, nil, "quiet")
-			close.c = { ui.node("icon", { name = "x" }) }
+			close.p.text, close.p.icon = "", "x"
 			close.p.title = "Close sidebar; background installation continues"
 			local main = {
 				with(ui.row({
-					ui.node("icon", { name = "plug" }),
-					with(label("Bridge Setup", "strong"), { grow = 1 }), close,
-				}), { key = "header", role = "setup-header" }),
+					with(label("Bridge Setup", "title"), { grow = 1 }), close,
+				}), { key = "header", role = "setup-header", gap = "sm", align = "center" }),
 			}
 			if not current then
-				table.insert(main, with(label("Waiting for the owner window…"), { key = "message", role = "setup-message" }))
+				if state.owner then
+					table.insert(main, ui.node("skeleton", { key = "target", shape = "text", lines = 3, aria = "Waiting for setup from the owner window" }))
+					table.insert(main, with(label("Waiting for the owner window. If it is closed, reopen Bridge Setup from that window."), { key = "message", role = "setup-message" }))
+				else
+					table.insert(main, ui.node("empty", { key = "error", tone = "error", title = "Setup owner unavailable", text = "Reopen Bridge Setup from the window that owns this connection." }))
+				end
 			else
 				local input = showsInput(state)
 				local needsHost = current.phase == "choose" and not current.canCheck and not current.busy
@@ -342,13 +392,14 @@ local function register(kind)
 				local subtitle = current.phase == "choose" and current.canCheck and "Check the connection" or PHASES[current.phase]
 				table.insert(main, with(label(nextTitle or subtitle), { key = "subtitle", role = "setup-subtitle" }))
 				if not connected then
-					table.insert(main, with(label("Connection lost. Waiting for the owner window.", "warning"), { key = "offline", role = "setup-message" }))
+					table.insert(main, ui.node("empty", { key = "offline", variant = "inline", tone = "warning", title = "Connection lost",
+						text = "Waiting for the owner window. Reopen Bridge Setup there if it is closed." }))
 				end
-				local heading = { ui.node("icon", { name = "server" }), with(label(current.selectedLabel, "strong"), { grow = 1 }) }
+				local heading = { with(label(current.selectedLabel, "strong"), { grow = 1, title = current.selectedLabel }) }
 				if not complete then
 					table.insert(heading, localButton(state.picker and "cancel" or "change", state.picker and "Cancel" or "Change", enabled and current.canChoose, state.picker == true))
 				end
-				local target = { with(ui.row(heading), { key = "heading", role = "setup-target-heading" }) }
+				local target = { with(ui.row(heading), { key = "heading", role = "setup-target-heading", gap = "sm", wrap = true }) }
 				local metadata = {}
 				if current.selectedAddress and (not input or current.selectedAddress ~= state.ssh) and current.selectedAddress ~= current.selectedLabel then
 					table.insert(metadata, (not input and state.ssh == current.selectedAddress and "SSH · " or "Tern · ") .. current.selectedAddress)
@@ -359,22 +410,37 @@ local function register(kind)
 				if #metadata == 0 and input then table.insert(metadata, "Separate Bridge SSH connection") end
 				if current.platform then table.insert(metadata, current.platform) end
 				if current.sshSource then table.insert(metadata, SOURCES[current.sshSource]) end
-				if #metadata > 0 then table.insert(target, with(label(table.concat(metadata, " · ")), { key = "meta", role = "setup-target-meta" })) end
+				if #metadata > 0 then table.insert(target, with(label(table.concat(metadata, " · "), "mono muted"), { key = "meta", role = "setup-target-meta", title = table.concat(metadata, " · ") })) end
 				if not needsHost then table.insert(main, with(ui.col(target), { key = "target", role = "setup-target" })) end
-				if (needsHost or state.picker) and not complete then
-					local hosts = {}
-					for index, host in current.hosts do
-						local option = button(state, "select", host.label, enabled and current.canChoose, host.key, "host-" .. tostring(index), "host-option")
-						option.p.role = "setup-host-option"
-						option.c = { ui.col(host.detail ~= "" and { ui.text(host.label), label(host.detail) } or { ui.text(host.label) }) }
-						table.insert(hosts, option)
+				if showsHosts(state) then
+					local options = {}
+					for _, host in current.hosts do
+						table.insert(options, { value = host.key, label = host.label, detail = host.detail })
 					end
-					table.insert(main, with(ui.col(hosts), { key = "hosts", role = "setup-hosts" }))
+					local pending = offeredHost(state, state.pendingHost)
+					if #options == 0 then
+						table.insert(main, ui.node("empty", { key = "hosts", title = "No hosts offered", text = "Add a host in the owner window, then reopen Bridge Setup." }))
+					else
+						table.insert(main, ui.node("field", { key = "hosts", role = "setup-hosts", label = "Host",
+							hint = "Choose a host, then use it to check SSH. This does not approve installation." }, {
+							ui.node("select", { key = "choice-" .. string.format("%.0f", state.revision), aria = "Host", variant = "field",
+								options = options, value = pending and pending.key or nil, open = enabled and state.hostOpen == true,
+								active = state.hostActive, placeholder = "Choose a host", min = { w = 0 }, max = { w = 1 },
+								title = pending and (pending.label .. (pending.detail ~= "" and " · " .. pending.detail or "")) or nil,
+								disabled = not (enabled and current.canChoose) and disabledReason(state) or false }),
+							button(state, "select", "Use host", enabled and current.canChoose and pending ~= nil,
+								pending and pending.key or nil, "use", "primary", "Choose an offered host first"),
+						}))
+					end
 				end
 				if input then
-					table.insert(main, with(ui.row({ with(label("SSH destination"), { role = "setup-label" }) }), { key = "form", role = "setup-form" }))
-					table.insert(main, ui.node("input", { key = "ssh", role = "setup-ssh", aria = "SSH destination", text = state.ssh,
-						cursor = state.cursor, anchor = state.anchor, readonly = not editable(state), placeholder = "alias or user@host", sendable = false }))
+					table.insert(main, ui.node("field", { key = "form", role = "setup-form", label = "SSH destination",
+						hint = "Use an SSH alias or user@host, without a password or command. Enter never starts installation.",
+						error = state.dirty and not destination(state.ssh) and "Enter a valid SSH destination before checking" or nil }, {
+						ui.node("input", { key = "ssh", role = "setup-ssh", aria = "SSH destination", text = state.ssh,
+							variant = "field", icon = "server", mono = true, title = state.ssh,
+							cursor = state.cursor, anchor = state.anchor, readonly = not editable(state), placeholder = "alias or user@host", sendable = false }),
+					}))
 				end
 				if #current.attempts > 0 then
 					local attempts = { label("SSH candidates", "strong") }
@@ -389,15 +455,18 @@ local function register(kind)
 				if frozen(current) then
 					table.insert(main, with(ui.progress(nil, current.stage), { key = "progress", role = "setup-progress" }))
 				elseif failed then
-					table.insert(main, with(label(current.error or current.message, "error"), { key = "error", role = "setup-error" }))
+					table.insert(main, ui.node("empty", { key = "error", variant = "inline", tone = "error", title = PHASES[current.phase], text = current.error or current.message }))
 				elseif complete and (nextMessage or current.message) ~= "" then
 					table.insert(main, with(label(nextMessage or current.message), { key = "message", role = "setup-message" }))
 				end
 				if state.dirty then table.insert(main, with(label("Check the edited destination before installing."), { key = "dirty", role = "setup-message" })) end
 				local actions = {}
-				if input and not frozen(current) then
+				if input then
 					local action = not state.dirty and not state.editing and current.sshSource and current.sshSource ~= "manual" and "checkprofiles" or "check"
-					table.insert(actions, button(state, action, "Check SSH", enabled and current.canCheck and destination(state.ssh), state.ssh, "check", "primary"))
+					table.insert(actions, button(state, action, "Check SSH", enabled and current.canCheck and destination(state.ssh), state.ssh, "check", "primary",
+						"Enter a valid SSH destination before checking", connected and current.phase == "checking"))
+				elseif current.phase == "installing" and not state.picker then
+					table.insert(actions, button(state, "install", "Install", false, nil, nil, "primary", nil, connected))
 				elseif current.phase == "review" and not state.picker then
 					table.insert(main, with(ui.col({
 						with(label("This device · Private runtime and Bridge client"), { role = "setup-scope-row" }),
@@ -405,7 +474,7 @@ local function register(kind)
 						with(label("No sudo or session restarts. Bind a device to authorize native tools under its local safety rules."), { role = "setup-scope-row" }),
 						with(label("Install approves this scope for the target above."), { role = "setup-footer" }),
 					}), { key = "consent", role = "setup-consent" }))
-					table.insert(actions, button(state, "install", "Install", enabled and current.canInstall and not state.dirty and destination(state.ssh), state.ssh, nil, "primary"))
+					table.insert(actions, button(state, "install", "Install", enabled and current.canInstall and not state.dirty and destination(state.ssh), state.ssh, nil, "primary", "Check this destination and review the scope before installing"))
 					table.insert(actions, localButton("edit", "Edit SSH", enabled and current.canCheck))
 					if current.canRecover then
 						table.insert(actions, button(state, "recover", "Review recovery", enabled and not state.dirty and destination(state.ssh), state.ssh))
@@ -418,13 +487,13 @@ local function register(kind)
 				if current.canDiscover and current.targetKey and not state.picker and not needsHost and not complete and not frozen(current) then
 					table.insert(actions, button(state, "discover", "Find SSH alternatives", enabled))
 				end
-				if #actions > 0 then table.insert(main, with(ui.row(actions), { key = "actions", role = "setup-actions" })) end
+				if #actions > 0 then table.insert(main, with(ui.row(actions), { key = "actions", role = "setup-actions", gap = "sm", wrap = true })) end
 				if not state.picker and not needsHost and not frozen(current) and not failed and not complete and current.message ~= "" then
 					table.insert(main, with(ui.row({ localButton("details", state.details and "Less detail" or "Details", enabled, state.details == true) }), { key = "footer", role = "setup-footer" }))
 					if state.details then table.insert(main, with(label(current.message), { key = "message", role = "setup-message" })) end
 				end
 			end
-			return { main = with(ui.col(main), { role = role }), dock = ui.col({}) }
+			return { main = with(ui.col(main), { role = role, gap = "md" }), dock = ui.col({}) }
 		end,
 	})
 end

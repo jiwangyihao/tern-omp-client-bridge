@@ -63,8 +63,8 @@ does not undo an attachment already handed to OMP.
 
 The running Bridge panel floats over the selected OMP at its top-right corner,
 initially focused for interaction. One-time glance/focus initialization uses the
-initiating viewer's native window-key-scoped CLI, never a remote daemon focus
-command, and preserves later user sizing.
+native `layout.float` API, constraining its initial cells by the native frame,
+and preserves later user sizing.
 Its public snapshots travel through the authenticated broker, and the host block
 closes itself. The installer records `serverControlFile` alongside `controlFile` in
 the plugin configuration; by default it is the sibling `server.json` on that host.
@@ -72,8 +72,9 @@ Never substitute a client-machine endpoint or put either bearer into a widget/li
 Opening and heartbeat publication are separate operations: a late heartbeat cannot
 recreate a closed panel. Closing or relocating the display does not cancel uploads.
 
-This avoids the affected numeric APIs in the running Bridge path; it does not fix
-Tern globally or change the separate cold-host setup/bootstrap transport below.
+This uses the exact-pane layout API directly in the plugin; it does not invoke
+a CLI daemon command or reconstruct numeric pane IDs. It does not fix Tern
+globally or change the separate cold-host setup/bootstrap transport below.
 If that older initialization surface is affected, use the documented manual
 installation commands rather than deleting daemon state or rewriting pane IDs.
 
@@ -112,12 +113,12 @@ download runtimes, contact an SSH host, or start background services.
    **Change** 选择另一主机后会开始有界预检；显示名称不会直接当成 SSH 地址。
 4. 未编辑的 **Check SSH** 按顺序尝试最多 6 个关联候选，首个通过后进入审核，
    保留各次失败原因。**Find SSH alternatives** 显式重新发现候选。
-   在 **SSH destination** 中编辑或选择 **Edit SSH** 后，检查只使用输入的目标；
+   在 **SSH destination** 中使用原生下拉选择或直接编辑，检查只使用输入的目标；
    失败保留该值，不悄悄换回 IP 或其他别名。相同目标的心跳和无关状态更新
    不再覆盖正在编辑的文本、光标、选区或撤销历史。
-5. 核对实际 SSH 目标与安装范围，再点击 **Install** 才授权下载运行时、依赖、
+5. 核对实际 SSH 目标与安装范围，再通过原生按钮点击 **Install** 才授权下载运行时、依赖、
    安装集成或启动服务。改变地址后必须重新检查，未知锁恢复仍须单独确认。
-   失败直接显示可编辑输入和具体错误；**Details** 展开额外说明。
+   安装过程包含原生进度条与折叠日志。失败直接显示可编辑输入和具体错误；**Details** 展开额外说明。
 6. Progress, failure and readiness stay in the sidebar. Hiding it does not cancel
    an approved background installation; reopening retains its state. Missing
    completion callbacks are marked unverified/interrupted, never inferred successful.
@@ -278,8 +279,8 @@ bun src/cli.ts install-tern
 
 This installs the root `plugin.toml` and complete package payload, including the
 entries beneath `tern/`, into the native Tern plugin directory. It merges
-`controlFile`, `serverControlFile`, the machine-local absolute `ternExecutable`
-and native daemon route `ternPaneSocket` into this plugin's configuration, preserving unrelated settings. This finite
+`controlFile`, `serverControlFile` and the machine-local absolute `ternExecutable`
+into this plugin's configuration, preserving unrelated settings. This finite
 maintenance command does not start services or reload applications; use
 **Set up Bridge** for consented initialization.
 
@@ -304,26 +305,18 @@ over SSH; the agent host resolves its own executable. Spaces and legal filename
 characters remain in one argv element, without a shell or global PATH changes.
 Windows drive-qualified and UNC executable paths are supported. Do not copy this
 machine-local setting between operating systems. If the CLI moves, rerun setup or
-the installer with its new path, then reload the plugin. Missing/invalid CLI
-metadata blocks new PiP initialization, not independent paste/upload commands.
+the installer with its new path, then reload the plugin. The CLI remains necessary
+for setup and plugin reload, but is no longer used for PiP.
 
-原生 PiP 控制还需要本机 daemon 端点。安装与初始化依次采用显式
-`--tern-pane-socket`、有效的已保存路由、`TERN_PANE_SOCKET`、
-`TERN_DAEMON_SOCKET`，最后采用原生默认值。Windows Tern 0.9.7 使用
-`\\.\pipe\tern-<USERNAME>` 命名管道，不是配置目录中的 `daemon.sock`；
-命名管道只可用作端点，不可用作 `ternExecutable`。Linux 优先使用
-`$XDG_RUNTIME_DIR/tern/daemon.sock`，否则与 macOS 一样使用配置目录中的
-`daemon.sock`。已保存的路由在 daemon 暂停期间仍然有效。
-An isolated `--target` alone does not identify a daemon: without an explicit or
-saved route, installation omits it and PiP initialization requires configuration.
-The client socket is never forwarded over SSH. For a custom native daemon:
-
-```sh
-bun src/cli.ts install-tern --tern-pane-socket "/absolute/path/to/daemon.sock"
-```
-
-Do not start `tern serve` to repair this route: the intended endpoint is the
-existing local session daemon, not an independent developer control server.
+The native UI changes described here are included in **0.5.0-beta.3**. PiP uses
+Tern 0.9.9 window layout APIs and requires neither daemon socket metadata nor a
+CLI control process. Successful installation/setup removes obsolete `ternPaneSocket`;
+the historical `--tern-pane-socket` flag is rejected. Reinstallation preserves a
+saved absolute `controlFile` when no override is supplied, as well as the existing
+identity and unrelated configuration. Isolated installations still require using
+the intended Tern profile for plugin loading; an install target does not switch
+a running application's profile. Historical `v0.5.0-beta.2` CLI-based PiP facts
+remain historical.
 
 
 Default Tern locations:
@@ -588,44 +581,33 @@ created in a background temporary tab without showing that tab or taking focus,
 then floated by exact pane ID over the saved originating OMP owner, still without
 taking focus. Tern removes the empty temporary tab; the original tiled tree is
 never split, resized or rebuilt, and there is no intermediate visible-tab switch.
-Once the floated panel's surface is ready, one native resize initializes a
-240×360 logical-pixel glance size and a 360×540 focus size, then a separate native
-command focuses the panel. Native frame constraints can limit the displayed size.
-This is one-time initialization for the newly created panel, not a permanent size
-lock: subsequent user sizes remain, with no polling resize or heartbeat geometry
-enforcement.
+The float call supplies `{size={32,24}, focus=false}` directly to the native API.
+These are terminal-cell hints constrained by the owner frame, not fixed pixel
+dimensions. Once the floated surface and owner association are verified,
+`cx.layout:focus` focuses the exact panel pane. Tern controls focus growth and
+later user sizing; there is no polling resize or permanent geometry lock.
 
-The plugin invokes the saved absolute `ternExecutable` with `ctl pip resize` and
-`ctl pip focus`; it never falls back to a bare `tern` name in the GUI's `PATH`.
-`TERN_WINDOW_KEY` is explicitly set to the captured native window key, together
-with `TERN_PANE_SOCKET` from the saved local route. A window key alone does not
-select daemon forwarding in `tern ctl`; without the socket it can fall back to
-the separate developer endpoint `/tmp/tern.sock`. Before each dispatch the plugin
-rechecks the current tab and originating OMP context and resolves
-the owned panel and owner in that tab's float list to a freshly computed ordinal.
-The `"#N"` selector includes literal double quotes for Tern's command parser;
-SDK pane aliases are not converted into raw CLI IDs. This is not an exact-ID
-size API or an atomic operation: a tab or float-order change between the last
-check and command execution can affect another PiP. The user has accepted this
-small check/dispatch race; window scoping and rechecks do not eliminate it.
+No external command, float-list ordinal or saved socket participates in this
+initialization. Context checks still guard session, host, tab, originating OMP
+destination and panel ownership. Exact pane IDs remove the former CLI ordinal
+dispatch race; they do not make every shared-layout operation atomic.
 
 User focus/tab changes, session/host changes, or target loss stop remaining
 initialization. Cancellation before floating closes only the owned temporary
-panel; cancellation after floating leaves the existing PiP in place. Late process
-receipts cannot revive cancelled initialization. Native command failures are
-reported rather than treated as successful sizing; an unknown outcome is not
-automatically retried. Creation and floating remain shared session-layout
-operations. The initiating viewer dispatches sizing and focus once, without
+panel; cancellation after floating leaves the existing PiP in place. Late timer
+callbacks cannot revive cancelled initialization. Native API failures are
+reported; unknown outcomes are not automatically retried. Creation and floating
+remain shared session-layout operations. The initiating viewer requests initial
+placement and focus once, without
 continually restoring either. Another viewer cannot use the panel to read its
 own clipboard under the originating window's identity. Opening/focusing never
 retargets transfers away from the originating OMP Block.
 
-The panel deliberately uses Tern's UI sans font, control radius, theme colors,
-hairlines and hover fills through a stylesheet scoped to its own surface. Bare
-plugin surfaces otherwise inherit the terminal monospace font, and plain `el`
-buttons have no native chrome by default. Separate narrowly scoped rules style
-only this plugin's status segments; the shell path, pane metrics, OMP composer
-and other plugins are unchanged.
+The panel uses native buttons, statuses, and bounded scroll areas without custom
+CSS, inheriting Tern's font and theme colors directly. The separate setup panel
+retains root padding and long-address wrapping in `tern/setup-ui/panel.css`. Bare plugin surfaces
+otherwise inherit the terminal monospace font. The shell path, pane metrics, OMP
+composer and other plugins are unchanged.
 
 The compact panel uses a header close control instead of a full-width footer
 button. Paste/upload share one action row; agent selection is one row, available

@@ -79,9 +79,10 @@ export async function writeSetupProgress(data: string, value: Omit<SetupProgress
 	await writePrivateJson(path.join(data, "setup-state.json"), SetupProgressSchema.parse({ schema: 1, ...value, updatedAt: Date.now() }));
 }
 
-export async function mergeControlFile(data: string, controlFile: string, ternExecutable: string, ternPaneSocket: string | undefined): Promise<void> {
+export async function mergeControlFile(data: string, controlFile: string, ternExecutable: string): Promise<void> {
 	const file = path.join(data, "config.json");
 	const previous = await readOptionalJson(file);
 	const config = previous === undefined ? {} : z.record(z.string(), z.unknown()).parse(previous);
-	await writePrivateJson(file, { ...config, controlFile, ternExecutable, ternPaneSocket });
+	delete config.ternPaneSocket;
+	await writePrivateJson(file, { ...config, controlFile, ternExecutable });
 }

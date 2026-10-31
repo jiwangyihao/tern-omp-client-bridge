@@ -17,7 +17,7 @@ import { loadClientIdentity, signIdentity } from "../src/config.ts";
 import { JsonLineDecoder, RpcPeer, WireFrameSchema } from "../src/wire.ts";
 import { runRelay } from "../src/relay.ts";
 import { acquireBootstrapLock, packageFiles } from "./build.ts";
-import { installOmp } from "./install.ts";
+import { installOmp, installTern } from "./install.ts";
 import { verifyOmpLoader } from "./verify-omp.ts";
 
 const runFile = promisify(execFile);
@@ -51,6 +51,9 @@ test("help and strict argument errors are finite and do not create bridge identi
 	const directory = await fixture();
 	for (const args of [["unknown"], ["server", "--port", "0"], ["server", "--port", "65536"], ["client"], ["install-tern", "--unknown", "x"]]) {
 		await expect(command(args, directory)).rejects.toThrow();
+	}
+	for (const name of ["install-tern", "setup", "setup-agent"]) {
+		await expect(command([name, "--tern-pane-socket", path.join(directory, "daemon.sock")], directory)).rejects.toThrow("Unknown argument");
 	}
 	expect(await readdir(directory)).not.toContain("bridge-state");
 }, 120_000);
@@ -110,8 +113,29 @@ test("absolute native CLI paths survive GUI PATH and invalid overrides preserve 
 	expect(launched.stdout.trim()).toBe(Bun.version);
 	await expect(command(["install-tern", "--target", target, "--tern-executable", executable + " --not-an-argument"], directory)).rejects.toThrow();
 	expect(await readFile(installed.config!, "utf8")).toBe(configBefore);
-	await expect(command(["install-tern", "--target", target, "--tern-pane-socket", "relative/daemon.sock"], directory)).rejects.toThrow();
-	expect(await readFile(installed.config!, "utf8")).toBe(configBefore);
+}, 60000);
+
+test("reinstall retires obsolete socket config only on success and preserves the saved identity and connection", async () => {
+	const directory = await fixture();
+	const target = path.join(directory, "Tern config");
+	const state = path.join(directory, "existing bridge");
+	await loadClientIdentity(state, { name: "Existing device" });
+	const identityFile = path.join(state, "identity.json");
+	const identity = await readFile(identityFile, "utf8");
+	const controlFile = path.join(state, "custom-client-endpoint.json");
+	const installed = await installTern({ target, controlFile, ternExecutable: process.execPath });
+	const savedConfig = JSON.parse(await readFile(installed.config, "utf8"));
+	const unrelated = { theme: "existing", nested: { retained: true } };
+	const legacyConfig = JSON.stringify({ ...savedConfig, ...unrelated, ternPaneSocket: "obsolete malformed route" });
+	await writeFile(installed.config, legacyConfig);
+	await expect(installTern({ target, ternExecutable: "relative-command" })).rejects.toThrow();
+	expect(await readFile(installed.config, "utf8")).toBe(legacyConfig);
+	const upgraded = await installTern({ target });
+	expect(upgraded.controlFile).toBe(controlFile);
+	expect(upgraded.ternExecutable).toBe(process.execPath);
+	expect(upgraded).not.toHaveProperty("ternPaneSocket");
+	expect(JSON.parse(await readFile(installed.config, "utf8"))).toEqual({ ...savedConfig, ...unrelated });
+	expect(await readFile(identityFile, "utf8")).toBe(identity);
 }, 60000);
 
 test("installers refuse unrelated loader collisions without changing their contents", async () => {

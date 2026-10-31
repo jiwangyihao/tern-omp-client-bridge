@@ -251,10 +251,9 @@ exec sh -c "$command"
 	await mkdir(home);
 	const env = { ...process.env, PATH: [bin, path.dirname(process.execPath), process.env.PATH].join(path.delimiter), HOME: home, TERN_OMP_BRIDGE_HOME: path.join(root, "unused-default-state"), PI_CODING_AGENT_DIR: path.join(root, "unused-default-agent"), TERN_CONFIG_DIR: path.join(root, "unused-default-tern") };
 	ownedStates.push({ kind: "server", stateDir: remoteRoot }, { kind: "client", stateDir: path.join(data, "bridge") });
-	async function run(clientExecutable?: string, clientSocket?: string) {
+	async function run(clientExecutable?: string) {
 		const args = [process.execPath, cli, "setup", "--host", "fixture-host", "--plugin-data", data, "--package-root", packageRoot, "--remote-root", remoteRoot, "--agent-dir", agentDir, "--tern-dir", ternDir];
 		if (clientExecutable) args.push("--tern-executable", clientExecutable);
-		if (clientSocket) args.push("--tern-pane-socket", clientSocket);
 		const child = Bun.spawn(args, { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 		const stdout = new Response(child.stdout).text();
 		const stderr = new Response(child.stderr).text();
@@ -268,8 +267,7 @@ test.skipIf(process.platform === "win32")("first and repeat plugin setup stage r
 	await writeFile(path.join(fixtureState.data, "config.json"), JSON.stringify({ preserved: "untouched" }));
 	const clientExecutable = path.join(fixtureState.data, "client CLI with spaces");
 	await symlink(process.execPath, clientExecutable);
-	const clientSocket = path.join(fixtureState.data, "client daemon.sock");
-	const firstRun = await fixtureState.run(clientExecutable, clientSocket);
+	const firstRun = await fixtureState.run(clientExecutable);
 	const failureLog = firstRun.code === 0 ? firstRun.stderr : await readFile(path.join(fixtureState.data, "setup.log"), "utf8").catch(() => firstRun.stderr);
 	expect(firstRun.code, failureLog).toBe(0);
 	expect(firstRun.stderr).toBe("");
@@ -277,15 +275,21 @@ test.skipIf(process.platform === "win32")("first and repeat plugin setup stage r
 	expect(first).toMatchObject({ status: "awaiting_session", client: { reused: false, ownership: "managed", connected: true, sessionReady: false }, remote: { root: fixtureState.remoteRoot, pluginReload: "isolated", broker: { reused: false } } });
 	const firstIdentity = await readFile(path.join(fixtureState.data, "bridge", "identity.json"), "utf8");
 	expect(JSON.parse(firstIdentity).device).not.toHaveProperty("capabilities");
+	const configFile = path.join(fixtureState.data, "config.json");
+	const savedConfig = JSON.parse(await readFile(configFile, "utf8"));
+	expect(savedConfig).not.toHaveProperty("ternPaneSocket");
+	await writePrivateJson(configFile, { ...savedConfig, nested: { retained: true }, ternPaneSocket: "obsolete malformed route" });
+	const hostConfig = JSON.parse(await readFile(first.remote.ternConfig, "utf8"));
+	await writePrivateJson(first.remote.ternConfig, { ...hostConfig, hostSetting: { retained: true }, ternPaneSocket: "obsolete host route" });
 	const secondRun = await fixtureState.run();
 	expect(secondRun.code).toBe(0);
 	const second = SetupResultSchema.parse(JSON.parse(secondRun.stdout));
 	expect(second.client).toMatchObject({ reused: true, pid: first.client.pid, deviceId: first.client.deviceId });
+	expect(second.controlFile).toBe(first.controlFile);
 	expect(second.remote.broker).toMatchObject({ reused: true, pid: first.remote.broker.pid });
 	expect(await readFile(path.join(fixtureState.data, "bridge", "identity.json"), "utf8")).toBe(firstIdentity);
-	expect(JSON.parse(await readFile(path.join(fixtureState.data, "config.json"), "utf8"))).toEqual({ preserved: "untouched", controlFile: first.controlFile, ternExecutable: clientExecutable, ternPaneSocket: clientSocket });
-	expect(JSON.parse(await readFile(first.remote.ternConfig, "utf8")).ternExecutable).toBe(fixtureState.ternExecutable);
-	expect(JSON.parse(await readFile(first.remote.ternConfig, "utf8"))).not.toHaveProperty("ternPaneSocket");
+	expect(JSON.parse(await readFile(configFile, "utf8"))).toEqual({ preserved: "untouched", nested: { retained: true }, controlFile: first.controlFile, ternExecutable: clientExecutable });
+	expect(JSON.parse(await readFile(first.remote.ternConfig, "utf8"))).toEqual({ ...hostConfig, hostSetting: { retained: true } });
 	const progress = SetupProgressSchema.parse(JSON.parse(await readFile(path.join(fixtureState.data, "setup-state.json"), "utf8")));
 	expect(progress).toMatchObject({ status: "awaiting_session", controlFile: first.controlFile });
 	expect(JSON.stringify(progress)).not.toContain("privateKey");
@@ -298,17 +302,19 @@ test.skipIf(process.platform === "win32")("failed native installation keeps conf
 	const extension = path.join(fixtureState.agentDir, "extensions", "tern-omp-client-bridge");
 	await mkdir(extension, { recursive: true });
 	await writeFile(path.join(extension, "index.ts"), "// unrelated fixture loader\n");
-	await writeFile(path.join(fixtureState.data, "config.json"), JSON.stringify({ preserved: "untouched" }));
+	const savedConfig = { preserved: "untouched", ternPaneSocket: "obsolete malformed route" };
+	await writeFile(path.join(fixtureState.data, "config.json"), JSON.stringify(savedConfig));
 	const failed = await fixtureState.run();
 	expect(failed.code).not.toBe(0);
 	expect(failed.stdout).toBe("");
-	expect(JSON.parse(await readFile(path.join(fixtureState.data, "config.json"), "utf8"))).toEqual({ preserved: "untouched" });
+	expect(JSON.parse(await readFile(path.join(fixtureState.data, "config.json"), "utf8"))).toEqual(savedConfig);
 	expect(SetupProgressSchema.parse(JSON.parse(await readFile(path.join(fixtureState.data, "setup-state.json"), "utf8"))).status).toBe("failed");
 	expect(await readFile(path.join(extension, "index.ts"), "utf8")).toBe("// unrelated fixture loader\n");
 	await rm(path.join(extension, "index.ts"));
 	const repaired = await fixtureState.run();
 	expect(repaired.code).toBe(0);
 	expect(SetupResultSchema.parse(JSON.parse(repaired.stdout)).status).toBe("awaiting_session");
+	expect(JSON.parse(await readFile(path.join(fixtureState.data, "config.json"), "utf8"))).not.toHaveProperty("ternPaneSocket");
 }, 180000);
 
 test.skipIf(process.platform === "win32")("a cached release marker cannot hide modified published documentation", async () => {

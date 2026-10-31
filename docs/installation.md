@@ -1,8 +1,10 @@
 # 安装指南
 
-本文面向安装或升级到 `v0.5.0-beta.2` 的用户。推荐先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Set up Bridge** 中授权远端初始化。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
+本文面向安装或升级到 `v0.5.0-beta.3` 的用户。推荐先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Set up Bridge** 中授权远端初始化。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
 
-这是 Windows 适配修复预发布版本，包含原生权限、运行时引导、命名管道、上传发布及通用 SSH 设置修复。`v0.5.0-beta.1` 的 Windows CI 失败记录与旧附件保留不变；不要将旧附件视为已更新。macOS PiP 几何与焦点、完整跨设备 GUI 行为仍需分别验收。[原生平台 CI](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/workflows/native-runtime.yml)、[验证记录](verification.md)与[兼容性说明](compatibility.md)区分发布版本、实际验证和未验收范围。
+这是包含原生 UI 增强、原生权限、运行时引导、命名管道、上传发布及通用 SSH 设置修复的预发布版本。`v0.5.0-beta.1` 的 Windows CI 失败记录与旧附件保留不变；不要将旧附件视为已更新。macOS PiP 几何与焦点目前在隔离无头渲染器中验收，完整跨设备 GUI 行为仍需分别验收。[原生平台 CI](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/workflows/native-runtime.yml)、[验证记录](verification.md)与[兼容性说明](compatibility.md)区分发布版本、实际验证和未验收范围。
+
+> **注意（Beta.3 新增 UI 与依赖调整）**：本版本已经重构了原生界面与路由机制，包括支持原生的 `exact-pane` 画中画（PiP）浮动与焦点夺取（使用终端 cell 单位提示尺寸，由原生框架约束）、使用原生控件（输入、下拉框、状态指示器等）重写 Setup/Bridge 界面并移除了 Bridge 的 CSS（Setup 仅保留根节点边距样式及地址溢出换行）。同时，完全废弃了 `--tern-pane-socket` 路由方式，在升级合并安装时会自动移除旧有 socket 字段配置（但保留 `ternExecutable` 及自定义 `controlFile`）。新的原生 UI 功能要求 Tern 版本 `>=0.9.9`。
 
 ## 1. 准备本机与 Agent 主机
 
@@ -38,12 +40,12 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 
 ## 2. 下载并校验发行包
 
-打开 [`v0.5.0-beta.2` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.2)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
+打开 [`v0.5.0-beta.3` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.3)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
 
 | 建议使用环境 | 附件 |
 | --- | --- |
-| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.2.tar.gz` |
-| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.2.zip` |
+| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.3.tar.gz` |
+| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.3.zip` |
 
 两种压缩包包含相同的源码保留型包结构，没有捆绑 `node_modules`、凭据或原生可执行文件。本指南使用上述发行附件，不使用 GitHub 自动生成的 **Source code** 压缩包。校验和用于核对下载内容，不能替代对发行来源的信任。
 
@@ -52,7 +54,7 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 在一个新的下载目录中执行，避免覆盖已有的解压目录。
 
 ```sh
-version=v0.5.0-beta.2
+version=v0.5.0-beta.3
 package="tern-omp-client-bridge-$version"
 archive="$package.tar.gz"
 base="https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$version"
@@ -87,7 +89,7 @@ tern plugin install "$(pwd)/$package"
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$Version = 'v0.5.0-beta.2'
+$Version = 'v0.5.0-beta.3'
 $Package = "tern-omp-client-bridge-$Version"
 $Archive = "$Package.zip"
 $Base = "https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$Version"
@@ -109,11 +111,11 @@ tern plugin install $PackageRoot
 
 ### 确认包根目录与已有安装
 
-解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.2`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
+解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.3`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
 
 原生 `tern plugin install` 会复制插件并重载插件列表，不会因此下载 Bridge 运行时、连接 SSH 或启动 Bridge 服务。
 
-- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.2" --force`。
+- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.3" --force`。
 - **已有 linked package** 时，`--force` 不会覆盖链接。若确定切换为发行包副本，先执行 `tern plugin unlink omp-client-bridge`，再安装解压目录；保留原链接指向的源码目录。不要直接删除 `.path` 文件或对未知目录递归删除。
 - 多 profile 或隔离配置必须与实际使用的 Tern daemon 一致。新 profile 需要单独完成正常登录与首次设置，不能复制其他 profile 的凭据。
 
@@ -142,7 +144,7 @@ tern plugin install $PackageRoot
 
 本指南的安装完成标准是前三层均满足，并能在目标会话观察到 Bridge 面板；Agent 客户端操作还需要第四层的显式绑定及对应原生授权。HTTP 响应成功、文件已复制或服务进程存在，都不能替代这些观察。
 
-## 5. 高级维护 executable、socket 与隔离目标
+## 5. 高级维护 executable 与隔离目标
 
 普通安装无需执行本节。自定义 Tern 位置、迁移 CLI 或修复 daemon 路由时，原生安装副本使用项目实际提供的 `setup` 命令。此高级路径需要可用的 Bun **>=1.4.3** 和包依赖；不假设存在全局 `tern-omp-bridge` 命令。
 
@@ -157,25 +159,25 @@ bun src/cli.ts setup \
   --host bridge-agent \
   --plugin-data "/absolute/path/to/tern-data/plugin-data/omp-client-bridge" \
   --package-root "$(pwd)" \
-  --tern-executable "/absolute/path/to/tern" \
-  --tern-pane-socket "/absolute/path/to/daemon.sock"
+  --tern-executable "/absolute/path/to/tern"
 ```
 
+> **参数调整说明**：上述维护命令已省略 `--tern-pane-socket`，因为 beta.3 已废弃此参数。如果你必须针对某些遗留环境进行调整，旧的文档可能要求你使用该参数（指向**已有的本机原生 daemon**），但本版本不再支持或验证该字段。升级合并时，之前的 `ternPaneSocket` 字段会被自动丢弃，同时保留现有身份标识及自定义 `controlFile` 路径；`ternExecutable` 仍需保留以供安装和插件重载使用。
+
 - `--tern-executable` 必须是本机可执行文件的绝对路径。Windows 使用真实 `.exe`，例如 `C:\Program Files\Tern\tern.exe`，不接受 `.cmd`、`.bat` 或 WSL 路径。显式错误路径会失败，不会悄悄改用另一程序。
-- `--tern-pane-socket` 指向**已有的本机原生 daemon**。Windows Tern 0.9.7 默认使用 `\\.\pipe\tern-<USERNAME>` 命名管道；优先保留已有配置或 `TERN_PANE_SOCKET` / `TERN_DAEMON_SOCKET`，不要填 `%APPDATA%\Tern\daemon.sock`。Linux 优先使用 `$XDG_RUNTIME_DIR/tern/daemon.sock`，未设置时与 macOS 一样使用 settings 目录中的 `daemon.sock`。自定义路由必须以实际 daemon 为准；命名管道不能填入 `--tern-executable`。
-- `ternExecutable` 和 `ternPaneSocket` 都是机器本地配置；`setup` 的同名覆盖参数只作用于客户端，不会经 SSH 转发给主机。主机必须独立解析自己的路径。仍被服务引用的维护副本及其依赖不能移动或删除。
+- 旧版本（如 beta.2）曾使用 `ternPaneSocket` 进行路由，现已不再使用。仍被服务引用的维护副本及其依赖不能移动或删除。
 - 若此前使用了 `setup --remote-root`、`--agent-dir` 或 `--tern-dir`，重试时保留原值。这三项均为远端绝对 POSIX 路径，不能填客户端路径；`--plugin-data` 本身不会让运行中的 Tern 切换 profile。
 
-对于原先由 `install-tern` 管理的手工安装，可使用 `bun src/cli.ts install-tern --control-file "/absolute/path/to/existing-bridge-state/client.json" --tern-executable "/absolute/path/to/tern" --tern-pane-socket "/absolute/path/to/daemon.sock"` 维护。该有限命令不启动服务，但不要与原生安装器混用；覆盖原生完整副本可能因文件归属校验触发 `INSTALL_CONFLICT`，应改用前述 `setup`，不要删文件绕过。`--control-file` 应保留原配置使用的 `client.json` 路径，不能填 `identity.json`；省略它会采用默认状态目录，可能偏离已有 setup 配置。
+对于原先由 `install-tern` 管理的手工安装，可使用 `bun src/cli.ts install-tern --control-file "/absolute/path/to/existing-bridge-state/client.json" --tern-executable "/absolute/path/to/tern"` 维护。该有限命令不启动服务，但不要与原生安装器混用；文件归属冲突应使用原有安装流程修复，不要删文件绕过。beta.3 在省略 `--control-file` 时保留已保存的绝对路径，仅在没有保存路径时采用默认值。控制文件不能填 `identity.json`；额外的 socket 覆盖参数会被拒绝，而不是忽略。
 
-`install-tern --target PATH` 将 Tern 插件配置与数据同时写入该目录，不会让正在运行的 Tern 自动切换 profile。隔离目标不能仅凭目录推导 daemon，应显式提供 socket 或确认保存的路由正确。完成后只重载对应 daemon 的插件，例如在目标路由下执行 `tern plugin reload omp-client-bridge`。完整手工部署见[高级用法](usage.md#advanced-install-from-source-on-both-machines)。
+`install-tern --target PATH` 将 Tern 插件配置与数据同时写入该目录，不会让正在运行的 Tern 自动切换 profile。beta.3 的 PiP 不依赖 daemon socket。插件重载始终针对实际使用的 profile/daemon。完整手工部署见[高级用法](usage.md#advanced-install-from-source-on-both-machines)。
 
 ## 6. 常见故障与恢复
 
 | 现象 | 处理方式 |
 | --- | --- |
 | `spawn tern ENOENT`、`TERN_EXECUTABLE_NOT_FOUND` 或 GUI 中找不到命令 | GUI 不一定继承登录 shell 的 `PATH`。确认本机原生 CLI 存在，通过上一节保存正确的 `--tern-executable`，再重载正确的插件。远端需要独立检查；不要把客户端路径复制过去。 |
-| 找不到 socket，或错误指向 `/tmp/tern.sock` | 不要猜测该路径就是当前 daemon。核对机器本地 `ternPaneSocket`、Linux runtime 目录与正在使用的 profile，通过 `--tern-pane-socket` 修复。不要为此启动 `tern serve`、清空 daemon 状态或自动重启 daemon。 |
+| 找不到 socket，或错误指向 `/tmp/tern.sock` | **历史路由问题（仅适用于旧版本）：** beta.3 的 PiP 已不再使用该路径。更新并重载本机插件即可采用新 PiP 路径；不要为此启动 `tern serve`、清空状态或自动重启服务。完整 Setup 会涉及远端初始化，不是单纯修复 PiP 的必要步骤。 |
 | SSH 检查或客户端注册失败 | 查看候选来源和每次检查结果。可选择 **Find SSH alternatives** 重新发现配置，或在 **SSH destination / Edit SSH** 中输入终端使用的别名。手动检查失败不会自动换目标，也不需要重新生成密钥。配置读取或路径转换失败会明确提示；保留 `BatchMode=yes` 和严格主机密钥检查。 |
 | 从 Windows 发送后报 `set: Illegal option -` | POSIX 脚本可能带有 CRLF。源码的 `.gitattributes` 固定 `.sh` 及界面清单使用 LF；重新部署修复后的完整包，不修改远端 shell 来忽略 CR。 |
 | 引导只显示笼统的运行时失败 | 查看私有 `setup.log` 中的实际阶段。Windows 引导保留 preparer 的退出码与详细进度，不因子进程 stderr 覆盖后端错误，也不将原始诊断公开到界面。 |

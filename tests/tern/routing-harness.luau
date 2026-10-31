@@ -17,16 +17,9 @@ function run(entry, loadModule)
 		local surfaceRole, paneKind = "omp.session", "agent"
 		local f = { original = original, other = other, sent = {}, native = {}, errors = {}, toasts = {}, commands = {} }
 		f.picks, f.prompts = {}, {}
-		f.creations, f.resizes, f.closes, f.snapshots = {}, {}, {}, {}
-		f.actions, f.floats = {}, {}
+		f.creations, f.closes, f.snapshots = {}, {}, {}
+		f.actions, f.floats, f.focuses = {}, {}, {}
 		f.processes = {}
-		f.windowKey, f.processReceipts = "fixture-window", {}
-		function f.nativePaneSocket()
-			return f.daemonSocket or (tern.runtime.os == "windows" and "\\\\.\\pipe\\tern-Fixture" or "/isolated/Tern Data/daemon.sock")
-		end
-		function f.nativeConfig()
-			return { controlFile = "/isolated/client.json", ternExecutable = tern.runtime.os == "windows" and "C:\\Program Files\\Tern\\tern.exe" or "/isolated/Tern CLI/tern", ternPaneSocket = f.nativePaneSocket() }
-		end
 		f.writes = {}
 		f.logs = {}
 		f.moduleLoads, f.reads, f.setupOpens = {}, {}, 0
@@ -95,7 +88,6 @@ function run(entry, loadModule)
 			local alive = true
 			local function live() assert(alive, "expired callback context was reused") end
 			local cx = {
-				window_key = function() live(); return f.windowKey end,
 				sessions = { current = function() live(); return { id = f.currentSession or 1, host = f.currentHost or 2 } end },
 				session = {
 					focused = function() live(); return focused end,
@@ -104,7 +96,7 @@ function run(entry, loadModule)
 						local panes = {}
 						for pane in opened do
 							local tabId = paneTabs[pane]
-							table.insert(panes, { pane = pane, program = "zsh", tab = tabId, floating = floatingPane(tabs[tabId], pane) ~= nil, kind = blocks[pane] and "plugin" or paneKind, block = blocks[pane] and blocks[pane].block, at_prompt = true })
+							table.insert(panes, { pane = pane, program = "zsh", tab = tabId, floating = floatingPane(tabs[tabId], pane) ~= nil, kind = blocks[pane] and (blocks[pane].kind or "plugin") or paneKind, block = blocks[pane] and blocks[pane].block, at_prompt = true })
 						end
 						return panes
 					end,
@@ -129,7 +121,7 @@ function run(entry, loadModule)
 					end,
 					layout = function(_, tabId)
 						live()
-						assert(tabId == paneTabs[original], "PiP ordinal lookup escaped its original tab")
+						assert(tabId ~= nil, "layout inspection requires an explicit tab")
 						if f.layoutError then error("native layout unavailable") end
 						local result = copy(tabs[tabId])
 						if f.missingFloat then result.floats = {} end
@@ -172,6 +164,8 @@ function run(entry, loadModule)
 					assert(not inReceipt and callbackDelay ~= nil, "float must use a fresh deferred callback")
 					assert(opened[pane] and opened[owner] and pane ~= owner, "float requires two existing distinct panes")
 					assert(corner == "tr" and reveal.focus == false, "float must preserve focus at the native top-right corner")
+					assert(type(reveal.size) == "table" and #reveal.size == 2, "float must supply initial native size")
+					for _, dimension in reveal.size do assert(type(dimension) == "number" and dimension > 0, "invalid native size") end
 					table.insert(f.floats, { pane = pane, owner = owner, sourceTab = paneTabs[pane], targetTab = paneTabs[owner] })
 					-- Native false/throw results leave both source and target trees intact.
 					if f.floatError then error("native float unavailable") end
@@ -179,9 +173,27 @@ function run(entry, loadModule)
 					local targetTab = paneTabs[owner]
 					detachPane(pane)
 					paneTabs[pane] = targetTab
-					table.insert(tabs[targetTab].floats, { pane = pane, over = owner, corner = "top_right", size = { 720, 420 }, focus_size = { 1080, 630 } })
+					-- Synthetic cell geometry: preserve independent glance/focus sizes,
+					-- with a larger focused view and frame clamping. The metric and growth
+					-- factor here are not pixel/default-size acceptance for native Tern.
+					local frame = { 100, 60 }
+					local size, focusSize = {}, {}
+					for axis, dimension in reveal.size do
+						size[axis] = math.min(dimension <= 1 and dimension * frame[axis] or dimension, frame[axis])
+						focusSize[axis] = math.min(size[axis] * 1.5, frame[axis])
+					end
+					table.insert(tabs[targetTab].floats, { pane = pane, over = owner, corner = "top_right", size = size, focus_size = focusSize })
 					if f.onFloat then f.onFloat(pane, owner) end
 					return true
+				end, focus = function(_, pane)
+					live()
+					assert(not inReceipt and callbackDelay ~= nil, "focus must use a fresh deferred callback")
+					assert(opened[pane], "native focus requires an existing exact pane")
+					table.insert(f.focuses, pane)
+					if f.focusError then error("native focus unavailable: private host detail") end
+					if not f.delayFocus then focused = pane end
+					if f.onFocus then f.onFocus(pane) end
+					-- Native focus returns no success boolean. A later context observes it.
 				end }, { __index = function() error("unsupported window layout mutation") end }),
 				run = function() error("numeric pane input must not be used") end,
 				command = function(_, name) live(); table.insert(f.native, { command = name, pane = focused }) end,
@@ -244,7 +256,7 @@ function run(entry, loadModule)
 				if f.missingConnection then error("No such file or directory (os error 2)") end
 				if path == "/isolated/plugin-data/config.json" then
 					if f.configReadError then error(f.configReadError) end
-					return encode(f.config or f.nativeConfig())
+					return encode(f.config or { controlFile = "/isolated/client.json" })
 				end
 				assert(path == "/isolated/client.json", "unexpected filesystem access")
 				if f.missingEndpoint then error("No such file or directory (os error 2)") end
@@ -259,36 +271,7 @@ function run(entry, loadModule)
 			end,
 			process = { run = function(argv, options, callback)
 				ioCount += 1
-				if f.spawnError then error("private launcher detail") end
-				local process = { argv = copy(argv), options = copy(options), callback = callback }
-				table.insert(f.processes, process)
-				if argv[2] == "ctl" then
-					assert(argv[1] ~= "tern", "PiP must not depend on the GUI PATH")
-					assert(not inReceipt and callbackDelay ~= nil, "PiP process must start from a fresh timer, never a receipt")
-					assert(argv[2] == "ctl" and argv[3] == "pip", "unexpected native process")
-					local verb = argv[4]
-					assert(verb == "resize" or verb == "focus", "unexpected PiP operation")
-					local ordinalText = assert(argv[5]:match('^"#(%d+)"$'), "native ordinal must contain literal double quotes")
-					local ordinal = tonumber(ordinalText)
-					assert(options.env.TERN_WINDOW_KEY == (f.expectedWindowKey or f.windowKey) and options.timeout_ms == 3000, "PiP process must be bounded and pinned to this window")
-					process.routeValid = options.env.TERN_PANE_SOCKET == f.nativePaneSocket()
-					if not process.routeValid then
-						table.insert(f.processReceipts, process)
-						if f.onProcess then f.onProcess(process) end
-						return
-					end
-					assert(#argv == (verb == "resize" and 7 or 5), "unexpected PiP CLI flags")
-					local floating = assert(tabs[paneTabs[focused]].floats[ordinal], "current-tab PiP ordinal does not exist")
-					assert(floating.pane == f.panelPane and floating.over == blocks[f.panelPane].owner, "ordinal selected an unrelated PiP")
-					process.verb, process.pane = verb, floating.pane
-					if verb == "resize" then
-						assert(argv[6] == "240" and argv[7] == "360" and focused == floating.over, "portrait resize must run in owner-focused glance mode")
-						floating.size, floating.focus_size = { 240, 360 }, { 360, 540 }
-						table.insert(f.resizes, { pane = floating.pane, width = 240, height = 360 })
-					else focused = floating.pane end
-					table.insert(f.processReceipts, process)
-					if f.onProcess then f.onProcess(process) end
-				end
+				table.insert(f.processes, { argv = copy(argv), options = copy(options), callback = callback })
 			end },
 			timer = function(ms, callback)
 				deferredDelays[callback] = ms
@@ -316,10 +299,6 @@ function run(entry, loadModule)
 		function f.flush()
 			local steps = 0
 			while #deferred > 0 do
-				if #f.processReceipts > 0 then
-					if f.holdProcesses then return end
-					f.processReceipt(nil, true)
-				end
 				steps += 1; assert(steps < 100, "deferred native work did not settle")
 				f.step()
 			end
@@ -344,17 +323,6 @@ function run(entry, loadModule)
 			local response = { status = status or 200, body = encode(body) }
 			invoke(function(cx) inReceipt = true; request.callback(response, cx); inReceipt = false end)
 			if not holdDeferred then f.flush() end
-		end
-		function f.processReceipt(result, holdDeferred)
-			local process = assert(table.remove(f.processReceipts, 1), "process receipt missing")
-			local receipt = result or { status = process.routeValid and 0 or 1, stdout = encode({ ok = process.routeValid }), timed_out = false }
-			local processes, resizes, focusedBefore = #f.processes, #f.resizes, focused
-			invoke(function(cx) inReceipt = true; process.callback(receipt, cx); inReceipt = false end)
-			assert(#f.processes == processes and #f.resizes == resizes and focused == focusedBefore, "receipt performed native PiP work")
-			if not holdDeferred then f.flush() end
-		end
-		function f.processResult(status, body, timedOut)
-			return { status = status, stdout = type(body) == "table" and encode(body) or body, timed_out = timedOut or false }
 		end
 		function f.poll()
 			local steps = 0
@@ -528,6 +496,9 @@ function run(entry, loadModule)
 			assert(opened[original] and opened[other], "PiP closed an existing agent pane")
 		end
 		function f.foreign(pane) foreignHosts[pane] = true end
+		function f.replaceBlock(pane, kind, block)
+			blocks[pane].kind, blocks[pane].block = kind, block
+		end
 		function f.addPane(pane)
 			opened[pane], paneTabs[pane] = true, 1
 			destinations[pane] = "destination-" .. tostring(pane)
@@ -552,6 +523,9 @@ function run(entry, loadModule)
 		function f.userResize(pane, width, height)
 			local floating = assert(floatingPane(tabs[paneTabs[pane]], pane))
 			floating[focused == pane and "focus_size" or "size"] = { width, height }
+		end
+		function f.reanchor(pane, owner)
+			assert(floatingPane(tabs[paneTabs[pane]], pane)).over = owner
 		end
 		function f.addFloat(pane, owner, first)
 			opened[pane], paneTabs[pane] = true, paneTabs[owner]
@@ -615,7 +589,7 @@ function run(entry, loadModule)
 			for key, value in item do
 				if type(value) == "string" then
 					assert(key == "event" or key == "window", "unapproved text in diagnostics")
-					for _, secret in { "fixture-token", "destination-A", "session-A", "draft-A", "/synthetic", "/isolated/Tern CLI", "http://" } do
+					for _, secret in { "fixture-token", "destination-A", "session-A", "draft-A", "/synthetic", "/isolated", "http://" } do
 						assert(not value:find(secret, 1, true), "private diagnostic payload")
 					end
 				end
@@ -853,7 +827,6 @@ function run(entry, loadModule)
 			assert(f.paneTab(pane) == 1 and f.tab(f.panelTab) == nil, "float retained its empty temporary tab")
 			assert(f.layout().focus == f.original, "native float did not return to the owner")
 		end
-		f.onProcess = function() f.assertOriginalTab() end
 		f.toggle()
 		assert(created and floated and #f.floats == 1)
 		assert(f.layout().focus == f.panelPane, "panel did not become interactive")
@@ -867,14 +840,16 @@ function run(entry, loadModule)
 			nestedOriginal(f)
 			local unrelated = f.original + 200
 			local unrelatedTab = f.addTabPane(unrelated)
+			f.addFloat(unrelated + 1, f.other)
 			f.warm()
 			f[failure] = true
 			f.toggle()
 			assert(#f.floats == 1 and f.floats[1].pane == f.panelPane and f.floats[1].owner == f.original)
 			assert(#f.closes == 1 and f.closes[1] == f.panelPane and not f.isOpen(f.panelPane), "float failure did not request the owned block's broker self-close")
-			assert(f.tab(f.panelTab) == nil and next(f.layout().floats) == nil, "failed float left its temporary tab or PiP behind")
+			assert(f.tab(f.panelTab) == nil and f.floating(f.panelPane) == nil, "failed float left its temporary tab or PiP behind")
+			assert(#f.layout().floats == 1 and f.floating(unrelated + 1).over == f.other and f.floating(unrelated + 1).size[1] == 315, "failure cleanup changed an unrelated PiP")
 			assert(f.isOpen(unrelated) and f.tab(unrelatedTab).root.pane == unrelated, "failure cleanup touched an unrelated tab")
-			assert(#f.resizes == 0 and #f.actions == 0 and #f.errors == 1)
+			assert(#f.focuses == 0 and #f.actions == 0 and #f.errors == 1)
 			f.assertOriginalTab()
 			f.poll(); f.flushPanels()
 			assert(#f.floats == 1 and #f.closes == 1, "poll retried failed float or closed another panel")
@@ -900,7 +875,7 @@ function run(entry, loadModule)
 			elseif change == "owner destination" then f.destinationOverride = { [f.original] = "replacement-destination" }
 			else f.panelSurfaceAlias = f.other; userPane = f.other; f.focus(userPane) end
 			f.flush(); f.flushPanels()
-			assert(#f.floats == 0 and #f.actions == 0 and #f.resizes == 0, "changed context still received native PiP work")
+			assert(#f.floats == 0 and #f.actions == 0 and #f.focuses == 0, "changed context still received native PiP work")
 			assert(#f.closes == 1 and f.closes[1] == pane and not f.isOpen(pane) and f.tab(temporaryTab) == nil, "cancelled preparation stranded its temporary panel")
 			assert(f.isOpen(f.other))
 			if userPane then assert(f.layout().focus == userPane and f.isOpen(userPane), "cleanup stole the user's selected context") end
@@ -917,30 +892,31 @@ function run(entry, loadModule)
 		assert(f.creations[1].launch.block == "omp-client-bridge.panel")
 		local first = f.panelPane
 		local pip = assert(f.floating(first), "Bridge did not automatically float")
-		assert(pip.over == f.original and pip.corner == "top_right" and pip.size[1] == 240 and pip.size[2] == 360 and pip.focus_size[1] == 360 and pip.focus_size[2] == 540, "Bridge did not initialize both native portrait sizes")
+		assert(pip.over == f.original and pip.corner == "top_right", "Bridge lost its exact owner or placement")
 		assert(f.paneTab(first) == 1 and f.tab(f.panelTab) == nil, "float left the panel in its temporary tab")
 		assert(f.layout().focus == first, "Bridge is not focused for interaction by default")
 		f.assertOriginalTab()
-		local resizes, processes = #f.resizes, #f.processes
-		assert(resizes == 1 and processes == 2, "automatic PiP must resize then focus exactly once")
-		f.userResize(first, 411, 609)
-		f.focus(f.original); f.userResize(first, 281, 433)
+		assert(#f.floats == 1 and #f.focuses == 1 and f.focuses[1] == first and #f.processes == 0, "automatic PiP must float and focus exactly once without processes")
+		f.userResize(first, 47, 39)
+		f.focus(f.original); f.userResize(first, 29, 31)
 		f.poll(); f.focus(first); f.invoke("focus", {}); f.poll()
-		assert(#f.resizes == resizes and #f.processes == processes, "focus loss or polling reapplied geometry")
+		assert(#f.floats == 1 and #f.focuses == 1, "focus loss or polling reapplied geometry")
 		assert(f.link("paste").handled)
 		f.respond(f.take("/v1/captures/clipboard"), { kind = "text", text = "panel text" })
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 		assert(f.pasted()[1].viewId == f.viewId and f.pasted()[1].sessionId == "session-A", "panel paste followed panel focus")
 		assert(#f.picks == 0 and #f.prompts == 0, "explicit paste opened a redundant dialog")
-		assert(f.floating(first).focus_size[1] == 411 and f.floating(first).focus_size[2] == 609 and f.floating(first).size[1] == 281 and f.floating(first).size[2] == 433, "paste or polling overwrote either user size")
+		assert(f.floating(first).focus_size[1] == 47 and f.floating(first).focus_size[2] == 39 and f.floating(first).size[1] == 29 and f.floating(first).size[2] == 31, "paste or polling overwrote either user size")
 		f.link("hide")
 		assert(#f.closes == 1 and f.closes[1] == first and f.isOpen(f.original) and f.isOpen(f.other))
 		assert(f.floating(first) == nil and not f.isOpen(first), "hide left its owned PiP behind")
 		f.assertOriginalTab()
 		f.noRequest("/v1/transfers/cancel")
 		f.toggle()
-		assert(f.panelPane ~= first and #f.creations == 2 and #f.resizes == resizes + 1 and #f.processes == processes + 2)
-		assert(f.floating(f.panelPane).corner == "top_right" and f.floating(f.panelPane).size[1] == 240 and f.floating(f.panelPane).focus_size[2] == 540)
+		assert(f.panelPane ~= first and #f.creations == 2 and #f.floats == 2 and #f.focuses == 2 and f.focuses[2] == f.panelPane)
+		local reopened = assert(f.floating(f.panelPane))
+		assert(reopened.corner == "top_right" and reopened.over == f.original)
+		assert(reopened.size[1] == pip.size[1] and reopened.size[2] == pip.size[2] and reopened.focus_size[1] == pip.focus_size[1] and reopened.focus_size[2] == pip.focus_size[2], "fresh panel inherited a closed panel's user geometry")
 		f.assertOriginalTab()
 		assert(f.creations[1].launch.args[2] ~= f.creations[2].launch.args[2], "recreated panel reused stale route id")
 	end)
@@ -949,240 +925,95 @@ function run(entry, loadModule)
 		f.warm(); f.toggle()
 		assert(#f.floats == 1 and f.floats[1].pane == f.panelPane and f.floats[1].owner == f.original, "Bridge floated another pane or owner")
 		assert(f.layout().focus == f.panelPane and f.paneTab(f.panelPane) == 1, "Bridge did not focus the panel over its original tab")
-		assert(#f.sent == 0 and #f.native == 0 and #f.processes == 2 and #f.actions == 0, "PiP must use only two local bounded ctl processes, not pane input or focus traversal")
+		assert(#f.sent == 0 and #f.native == 0 and #f.processes == 0 and #f.actions == 0 and #f.focuses == 1, "PiP used a process, pane input, or focus traversal")
 		f.assertOriginalTab()
-		local processes, resizes = #f.processes, #f.resizes
 		f.focus(f.other); f.poll(); f.advance(5000); f.poll(); f.flushPanels()
-		assert(f.layout().focus == f.other and #f.processes == processes and #f.resizes == resizes, "heartbeat stole focus or reapplied PiP geometry")
+		assert(f.layout().focus == f.other and #f.focuses == 1 and #f.floats == 1, "heartbeat stole focus or reapplied PiP geometry")
 	end)
 
-	for _, location in {
-		{ "macos", "/Applications/Tern App.app/Contents/MacOS/tern" },
-		{ "linux", "/opt/Tern CLI/bin/tern" },
-		{ "linux", "/opt/Tern's $tools; local/bin/tern" },
-		{ "macos", "/opt/Tern CLI/tern launcher" },
-		{ "linux", "//opt/Tern\\literal/bin/tern" },
-		{ "windows", "C:\\Program Files\\Tern\\tern.EXE" },
-		{ "windows", "D:/Tern CLI/tern.exe" },
-		{ "windows", "\\\\client-server\\shared tools\\Tern CLI\\tern.ExE" },
-		{ "windows", "//client-server/shared tools/Tern CLI/tern.exe" },
-		{ "windows", "\\\\?\\C:\\Program Files\\Tern\\tern.exe" },
-		{ "windows", "\\\\?\\UNC\\client-server\\shared tools\\tern.exe" },
-	} do
-		case("machine-local " .. location[1] .. " CLI path launches unchanged: " .. location[2], function(f)
-			tern.runtime.os = location[1]
-			f.config = f.nativeConfig(); f.config.ternExecutable = location[2]
-			f.endpoint = { url = "http://127.0.0.1:9999", token = "fixture-token", ternExecutable = "/wrong/endpoint/tern" }
+	for _, platform in { "macos", "linux", "windows" } do
+		case("native PiP opens without process API or CLI configuration on " .. platform, function(f)
+			tern.runtime.os, tern.process = platform, nil
+			f.config = { controlFile = "/isolated/client.json" }
 			f.warm(); f.toggle()
-			assert(#f.creations == 1 and #f.processes == 2 and #f.errors == 0)
-			assert(f.processes[1].argv[1] == location[2] and f.processes[2].argv[1] == location[2], "configured executable was split, quoted, normalized, or replaced")
-			assert(#f.processes[1].argv == 7 and #f.processes[2].argv == 5, "path spaces became command arguments")
-			assert(f.layout().focus == f.panelPane and #f.resizes == 1)
+			assert(#f.errors == 0 and #f.creations == 1 and #f.floats == 1 and #f.focuses == 1)
+			assert(f.focuses[1] == f.panelPane and f.layout().focus == f.panelPane)
 			f.assertOriginalTab()
 		end)
 	end
 
-	for _, invalid in {
-		{ "macos", nil, "missing" },
-		{ "macos", false, "non-string" },
-		{ "macos", "", "empty" },
-		{ "macos", "tern", "bare name" },
-		{ "linux", "./bin/tern", "relative" },
-		{ "macos", "C:\\Tern\\tern.exe", "Windows drive on macOS" },
-		{ "linux", "\\\\server\\share\\tern.exe", "Windows UNC on Linux" },
-		{ "windows", "/opt/tern", "POSIX on Windows" },
-		{ "windows", "C:tern.exe", "drive-relative" },
-		{ "windows", "\\Tern\\tern.exe", "root-relative" },
-		{ "windows", "\\\\server\\tern.exe", "incomplete UNC" },
-		{ "windows", "C:\\Tern\\tern.cmd", "command shim" },
-		{ "windows", "\\\\.\\pipe\\tern.exe", "pipe is not an executable" },
-		{ "windows", "C:\\Tern\\tern.exe --help", "Windows command arguments" },
-		{ "macos", '"/Applications/Tern CLI/tern"', "quoted command" },
-		{ "linux", "/opt/tern\n", "control character" },
-		{ "macos", "/opt/tern" .. utf8.char(133), "C1 control character" },
-		{ "windows", "C:\\Tern\\" .. string.char(0) .. "tern.exe", "NUL character" },
-		{ "linux", "/opt/" .. string.char(127) .. "tern", "DEL character" },
-		{ "macos", "/", "root directory" },
-	} do
-		case("invalid CLI " .. invalid[3] .. " blocks only PiP, not independent paste or upload", function(f)
-			tern.runtime.os = invalid[1]
-			f.config = f.nativeConfig(); f.config.ternExecutable = invalid[2]
-			f.warm(); f.toggle()
-			assert(#f.creations == 0 and #f.processes == 0 and #f.floats == 0, "invalid CLI stranded a temporary panel or launched a process")
-			f.noRequest("/v1/panels/open")
-			assert(#f.errors == 1 and f.errors[1]:find("ternExecutable", 1, true) and f.errors[1]:find("install-tern", 1, true) and f.errors[1]:find("reload", 1, true), "missing actionable local CLI repair")
-			f.respond(f.clipboard(), { kind = "text", text = "independent paste" })
-			f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
-			assert(#f.pasted() == 1 and f.pasted()[1].text == "independent paste", "CLI configuration disabled endpoint paste")
-			f.take("/v1/intents", f.viewId)
-			f.invoke("upload-file")
-			f.resolve(f.capture(f.take("/v1/captures/pick-file"), "independent-file"), "session-A", "draft-A")
-			assert(f.take("/v1/transfers").body.captureId == "independent-file", "CLI configuration disabled endpoint upload")
-			assert(#f.errors == 1 and #f.creations == 0 and #f.processes == 0)
-			f.assertOriginalTab()
-		end)
+	local function beginFloat(f)
+		f.invoke("toggle-bridge")
+		f.respond(f.take("/v1/panels/open"), { ok = true }, nil, true)
+		assert(#f.floats == 0 and #f.focuses == 0, "HTTP callback performed native layout work")
+		local turns = 0
+		while #f.floats == 0 do turns += 1; assert(turns <= 4, "native float was not scheduled"); f.step() end
+		assert(#f.floats == 1 and #f.focuses == 0 and f.layout().focus == f.original)
 	end
 
-	case("repairing invalid executable configuration and reloading restores PiP", function(f)
-		f.config = f.nativeConfig(); f.config.ternExecutable = "tern"
-		f.warm(); f.toggle()
-		assert(#f.creations == 0 and #f.processes == 0 and #f.errors == 1)
-		f.config.ternExecutable = "/repaired/Tern CLI/tern"
-		f.reload(); f.warm(); f.toggle()
-		assert(#f.creations == 1 and #f.processes == 2 and #f.errors == 1)
-		assert(f.processes[1].argv[1] == "/repaired/Tern CLI/tern" and f.processes[2].argv[1] == "/repaired/Tern CLI/tern")
-		assert(f.layout().focus == f.panelPane and f.status()[1].text ~= "Needs attention")
+	local function readyCount(f)
+		local count = 0
+		for _, record in f.logs do if record.event == "panel.pip.ready" then count += 1 end end
+		return count
+	end
+
+	case("native focus success is reported only by a fresh observed context", function(f)
+		f.warm(); beginFloat(f)
+		assert(readyCount(f) == 0)
+		f.step()
+		assert(#f.focuses == 1 and f.focuses[1] == f.panelPane and f.layout().focus == f.panelPane)
+		assert(readyCount(f) == 0, "native void return was treated as observed success")
+		f.step()
+		assert(readyCount(f) == 1 and #f.errors == 0)
+		f.poll(); f.flushPanels()
+		assert(#f.focuses == 1 and readyCount(f) == 1, "poll duplicated native focus or success")
 	end)
 
-	for _, location in {
-		{ "macos", "/Users/Fixture/Library/Application Support/Tern/daemon.sock" },
-		{ "linux", "/run/user/1000/tern/daemon" },
-		{ "linux", "/opt/Tern's $tools; local/daemon.sock" },
-		{ "macos", "//local/Tern\\literal/daemon.sock" },
-		{ "windows", "C:\\Users\\Fixture\\Tern Data\\daemon.sock" },
-		{ "windows", "D:/Tern Data/daemon" },
-		{ "windows", "\\\\client-server\\shared tools\\Tern\\daemon.sock" },
-		{ "windows", "//client-server/shared tools/Tern/daemon.sock" },
-		{ "windows", "\\\\?\\C:\\Tern Data\\daemon.sock" },
-		{ "windows", "\\\\?\\UNC\\client-server\\shared tools\\daemon.sock" },
-		{ "windows", "\\\\.\\pipe\\tern-Fixture" },
-		{ "windows", "\\\\.\\PIPE\\tern-安装 with spaces" },
-	} do
-		case("machine-local " .. location[1] .. " socket is passed unchanged: " .. location[2], function(f)
-			tern.runtime.os = location[1]
-			f.daemonSocket = location[2]
-			f.config = f.nativeConfig()
-			f.endpoint = { url = "http://127.0.0.1:9999", token = "fixture-token", ternPaneSocket = "/wrong/endpoint/daemon.sock" }
-			f.warm(); f.toggle()
-			assert(#f.processes == 2 and #f.errors == 0 and #f.resizes == 1 and f.layout().focus == f.panelPane)
-			for _, process in f.processes do
-				assert(process.options.env.TERN_PANE_SOCKET == location[2], "socket was normalized, quoted, or replaced by endpoint metadata")
-			end
-			f.assertOriginalTab()
+	for _, change in { "owner", "other pane", "other tab", "delayed focus" } do
+		case("accepted focus never retries or steals focus after " .. change, function(f)
+			f.warm(); beginFloat(f)
+			f.delayFocus = change == "delayed focus"
+			f.step()
+			assert(#f.focuses == 1)
+			local selected = f.original
+			if change == "other pane" then selected = f.other
+			elseif change == "other tab" then selected = f.original + 200; f.addTabPane(selected) end
+			f.focus(selected)
+			f.flush(); f.poll(); f.advance(5000); f.poll(); f.flushPanels()
+			assert(f.layout().focus == selected and #f.focuses == 1 and #f.floats == 1)
+			assert(readyCount(f) == 0 and #f.closes == 0 and f.isOpen(f.panelPane))
+			f.focus(f.panelPane); f.poll(); f.flushPanels()
+			assert(#f.focuses == 1 and readyCount(f) == 0, "late focus revived completed initialization")
 		end)
 	end
 
-	for _, invalid in {
-		{ "macos", nil, "missing" },
-		{ "macos", false, "non-string" },
-		{ "macos", "", "empty" },
-		{ "macos", "daemon.sock", "bare name" },
-		{ "linux", "./daemon.sock", "relative" },
-		{ "macos", "C:\\Tern\\daemon.sock", "Windows drive on macOS" },
-		{ "linux", "\\\\server\\share\\daemon.sock", "Windows UNC on Linux" },
-		{ "windows", "/run/tern/daemon.sock", "POSIX on Windows" },
-		{ "windows", "C:daemon.sock", "drive-relative" },
-		{ "windows", "\\Tern\\daemon.sock", "root-relative" },
-		{ "windows", "\\\\server\\daemon.sock", "incomplete UNC" },
-		{ "windows", "\\\\.\\PhysicalDrive0", "non-pipe device namespace" },
-		{ "windows", "\\\\.\\pipe\\", "empty pipe" },
-		{ "windows", "\\\\.\\pipe\\nested\\name", "nested pipe" },
-		{ "windows", "\\\\.\\pipe\\tern*", "pipe wildcard" },
-		{ "windows", "//./pipe/tern", "non-native pipe separators" },
-		{ "windows", "C:\\Tern\\daemon:sock", "alternate stream" },
-		{ "windows", "C:\\Tern\\daemon?.sock", "wildcard" },
-		{ "windows", "C:\\Tern\\", "directory suffix" },
-		{ "windows", "\\\\?\\C:daemon.sock", "extended drive-relative" },
-		{ "macos", '\"/run/Tern Data/daemon.sock\"', "quoted path" },
-		{ "linux", "http://127.0.0.1:9999", "URL" },
-		{ "linux", "/run/daemon.sock\n", "control character" },
-		{ "macos", "/run/daemon.sock" .. utf8.char(133), "C1 control character" },
-		{ "windows", "C:\\Tern\\" .. string.char(0) .. "daemon.sock", "NUL character" },
-		{ "linux", "/run/" .. string.char(127) .. "daemon.sock", "DEL character" },
-		{ "macos", "/run/" .. string.char(255) .. "daemon.sock", "invalid UTF-8" },
-		{ "macos", "/", "root directory" },
-	} do
-		case("invalid socket " .. invalid[3] .. " fails before panel creation without disabling paste", function(f)
-			tern.runtime.os = invalid[1]
-			f.config = f.nativeConfig(); f.config.ternPaneSocket = invalid[2]
-			f.endpoint = { url = "http://127.0.0.1:9999", token = "fixture-token", ternPaneSocket = f.nativePaneSocket() }
-			f.warm(); f.toggle()
-			assert(#f.creations == 0 and #f.processes == 0 and #f.floats == 0, "invalid socket created a panel or used a hidden native fallback")
-			f.noRequest("/v1/panels/open")
-			assert(#f.errors == 1 and f.errors[1]:find("ternPaneSocket", 1, true) and f.errors[1]:find("install-tern --tern-pane-socket", 1, true) and f.errors[1]:find("reload", 1, true))
-			f.respond(f.clipboard(), { kind = "text", text = "independent socket paste" })
-			f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
-			assert(#f.pasted() == 1 and f.pasted()[1].text == "independent socket paste")
-			f.assertOriginalTab()
-		end)
-	end
+	case("user focusing the newly floated panel makes another native request unnecessary", function(f)
+		f.warm(); beginFloat(f)
+		f.focus(f.panelPane); f.flush()
+		assert(#f.focuses == 0 and readyCount(f) == 1 and #f.errors == 0)
+		f.focus(f.original); f.poll(); f.flushPanels()
+		assert(#f.focuses == 0 and f.layout().focus == f.original)
+	end)
 
-	case("well-formed wrong socket cannot simulate successful native initialization", function(f)
-		f.config = f.nativeConfig(); f.config.ternPaneSocket = "/wrong/daemon.sock"
-		f.warm(); f.toggle()
-		assert(#f.processes == 1 and not f.processes[1].routeValid and #f.resizes == 0 and #f.errors == 1)
-		assert(f.layout().focus == f.original and f.isOpen(f.panelPane), "failed socket dispatch stole focus or closed a floated panel")
-		local failed = false
-		for _, item in f.logs do
-			assert(item.event ~= "panel.pip.ready", "wrong socket was counted as initialized")
-			if item.event == "panel.pip.failed" then failed = true; assert(item.exitCode == 1 and item.nativeOk == false) end
-		end
-		assert(failed)
-		f.poll(); f.flushPanels(); assert(#f.processes == 1, "wrong route caused a retry or fallback")
+	case("native focus failure preserves the floated panel without fallback or retry", function(f)
+		f.warm(); f.focusError = true; f.toggle()
+		assert(#f.focuses == 1 and f.focuses[1] == f.panelPane and #f.errors == 1)
+		assert(f.errors[1]:find("native window API", 1, true) and not f.errors[1]:find("private host detail", 1, true))
+		assert(f.floating(f.panelPane) and f.isOpen(f.panelPane) and #f.closes == 0 and f.layout().focus == f.original)
+		assert(readyCount(f) == 0 and #f.processes == 0 and #f.sent == 0 and #f.native == 0)
+		f.focusError = false; f.poll(); f.flushPanels()
+		assert(#f.focuses == 1 and #f.errors == 1 and readyCount(f) == 0)
 		f.assertOriginalTab()
 	end)
 
-	case("repairing missing socket metadata and reloading restores PiP", function(f)
-		f.config = f.nativeConfig(); f.config.ternPaneSocket = nil
-		f.warm(); f.toggle()
-		assert(#f.creations == 0 and #f.errors == 1)
-		f.config.ternPaneSocket = f.nativePaneSocket()
-		f.reload(); f.warm(); f.toggle()
-		assert(#f.processes == 2 and #f.resizes == 1 and f.layout().focus == f.panelPane and #f.errors == 1)
-	end)
-
-	case("empty GUI window key is captured alongside the native daemon socket", function(f)
-		f.windowKey, f.expectedWindowKey = "", ""
-		f.warm()
-		f.onCreate = function() f.windowKey = "later-window-context" end
-		f.toggle()
-		assert(#f.processes == 2 and #f.errors == 0 and f.layout().focus == f.panelPane)
-		for _, process in f.processes do
-			assert(process.options.env.TERN_WINDOW_KEY == "" and process.options.env.TERN_PANE_SOCKET == f.nativePaneSocket())
-		end
-	end)
-
-	case("owned PiP pins its executable and socket while endpoint recovery loads replacements", function(f)
-		f.config = f.nativeConfig(); f.config.ternExecutable = "/original/Tern CLI/tern"
-		f.warm(); f.holdProcesses = true; f.toggle()
-		assert(#f.processes == 1 and f.processes[1].argv[1] == "/original/Tern CLI/tern")
-		f.config.ternExecutable = "/replacement/Tern CLI/tern"
-		f.config.ternPaneSocket = "/replacement/Tern Data/daemon.sock"
-		f.tick()
-		f.respond(f.take("/v1/state"), { error = "Fixture reconnect" }, 503)
-		f.poll()
-		f.processReceipt()
-		assert(#f.processes == 2 and f.processes[2].argv[1] == "/original/Tern CLI/tern", "in-flight PiP adopted a later connection's executable")
-		assert(f.processes[2].options.env.TERN_PANE_SOCKET == f.nativePaneSocket(), "in-flight PiP adopted a later connection's socket")
-		f.processReceipt(); f.holdProcesses = false
-		assert(f.layout().focus == f.panelPane)
-		f.daemonSocket = f.config.ternPaneSocket
-		f.toggle(); f.focus(f.original); f.toggle()
-		assert(#f.processes == 4 and f.processes[3].argv[1] == "/replacement/Tern CLI/tern" and f.processes[4].argv[1] == "/replacement/Tern CLI/tern", "new PiP ignored the recovered machine-local config")
-		assert(f.processes[3].options.env.TERN_PANE_SOCKET == f.daemonSocket and f.processes[4].options.env.TERN_PANE_SOCKET == f.daemonSocket, "new PiP ignored the recovered machine-local socket")
-		assert(#f.errors == 0)
-	end)
-
-	case("delayed resize receipt is data only and focus uses a fresh callback", function(f)
-		f.warm(); f.holdProcesses = true; f.toggle()
-		assert(#f.processes == 1 and f.processes[1].verb == "resize" and f.layout().focus == f.original)
-		f.processReceipt(nil, true)
-		assert(#f.processes == 1 and f.layout().focus == f.original, "resize receipt focused synchronously")
-		f.flush()
-		assert(#f.processes == 2 and f.processes[2].verb == "focus" and f.layout().focus == f.panelPane)
-		f.processReceipt()
-		f.poll(); f.flushPanels()
-		assert(#f.processes == 2 and #f.resizes == 1 and #f.errors == 0)
-	end)
-
-	for _, stage in { "float", "resize", "focus" } do
+	for _, stage in { "float", "focus" } do
 		for _, change in { "focus", "host", "session", "tab", "closed destination", "foreign destination", "moved destination", "owner destination" } do
 			case("automatic PiP cancels after " .. stage .. " on changed " .. change, function(f)
 				f.warm()
 				local stoppedAt
 				local function changeContext()
-					if stoppedAt then return end
-					stoppedAt = #f.processes
+					assert(stoppedAt == nil, "native operation was repeated")
+					stoppedAt = #f.focuses
 					if change == "focus" then f.focus(f.other)
 					elseif change == "host" then f.currentHost = 3
 					elseif change == "session" then f.currentSession = 2
@@ -1194,140 +1025,132 @@ function run(entry, loadModule)
 					elseif change == "moved destination" then f.movePaneToTab(f.original)
 					else f.destinationOverride = { [f.original] = "replacement-destination" } end
 				end
-				if stage == "float" then f.onFloat = changeContext
-				else f.onProcess = function(process) if process.verb == stage then changeContext() end end end
+				if stage == "float" then f.onFloat = changeContext else f.onFocus = changeContext end
 				f.toggle()
-				assert(stoppedAt and #f.processes == stoppedAt, "PiP continued in a stale destination context")
-				assert(f.isOpen(f.panelPane) and #f.closes == 0 and f.tab(f.panelTab) == nil, "post-float cancellation closed the user's PiP or recreated a temporary tab")
+				assert(stoppedAt ~= nil and #f.focuses == stoppedAt and readyCount(f) == 0, "PiP continued in a stale destination context")
+				assert(f.isOpen(f.panelPane) and #f.closes == 0 and f.tab(f.panelTab) == nil, "post-float cancellation closed the user's PiP")
 				f.poll(); f.flushPanels()
-				assert(#f.processes == stoppedAt, "poll restarted stale PiP work")
-				if change == "tab" then assert(f.layout().focus == f.original + 200, "initialization returned from the user's selected tab") end
-				if change == "focus" then assert(f.layout().focus == f.other, "initialization stole user focus") end
+				assert(#f.focuses == stoppedAt and #f.floats == 1, "poll restarted stale PiP work")
+				if change == "tab" then assert(f.layout().focus == f.original + 200) end
+				if change == "focus" then assert(f.layout().focus == f.other) end
 				assert(f.isOpen(f.other) and #f.sent == 0 and #f.native == 0 and #f.actions == 0)
 				if change ~= "closed destination" and change ~= "moved destination" then f.assertOriginalTab() end
 			end)
 		end
 	end
 
-	case("late resize receipt cannot revive a cancelled owned panel", function(f)
-		f.warm(); f.holdProcesses = true; f.toggle()
-		local old = f.panelPane
-		f.focus(f.other); f.step()
-		f.processReceipt()
-		assert(#f.processes == 1 and f.layout().focus == f.other and f.isOpen(old))
-		f.focus(old); f.poll(); f.advance(5000); f.poll()
-		assert(#f.processes == 1 and #f.resizes == 1, "late receipt or polling restarted cancelled initialization")
-	end)
-
-	case("old process receipt cannot initialize a newly reopened panel", function(f)
-		f.warm(); f.holdProcesses = true; f.toggle()
-		local old = f.panelPane
-		f.dispatch("toggle-bridge"); f.flushPanels()
-		assert(not f.isOpen(old) and #f.processes == 1)
-		f.focus(f.original); f.toggle()
-		local replacement = f.panelPane
-		assert(replacement ~= old and #f.processes == 1)
-		f.processReceipt(nil, true)
-		assert(#f.processes == 1 and f.layout().focus == f.original, "old receipt performed work for replacement panel")
-		f.flush()
-		assert(#f.processes == 2 and f.processes[2].verb == "resize" and f.processes[2].pane == replacement)
-		f.processReceipt(); f.processReceipt()
-		assert(#f.processes == 3 and #f.resizes == 2 and f.layout().focus == replacement and #f.errors == 0)
-	end)
-
-	for _, missing in { "surface", "owner marker", "ordinal", "layout" } do
+	for _, missing in { "surface", "owner nonce", "float", "layout" } do
 		case("unavailable floated " .. missing .. " never guesses a PiP target", function(f)
-			f.warm(); f.invoke("toggle-bridge")
-			f.respond(f.take("/v1/panels/open"), { ok = true }, nil, true)
+			f.warm(); beginFloat(f)
 			if missing == "surface" then f.nativeSurfaceMissing = f.panelPane
-			elseif missing == "owner marker" then f.panelSurfaceOwner = "another-window/another-panel"
-			elseif missing == "ordinal" then f.missingFloat = true
+			elseif missing == "owner nonce" then f.panelSurfaceOwner = "another-window/another-panel"
+			elseif missing == "float" then f.missingFloat = true
 			else f.layoutError = true end
-			for _ = 1, 4 do if #f.floats == 0 then f.step() end end
-			assert(#f.floats == 1 and f.isOpen(f.panelPane), "hidden panel was required to render before float")
-			f.step() -- Observe the absent surface/layout before expiring any render wait.
+			f.step()
 			f.advance(10001); f.flush(); f.flushPanels()
-			assert(#f.processes == 0 and #f.resizes == 0 and #f.closes == 0 and f.isOpen(f.panelPane))
-			assert(#f.errors == (missing == "ordinal" and 0 or 1), "native lookup failure/render timeout was not reported exactly once")
-			f.poll(); assert(#f.processes == 0)
+			assert(#f.focuses == 0 and #f.closes == 0 and f.isOpen(f.panelPane) and readyCount(f) == 0)
+			assert(#f.errors == (missing == "float" and 0 or 1), "lookup failure or render timeout was not reported exactly once")
+			f.nativeSurfaceMissing, f.panelSurfaceOwner, f.missingFloat, f.layoutError = nil, nil, nil, nil
+			f.poll(); f.flushPanels()
+			assert(#f.focuses == 0, "restored metadata restarted cancelled initialization")
 			f.assertOriginalTab()
 		end)
 	end
 
-	case("current-tab ordinal above one ignores SDK IDs and preserves unrelated PiPs", function(f)
-		local unrelated = f.original + 300
-		f.addFloat(unrelated, f.other)
-		local foreign = f.original + 301
-		f.addTabPane(foreign); f.addFloat(foreign + 1, foreign)
-		f.warm(); f.toggle()
-		assert(#f.processes == 2 and f.processes[1].argv[5] == '"#2"' and f.processes[2].argv[5] == '"#2"')
-		assert(f.floating(unrelated).size[1] == 315 and f.floating(unrelated).focus_size[2] == 330 and f.floating(unrelated).corner == "bottom_left")
-		assert(f.floating(foreign + 1).size[1] == 315 and f.floating(foreign + 1).focus_size[2] == 330)
-		f.assertOriginalTab()
+	case("nonce replacement after native focus cannot produce successful verification", function(f)
+		f.warm(); beginFloat(f); f.step()
+		f.panelSurfaceOwner = "another-window/another-panel"
+		f.step(); f.advance(10001); f.flush(); f.flushPanels()
+		assert(#f.focuses == 1 and readyCount(f) == 0 and #f.errors == 1 and #f.closes == 0)
 	end)
 
-	case("focus recomputes ordinal after resize receipt instead of caching it", function(f)
-		local unrelated = f.original + 300
-		f.addFloat(unrelated, f.other)
-		f.warm(); f.holdProcesses = true; f.toggle()
-		assert(f.processes[1].argv[5] == '"#2"')
-		f.removeFloat(unrelated)
-		f.processReceipt()
-		assert(#f.processes == 2 and f.processes[2].argv[5] == '"#1"')
-		f.processReceipt()
-		assert(f.layout().focus == f.panelPane and #f.resizes == 1)
-	end)
-
-	for _, verb in { "resize", "focus" } do
-		for _, failure in { "status", "json", "ok", "timeout" } do
-			case("native " .. verb .. " " .. failure .. " is reported without retry or cleanup of floated panel", function(f)
-				f.warm(); f.holdProcesses = true; f.toggle()
-				if verb == "focus" then f.processReceipt() end
-				local result = f.processResult(failure == "status" and 1 or 0, failure == "json" and "not-json" or { ok = failure ~= "ok" }, failure == "timeout")
-				result.stderr = "private stderr /private/daemon.sock fixture-token"
-				f.processReceipt(result)
-				local count = #f.processes
-				assert(count == (verb == "resize" and 1 or 2) and #f.errors == 1 and f.isOpen(f.panelPane) and #f.closes == 0)
-				local evidence
-				for _, item in f.logs do
-					assert(item.event ~= "panel.pip.ready", "failed native receipt was counted as initialized")
-					if item.event == "panel.pip.failed" then assert(not evidence); evidence = item end
-				end
-				assert(evidence and evidence.exitCode == result.status and evidence.timedOut == (failure == "timeout"))
-				assert(evidence.jsonDecoded == (failure ~= "json") and evidence.nativeOk == (failure ~= "json" and failure ~= "ok"))
-				assert(evidence.resizing == (verb == "resize"), "receipt diagnostic attributed failure to the wrong phase")
-				for key, value in evidence do
-					assert(key == "event" or key == "window" or key == "operation" or key == "time" or key == "exitCode" or key == "timedOut" or key == "jsonDecoded" or key == "nativeOk" or key == "resizing", "unapproved receipt diagnostic field")
-					if type(value) == "string" then assert(key == "event" or key == "window", "private receipt text entered diagnostics") end
-				end
-				f.poll(); f.flushPanels(); assert(#f.processes == count, "poll retried an uncertain native outcome")
-			end)
-		end
-	end
-
-	for _, status in { false, "private exit text", -2147483649, 4294967296, 1.5, math.huge, 0 / 0 } do
-		case("receipt diagnostics omit invalid or unbounded exit code " .. tostring(status), function(f)
-			f.warm(); f.holdProcesses = true; f.toggle()
-			f.processReceipt(f.processResult(status, { ok = true }))
-			local evidence
-			for _, item in f.logs do if item.event == "panel.pip.failed" then evidence = item end end
-			assert(evidence and evidence.exitCode == nil and evidence.timedOut == false and evidence.jsonDecoded == true and evidence.nativeOk == true)
-			assert(#f.errors == 1 and #f.processes == 1)
+	for _, reorder in { "insert", "remove" } do
+		case("exact opaque pane focus ignores unrelated PiP " .. reorder, function(f)
+			local unrelated, foreign = f.original + 300, f.original + 400
+			f.addFloat(unrelated, f.other)
+			local foreignTab = f.addTabPane(foreign)
+			f.addFloat(foreign + 1, foreign)
+			f.warm(); beginFloat(f)
+			if reorder == "remove" then f.removeFloat(unrelated)
+			else f.addFloat(unrelated + 1, f.other, true) end
+			f.flush(); f.flushPanels()
+			assert(#f.focuses == 1 and f.focuses[1] == f.panelPane and f.layout().focus == f.panelPane)
+			assert(f.floats[1].pane == f.panelPane and f.floats[1].owner == f.original)
+			if reorder == "insert" then
+				assert(f.floating(unrelated).size[1] == 315 and f.floating(unrelated).focus_size[2] == 330)
+				assert(f.floating(unrelated + 1).over == f.other and f.floating(unrelated + 1).corner == "bottom_left")
+			else assert(not f.isOpen(unrelated)) end
+			assert(f.tab(foreignTab).root.pane == foreign and f.floating(foreign + 1).over == foreign)
+			assert(f.floating(foreign + 1).size[1] == 315 and f.floating(foreign + 1).focus_size[2] == 330)
+			f.assertOriginalTab()
 		end)
 	end
 
-	case("native process launch failure remains visible and never falls back to pane input", function(f)
-		f.warm(); f.spawnError = true; f.toggle()
-		assert(#f.errors == 1 and #f.processes == 0 and #f.sent == 0 and #f.native == 0 and f.isOpen(f.panelPane))
-		f.poll(); f.flushPanels(); assert(#f.errors == 1 and #f.processes == 0)
+	for _, replacement in { "kind", "block" } do
+		case("unexpected created " .. replacement .. " cancels before native float", function(f)
+			f.warm(); f.invoke("toggle-bridge")
+			f.respond(f.take("/v1/panels/open"), { ok = true }, nil, true)
+			f.replaceBlock(f.panelPane, replacement == "kind" and "terminal" or "plugin", replacement == "block" and "unrelated.block" or "omp-client-bridge.panel")
+			f.flush(); f.flushPanels()
+			assert(#f.floats == 0 and #f.focuses == 0 and #f.closes == 1 and not f.isOpen(f.panelPane))
+			f.assertOriginalTab()
+		end)
+	end
+
+	for _, change in { "owner", "tab", "closed" } do
+		case("moved or closed floated panel cannot redirect native focus: " .. change, function(f)
+			f.warm(); beginFloat(f)
+			if change == "owner" then f.reanchor(f.panelPane, f.other)
+			elseif change == "tab" then f.movePaneToTab(f.panelPane)
+			else f.removeFloat(f.panelPane) end
+			f.flush(); f.flushPanels(); f.poll(); f.flushPanels()
+			assert(#f.focuses == 0 and #f.closes == 0 and readyCount(f) == 0 and f.layout().focus == f.original)
+			if change ~= "closed" then assert(f.isOpen(f.panelPane)) end
+			f.assertOriginalTab()
+		end)
+	end
+
+	case("user sizing between float and focus survives initialization and polling", function(f)
+		f.warm(); beginFloat(f)
+		f.userResize(f.panelPane, 27, 35)
+		f.flush()
+		assert(f.layout().focus == f.panelPane and #f.focuses == 1)
+		f.userResize(f.panelPane, 43, 48)
+		f.focus(f.original); f.poll(); f.focus(f.panelPane); f.poll(); f.flushPanels()
+		local pip = f.floating(f.panelPane)
+		assert(pip.size[1] == 27 and pip.size[2] == 35 and pip.focus_size[1] == 43 and pip.focus_size[2] == 48)
+		assert(#f.floats == 1 and #f.focuses == 1)
 	end)
 
-	case("missing process receipt expires without retry and late success cannot restart focus", function(f)
-		f.warm(); f.holdProcesses = true; f.toggle()
-		f.advance(10001); f.step()
-		f.processReceipt()
-		assert(#f.processes == 1 and #f.errors == 1 and f.layout().focus == f.original and f.isOpen(f.panelPane))
-		f.poll(); assert(#f.processes == 1)
+	case("late surface rendering permits one focus while the original context is unchanged", function(f)
+		f.warm(); beginFloat(f)
+		f.nativeSurfaceMissing = f.panelPane
+		f.step(); f.step()
+		assert(#f.focuses == 0 and readyCount(f) == 0)
+		f.nativeSurfaceMissing = nil
+		f.flush(); f.flushPanels()
+		assert(#f.focuses == 1 and f.layout().focus == f.panelPane and readyCount(f) == 1 and #f.errors == 0)
+	end)
+
+	case("expired temporary initialization closes only its owned panel without floating", function(f)
+		f.warm(); f.invoke("toggle-bridge")
+		f.respond(f.take("/v1/panels/open"), { ok = true }, nil, true)
+		f.advance(10001); f.flush(); f.flushPanels()
+		assert(#f.floats == 0 and #f.focuses == 0 and #f.closes == 1 and #f.errors == 1)
+		assert(not f.isOpen(f.panelPane) and f.tab(f.panelTab) == nil)
+		f.assertOriginalTab()
+	end)
+
+	case("queued native work from a closed panel cannot initialize its replacement", function(f)
+		f.warm(); beginFloat(f)
+		local old = f.panelPane
+		f.dispatch("toggle-bridge") -- Revoke ownership without draining the old focus timer.
+		f.dispatch("toggle-bridge") -- Explicitly reopen in the still-focused original OMP.
+		f.flushPanels()
+		assert(not f.isOpen(old) and f.panelPane ~= old and #f.creations == 2)
+		assert(#f.floats == 2 and #f.focuses == 1 and f.focuses[1] == f.panelPane)
+		assert(f.layout().focus == f.panelPane and readyCount(f) == 1 and #f.errors == 0)
+		f.assertOriginalTab()
 	end)
 
 
@@ -1492,7 +1315,7 @@ function run(entry, loadModule)
 		f.warm()
 		f.missingHostBlock = true
 		f.toggle()
-		assert(#f.errors == 1 and #f.resizes == 0 and #f.closes == 0)
+		assert(#f.errors == 1 and #f.floats == 0 and #f.focuses == 0 and #f.closes == 0)
 		assert(f.status()[1].text == "Needs attention", "host panel failure lost its error status")
 		assert(f.isOpen(f.original) and f.isOpen(f.other))
 	end)
@@ -1525,7 +1348,7 @@ function run(entry, loadModule)
 	case("panel snapshots are bounded public data and heartbeat never resizes", function(f)
 		f.warm()
 		f.toggle()
-		local resizes, actions = #f.resizes, #f.actions
+		local floats, focuses = #f.floats, #f.focuses
 		local items = {}
 		for index = 1, 25 do table.insert(items, { id = "transfer-" .. index, viewId = f.viewId, phase = "failed", names = { string.rep("x", 300) }, bytesSent = 0, totalBytes = 9, error = "fixture-token http://127.0.0.1:9999 private clipboard" }) end
 		f.setTransfers(items)
@@ -1538,7 +1361,7 @@ function run(entry, loadModule)
 		f.flushPanels(); assert(#f.snapshots == count)
 		f.advance(5000)
 		f.poll()
-		f.flushPanels(); assert(#f.snapshots == count + 1 and #f.resizes == resizes and #f.actions == actions)
+		f.flushPanels(); assert(#f.snapshots == count + 1 and #f.floats == floats and #f.focuses == focuses)
 	end)
 
 	case("panel focus preserves eligible destination and device picker rejects later conversation", function(f)

@@ -7,6 +7,9 @@ a claim that every native backend works on every OS. Historical
 not end-to-end deployment acceptance. Final run evidence is maintained separately
 by the integration owner; no build/test totals are asserted here.
 
+The Tern 0.9.9 native UI cutover below is included in **0.5.0-beta.3**. Historical
+`v0.5.0-beta.2` CLI-based PiP implementation facts remain historical.
+
 ## Version and packaging contract
 
 | Component | Requirement / boundary |
@@ -14,7 +17,7 @@ by the integration owner; no build/test totals are asserted here.
 | Bridge runtime | Bun **>=1.4.3** on the agent host and client; service startup rejects older versions. |
 | Native dependencies | OMP SDK packages pinned to **18.10.4** in `package.json` and `bun.lock`. |
 | Agent-host OMP | Must expose the compatible native extension lifecycle, same-name tool invocation/metadata, scoped Settings module, and interactive editor hooks. Load probes exercised the installed host and the pinned SDK's bundled CLI, including native execution-target validation; this is not GUI acceptance. |
-| Tern | Exported window interfaces checked with **0.8.4**; earlier **0.8.3** evidence remains a historical baseline, not a cross-version guarantee. |
+| Tern | Exported window interfaces checked with **0.9.9**; earlier **0.8.4** evidence remains a historical baseline, not a cross-version guarantee. |
 | Python Eval | Locally installed SDK-supported Python interpreter; no automatic Python provisioning. |
 | SSH | Native `ssh` executable on the client; trusted host key and noninteractive authentication to the agent host. |
 | Package layout | Keep source modules, `src/runtime/worker.ts`, SDK assets, and platform-native dependencies together. This is not a standalone/single-file executable. |
@@ -48,22 +51,18 @@ Windows implementation is not evidence of a real Windows initialization run.
 结果不因此改变；修复版验证证据与未验收能力见 [verification.md](verification.md)。
 
 Native CLI discovery and launch are machine-local on macOS, Linux and Windows.
-Install/setup save an absolute executable path; the window plugin uses it as a
-single argv element without a shell. POSIX execute permission is checked;
+Install/setup save an absolute executable path for setup and plugin reload,
+not PiP sizing or focus. POSIX execute permission is checked;
 Windows paths must identify a native `.exe` with a drive-qualified or UNC root.
 Saved paths, PATH discovery and conventional installation locations support
 GUI environments without a login-shell PATH; custom locations use
 `--tern-executable`. A client's path is never reused as the agent host's path.
 Path-policy coverage is not evidence of native Windows process/GUI acceptance.
-Native control routing is also machine-local: the window child receives the
-saved `ternPaneSocket` as `TERN_PANE_SOCKET`, alongside its captured window key.
-Linux runtime-directory precedence was checked with the native CLI; macOS
-daemon forwarding was exercised without a standalone control endpoint.
-Windows Tern 0.9.7 使用 `\\.\pipe\tern-<USERNAME>` 本机命名管道，
-不是 settings 目录中的 `daemon.sock`。原生 Windows 已验证安装端解析、
-GUI 无端点环境变量时的默认发现，以及通过该管道执行真实窗口 `ctl state`。
-显式或已保存的端点仍优先，隔离安装不会从目标目录推断 daemon。
-这项只读路由验证不等同于远端会话绑定、传输或桌面控制验收。
+The **0.5.0-beta.3** cutover uses exact-pane native window APIs for PiP and no longer
+needs `ternPaneSocket`, daemon forwarding or a captured CLI window key. Successful
+installation/setup removes the obsolete socket field; the retired CLI flag is
+rejected. Historical beta.2 native Windows named-pipe and macOS/Linux daemon
+probes remain historical evidence, not prerequisites of the new PiP path.
 
 
 The lockfile uses public npm tarball URLs while preserving pinned versions and
@@ -202,28 +201,23 @@ applies after image handoff; there is no new atomic preview-completion contract.
 
 The window-status summary opens a true host-defined Bridge Block in a background
 temporary tab with `focus=false`, then uses the window-side `layout.float` API
-with `focus=false` to place that exact pane over the saved OMP owner. The host
-must have the block installed. There is no intermediate visible-tab switch,
-transient split, tiled-tree resize or snapshot/restore of another viewer's layout.
-Tern 0.9.7 headless probes with real plugin callbacks preserved a nested,
-nonuniform original tree on both the local host and an isolated remote loopback
-host; the temporary tab disappeared after floating. Native visual acceptance
-is separate from these headless layout results.
+to place that exact pane over the saved OMP owner. The host must have the block
+installed. There is no intermediate visible-tab switch, transient split,
+tiled-tree resize or snapshot/restore of another viewer's layout. Tern 0.9.9
+headless probes with real plugin callbacks preserved a nested, nonuniform
+original tree on both the local host and an isolated remote loopback host; the
+temporary tab disappeared after floating. Native visual acceptance is separate
+from these headless layout results.
 
-One-time native `tern ctl pip resize` initializes 240×360 logical-pixel glance
-and 360×540 focus dimensions, subject to native frame constraints, followed by
-`tern ctl pip focus`. Both commands run locally with the captured native window
-key explicitly supplied as `TERN_WINDOW_KEY`; this is not a `--window` flag or
-a remote daemon command. Before each dispatch, the plugin rechecks the current
-tab, OMP session/host and owner, then resolves the owned pane and owner in the
-current tab's ordered float list to a quoted `"#N"` ordinal. SDK aliases are not
-converted to raw CLI pane IDs. There is no exact-ID size setter or atomic
-check-and-mutate guarantee: a tab or float-order change after the final check
-can redirect the command. The user explicitly accepted that small check/dispatch
-race. Window-key scoping prevents selecting a different native window, not this
-within-window race. Native process failures are reported, and unknown outcomes
-are not retried. Later user sizing is preserved; there is no permanent size lock,
-polling resize or geometry enforcement on heartbeat.
+The plugin supplies its layout dimensions in terminal cells directly to the API,
+constrained by the native frame. Subsequent user sizing remains under Tern's
+control; there is no permanent size lock, polling resize, or heartbeat geometry
+enforcement.
+
+This exact-pane placement does not spawn a CLI process for daemon forwarding.
+It eliminates the check-and-dispatch race with external float-order changes
+and the requirement for a separate pane-socket control endpoint. Native API
+failures are reported, and unknown outcomes are not retried.
 
 Opening and closing panes changes shared session layout. Local actions remain
 owned by the originating window and keep the original OMP target while its panel
@@ -263,7 +257,7 @@ no native file-paste or remote-byte verification result was obtained. Connection
 success is not file-transfer acceptance and does not contradict reported failures
 on an actual remote server.
 
-A later isolated native connection used macOS Tern 0.9.0 and a private Linux
+A later isolated native connection used macOS Tern 0.9.0 (historical test) and a private Linux
 Tern 0.8.3 endpoint. A real Linux OMP 18.11.1 composer was visible, with separate
 **This device** and **Agent client: Unbound** indicators. The actual extension
 observer reported an idle, empty core editor with both routed execution tools

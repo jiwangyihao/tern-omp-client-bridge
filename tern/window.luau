@@ -39,7 +39,7 @@ local defaultStatus = { { text = "Checking Bridge", icon = "plug", tone = "muted
 local diagnosticSerial, diagnosticStart, diagnosticCount = 0, 0, 0
 local diagnosticFields = { connected = true, context = true, target = true, panel = true,
 	failed = true, sessionMatch = true, hostMatch = true, destinationMatch = true,
-	created = true, exception = true, status = true, exitCode = true, timedOut = true, jsonDecoded = true, nativeOk = true, resizing = true }
+	created = true, exception = true, status = true }
 local function diagnostic(event, fields, operation)
 	local now = tern.now()
 	if now - diagnosticStart >= 10000 then diagnosticStart, diagnosticCount = now, 0 end
@@ -49,9 +49,8 @@ local function diagnostic(event, fields, operation)
 		window = windowId, operation = operation or diagnosticSerial, time = math.floor(now) }
 	if diagnosticCount <= 40 then
 		for key, value in fields or {} do
-			if diagnosticFields[key] and ((type(value) == "boolean" and key ~= "exitCode")
-				or (key == "status" and type(value) == "number" and value >= 100 and value <= 599)
-				or (key == "exitCode" and type(value) == "number" and value >= -2147483648 and value <= 4294967295 and value % 1 == 0)) then record[key] = value end
+			if diagnosticFields[key] and (type(value) == "boolean"
+				or (key == "status" and type(value) == "number" and value >= 100 and value <= 599)) then record[key] = value end
 		end
 	end
 	-- Diagnostics must not break the interaction if the host logger is unavailable.
@@ -116,42 +115,6 @@ local function readMetadata(path, label)
 	return value
 end
 
--- Installation checks paths on this device. Keep them literal in argv/env,
--- including legal filename characters; never consult PATH or guess a socket.
-local function configuredNativePath(value, executable)
-	if type(value) ~= "string" or value == "" then return nil end
-	local valid, controls = pcall(function()
-		for _, code in utf8.codes(value) do
-			if code < 32 or (code >= 127 and code <= 159) then return true end
-		end
-		return false
-	end)
-	if not valid or controls then return nil end
-	if tern.runtime.os == "windows" then
-		local path = value:gsub("\\", "/")
-		if path:sub(1, 4) == "//./" then
-			local name = path:sub(10)
-			if not executable and not value:find("/", 1, true) and path:sub(1, 9):lower() == "//./pipe/"
-				and name ~= "" and not name:find('[/\\:"<>|?*]') then return value end
-			return nil
-		end
-		-- Extended Windows paths retain their original prefix in the launched argv.
-		if path:sub(1, 4) == "//?/" then
-			path = path:sub(5)
-			if path:sub(1, 4):lower() == "unc/" then path = "//" .. path:sub(5) end
-		end
-		if path:find('["<>|?*]') or path:sub(-1) == "/"
-			or (executable and not path:lower():match("[^/]+%.exe$")) then return nil end
-		if path:match("^[A-Za-z]:/[^/]") and not path:sub(3):find(":", 1, true) then return value end
-		local server, share, file = path:match("^//([^/]+)/([^/]+)/(.+)$")
-		if server and server ~= "." and server ~= ".." and share ~= "." and share ~= ".."
-			and file:sub(1, 1) ~= "/" and not path:find(":", 1, true) then return value end
-	elseif tern.runtime.os == "macos" or tern.runtime.os == "linux" then
-		if value:sub(1, 1) == "/" and value:sub(-1) ~= "/" then return value end
-	end
-	return nil
-end
-
 local function loadConnection()
 	local configStep = connectionConfig == nil
 	local value, phase, message = readMetadata(configStep and (tern.plugin.data .. "/config.json") or connectionConfig.controlFile,
@@ -175,8 +138,6 @@ local function loadConnection()
 		setupRequired = false
 		return true
 	end
-	local ternExecutable = configuredNativePath(connectionConfig.ternExecutable, true)
-	local ternPaneSocket = configuredNativePath(connectionConfig.ternPaneSocket, false)
 	connectionConfig = nil
 	-- Never disclose the local bearer to a remote URL or to the agent host.
 	if type(value.url) ~= "string" or not value.url:match("^http://127%.0%.0%.1:%d+/?$") then
@@ -184,7 +145,7 @@ local function loadConnection()
 	elseif type(value.token) ~= "string" or value.token == "" then
 		connectionStatus, connectionMessage = "error", "Missing local UI token; check this device's Bridge endpoint metadata"
 	else
-		connection = { url = value.url:gsub("/$", ""), token = value.token, ternExecutable = ternExecutable, ternPaneSocket = ternPaneSocket }
+		connection = { url = value.url:gsub("/$", ""), token = value.token }
 		connectionStatus, connectionMessage = "ready", nil
 		setupRequired = false
 		return true
@@ -675,14 +636,14 @@ local function publishPanel(cx)
 	end)
 end
 
--- The ordinal is read immediately before each command. The user accepts the
--- small current-tab check/dispatch race; native window identity remains pinned.
-local function panelPipIndex(cx, owned)
+-- Native window APIs keep the exact pane and owner; no active-tab ordinal or
+-- external process participates in initial sizing or focus.
+local function panelFloatOwned(cx, owned)
 	local layout = cx.session:layout(owned.target.tab)
-	for index, item in layout and layout.floats or {} do
-		if item.pane == owned.pane and item.over == owned.target.pane then return index end
+	for _, item in layout and layout.floats or {} do
+		if item.pane == owned.pane and item.over == owned.target.pane then return true end
 	end
-	return nil
+	return false
 end
 
 local function stopPanelPip(cx, owned, auto)
@@ -690,17 +651,6 @@ local function stopPanelPip(cx, owned, auto)
 	if auto.phase == "wait" then hidePanel(cx) end
 end
 
-local function runPanelPipCommand(owned, auto, verb, index)
-	-- ctl reparses a command line: retain literal quotes so #N is not a comment.
-	local argv = { owned.ternExecutable, "ctl", "pip", verb, '"#' .. tostring(index) .. '"' }
-	if verb == "resize" then table.insert(argv, "240"); table.insert(argv, "360") end
-	auto.phase = verb == "resize" and "glance-result" or "focus-result"
-	auto.receipt = nil
-	return pcall(tern.process.run, argv, { timeout_ms = 3000, env = { TERN_WINDOW_KEY = owned.nativeWindowKey, TERN_PANE_SOCKET = owned.ternPaneSocket } }, function(result)
-		-- Receipt only: no native UI work or retained callback context here.
-		if panel == owned and owned.pip == auto then auto.receipt = result end
-	end)
-end
 
 local function panelPipStep(cx, owned)
 	local auto = owned.pip
@@ -743,7 +693,7 @@ local function panelPipStep(cx, owned)
 		-- Hidden tabs need not render a TSP surface. The returned pane ID identifies
 		-- our new block; validate its surface nonce once it becomes visible as a PiP.
 		local called, floated = pcall(function()
-			return cx.layout:float(owned.pane, owned.target.pane, "tr", { focus = false })
+			return cx.layout:float(owned.pane, owned.target.pane, "tr", { focus = false, size = { 32, 24 } })
 		end)
 		if not called or not floated then
 			owned.pip = nil
@@ -754,49 +704,34 @@ local function panelPipStep(cx, owned)
 			end)
 			return
 		end
-		auto.phase = "glance"
+		auto.phase = "focus"
 		nextStep(); return
 	end
 	if not created or not created.floating then owned.pip = nil; return end
 	if not panelSurface(cx, owned.pane) then nextStep(); return end
-	if auto.phase == "glance" or auto.phase == "glance-result" then
-		if info.pane ~= owned.target.pane then owned.pip = nil; return end
+	local inspected, ownedFloat = pcall(panelFloatOwned, cx, owned)
+	if not inspected then
+		owned.pip = nil
+		report(cx, "Cannot inspect the original tab's Bridge PiP; no focus change was requested.")
+		return
 	end
-	if auto.phase == "glance-result" or auto.phase == "focus-result" then
-		local result = auto.receipt
-		if not result then nextStep(); return end
-		local decoded, reply = false, nil
-		if type(result.stdout) == "string" and #result.stdout <= 4096 then decoded, reply = pcall(tern.json.decode, result.stdout) end
-		if result.status ~= 0 or result.timed_out or not decoded or type(reply) ~= "table" or reply.ok ~= true then
-			diagnostic("panel.pip.failed", { exitCode = result.status, timedOut = result.timed_out == true, resizing = auto.phase == "glance-result",
-				jsonDecoded = decoded, nativeOk = decoded and type(reply) == "table" and reply.ok == true }, owned.operation)
-			owned.pip = nil
-			report(cx, "Tern could not initialize this Bridge PiP. Check the local Tern CLI and rerun install-tern --tern-pane-socket with the local daemon's absolute socket path; the command was not retried.")
-			return
-		end
-		if auto.phase == "focus-result" then
-			owned.pip = nil
-			if info.pane == owned.pane then diagnostic("panel.pip.ready", { created = true }, owned.operation) end
-			return
-		end
-		auto.receipt, auto.phase = nil, "focus"
-	end
-	if auto.phase == "focus" and info.pane == owned.pane then
+	if not ownedFloat then owned.pip = nil; return end
+	if info.pane == owned.pane then
 		owned.pip = nil
 		diagnostic("panel.pip.ready", { created = true }, owned.operation)
 		return
 	end
-	local inspected, index = pcall(panelPipIndex, cx, owned)
-	if not inspected then
+	if auto.phase == "verify-focus" then
+		-- A user can return to the owner immediately after native focus. Never
+		-- steal focus back or retry an accepted native operation.
 		owned.pip = nil
-		report(cx, "Cannot inspect the original tab's Bridge PiP; no native command was issued.")
 		return
 	end
-	if not index then owned.pip = nil; return end
-	local verb = auto.phase == "glance" and "resize" or "focus"
-	if not runPanelPipCommand(owned, auto, verb, index) then
+	auto.phase = "verify-focus"
+	local focused = pcall(function() cx.layout:focus(owned.pane) end)
+	if not focused then
 		owned.pip = nil
-		report(cx, "Cannot start the configured local Tern executable. Repair Bridge setup or rerun install-tern --tern-executable with its current absolute path.")
+		report(cx, "Cannot focus this Bridge PiP with the native window API. Check the supported Tern version; no fallback or retry was started.")
 		return
 	end
 	nextStep()
@@ -820,16 +755,8 @@ local function togglePanel(cx)
 		return
 	end
 	if not state or not state.connected or not state.device then report(cx, "This device's Bridge connection is unavailable"); return end
-	if not connection or not connection.ternExecutable then
-		report(cx, "Missing or invalid local ternExecutable in Bridge config.json. On this device, rerun install-tern --tern-executable with the absolute Tern CLI path, then reload the plugin before opening Bridge PiP.")
-		return
-	end
-	if not connection.ternPaneSocket then
-		report(cx, "Missing or invalid local ternPaneSocket in Bridge config.json. On this device, rerun install-tern --tern-pane-socket with the absolute local Tern daemon socket path, then reload the plugin before opening Bridge PiP.")
-		return
-	end
 	panelSerial += 1
-	local owned = { id = "panel-" .. tostring(panelSerial), target = target, session = current.id, host = current.host, nativeWindowKey = cx:window_key(), ternExecutable = connection.ternExecutable, ternPaneSocket = connection.ternPaneSocket, creating = true, operation = operation }
+	local owned = { id = "panel-" .. tostring(panelSerial), target = target, session = current.id, host = current.host, creating = true, operation = operation }
 	panel = owned
 	local initial = { owner = windowId, panelId = owned.id, source = publicText(state.device.name, "This device"),
 		target = publicText(target.title, "Remote OMP"), agent = "Resolving", connected = false, devices = tern.json.decode("[]"), transfers = tern.json.decode("[]"), approvals = 0 }

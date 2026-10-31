@@ -63,9 +63,14 @@ test.each([{ capabilities: [] }, { capabilities: ["files", "exec", "browser"] }]
 	expect(verifyIdentity("migration", migrated.device, migrated.publicKey, signIdentity("migration", migrated))).toBe(true);
 });
 
-test("progress is bounded atomic public JSON and config merging preserves unrelated values", async () => {
+test("progress is bounded atomic public JSON and config merging retires socket metadata without changing identity", async () => {
 	const root = await fixture();
-	await writeFile(path.join(root, "config.json"), JSON.stringify({ theme: "existing", nested: { retained: true }, controlFile: "old" }));
+	const state = path.join(root, "existing bridge");
+	await loadClientIdentity(state, { name: "Existing device" });
+	const identityFile = path.join(state, "identity.json");
+	const identity = await readFile(identityFile, "utf8");
+	const controlFile = path.join(state, "client.json");
+	await writeFile(path.join(root, "config.json"), JSON.stringify({ theme: "existing", nested: { retained: true }, controlFile, ternPaneSocket: "obsolete malformed route" }));
 	await writeSetupProgress(root, { status: "installing", stage: "checking-ssh", message: "Checking trusted SSH", host: "fixture-host" });
 	const progress = SetupProgressSchema.parse(JSON.parse(await readFile(path.join(root, "setup-state.json"), "utf8")));
 	expect(progress.schema).toBe(1);
@@ -73,10 +78,9 @@ test("progress is bounded atomic public JSON and config merging preserves unrela
 	expect(progress).not.toHaveProperty("privateKey");
 	await expect(writeSetupProgress(root, { status: "failed", stage: "failed", message: "x".repeat(1025) })).rejects.toThrow();
 	expect(JSON.parse(await readFile(path.join(root, "setup-state.json"), "utf8"))).toEqual(progress);
-	const controlFile = path.join(root, "bridge", "client.json");
-	const ternPaneSocket = path.join(root, "native daemon.sock");
-	await mergeControlFile(root, controlFile, process.execPath, ternPaneSocket);
-	expect(JSON.parse(await readFile(path.join(root, "config.json"), "utf8"))).toEqual({ theme: "existing", nested: { retained: true }, controlFile, ternExecutable: process.execPath, ternPaneSocket });
+	await mergeControlFile(root, controlFile, process.execPath);
+	expect(JSON.parse(await readFile(path.join(root, "config.json"), "utf8"))).toEqual({ theme: "existing", nested: { retained: true }, controlFile, ternExecutable: process.execPath });
+	expect(await readFile(identityFile, "utf8")).toBe(identity);
 	if (process.platform !== "win32") expect((await stat(path.join(root, "setup-state.json"))).mode & 0o777).toBe(0o600);
 });
 

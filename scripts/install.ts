@@ -11,7 +11,6 @@ import { BridgeError } from "../src/protocol.ts";
 import { packageFiles, packagePath } from "./build.ts";
 import { verifyOmpLoader } from "./verify-omp.ts";
 import { resolveTernExecutable } from "../src/tern-executable.ts";
-import { resolveTernPaneSocket } from "../src/tern-routing.ts";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const PLUGIN_ID = "omp-client-bridge";
@@ -102,7 +101,7 @@ export async function installOmp(target?: string, options: { stateDir?: string; 
 	return { kind: "omp-installed", loader, entrypoint };
 }
 
-export function ternDirectories(target?: string): { config: string; state: string } {
+function ternDirectories(target?: string): { config: string; state: string } {
 	const override = target ?? process.env.TERN_CONFIG_DIR;
 	if (override) return { config: path.resolve(override), state: path.resolve(override) };
 	if (process.platform === "darwin") {
@@ -119,8 +118,8 @@ export function ternDirectories(target?: string): { config: string; state: strin
 	};
 }
 
-export async function installTern(options: { target?: string; controlFile?: string; ternExecutable?: string; ternPaneSocket?: string } = {}): Promise<{
-	kind: "tern-installed"; plugin: string; config: string; controlFile: string; ternExecutable: string; ternPaneSocket?: string;
+export async function installTern(options: { target?: string; controlFile?: string; ternExecutable?: string } = {}): Promise<{
+	kind: "tern-installed"; plugin: string; config: string; controlFile: string; ternExecutable: string;
 }> {
 	const source = packageRoot;
 	const manifestText = await readFile(path.join(source, "plugin.toml"), "utf8");
@@ -136,13 +135,13 @@ export async function installTern(options: { target?: string; controlFile?: stri
 	const dataRoot = path.join(roots.state, "plugin-data");
 	const data = path.join(dataRoot, PLUGIN_ID);
 	const config = path.join(data, "config.json");
-	const controlFile = path.resolve(options.controlFile ?? path.join(defaultStateDir(), "client.json"));
 	for (const directory of [roots.config, roots.state, plugins, dataRoot, data]) await ensureDirectory(directory);
 	if (await readOptional(path.join(plugins, `${PLUGIN_ID}.path`)) !== undefined) throw new BridgeError("INSTALL_CONFLICT", "This Tern plugin is already linked; remove its link explicitly before installing a copy");
 	const saved = await readOptional(config);
 	const previous = saved === undefined ? {} : PluginConfigSchema.parse(JSON.parse(saved));
+	if (options.controlFile === undefined && previous.controlFile !== undefined && (typeof previous.controlFile !== "string" || !path.isAbsolute(previous.controlFile))) throw new BridgeError("INSTALL_PATH", "The saved controlFile is not an absolute metadata path. Correct it explicitly with --control-file before reinstalling.");
+	const controlFile = path.resolve(options.controlFile ?? (previous.controlFile as string | undefined) ?? path.join(defaultStateDir(), "client.json"));
 	const ternExecutable = await resolveTernExecutable({ explicit: options.ternExecutable, saved: previous.ternExecutable });
-	const ternPaneSocket = await resolveTernPaneSocket({ explicit: options.ternPaneSocket, saved: previous.ternPaneSocket, configDirectory: roots.config, isolated: options.target !== undefined });
 	const installedManifest = await readOptional(path.join(plugin, "plugin.toml"));
 	const previousManifest = installedManifest === undefined ? undefined : PluginManifestSchema.parse(Bun.TOML.parse(installedManifest));
 	await ensureDirectory(plugin);
@@ -202,7 +201,8 @@ export async function installTern(options: { target?: string; controlFile?: stri
 		await rm(oldEntry);
 	}
 	await replaceFile(inventoryFile, JSON.stringify({ schema: 1, id: PLUGIN_ID, files }, null, 2) + "\n");
-	await replaceFile(config, JSON.stringify({ ...previous, controlFile, serverControlFile: path.join(path.dirname(controlFile), "server.json"), ternExecutable, ternPaneSocket }, null, 2) + "\n");
+	delete previous.ternPaneSocket;
+	await replaceFile(config, JSON.stringify({ ...previous, controlFile, serverControlFile: path.join(path.dirname(controlFile), "server.json"), ternExecutable }, null, 2) + "\n");
 	await rm(journalFile);
-	return { kind: "tern-installed", plugin, config, controlFile, ternExecutable, ternPaneSocket };
+	return { kind: "tern-installed", plugin, config, controlFile, ternExecutable };
 }

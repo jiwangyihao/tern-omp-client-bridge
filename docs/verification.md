@@ -20,6 +20,38 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## 2026-11-01：未发布的 Tern 0.9.9 原生 UI 优化
+
+本次只修改源码；没有发布新版本、安装到用户 profile 或重启现有服务。
+已发布的 `v0.5.0-beta.2` 附件与历史验收结论不变。
+
+- PiP 改用精确 pane ID 的 `cx.layout:float`，以 `{32,24}` 单元格提示初始化，
+  再通过 `cx.layout:focus` 聚焦；删除外部 CLI、浮窗序号和 daemon socket 路径。
+  后续尺寸与焦点放大由 Tern 管理，不持续覆盖用户调整。
+- macOS Tern 0.9.9 的隔离 headless 原生渲染器中，实际执行了 float/focus：
+  本地及 loopback 远端 pane alias 均保持原 tiled root，焦点落在目标 pane。
+  实际尺寸受原生 frame 限制；这些观察不是固定像素尺寸的跨平台保证。
+- 使用当前 Setup 渲染源码和合成公开快照，检查了原生下拉菜单、SSH 输入框、
+  busy/readonly 状态。选择候选仅改变本地选择；点击 **Use host** 后才产生
+  带 owner、panel、revision 的选择链接。检查中的按钮无执行链接。
+- Bridge 当前渲染源码在相同隔离原生环境中展示了源设备、目标工作区、原生按钮、
+  默认折叠的设备列表和传输区域。没有连接真实 broker、读取剪贴板或安装服务。
+  原生按钮点击产生预期面板链接；断连快照中除关闭按钮外，所有动作均禁用且无链接。
+- TypeScript 检查通过；135 个窗口路由、17 个宿主面板、33 个 Setup 视图、
+  44 个 Setup 协调器场景通过；另有 1670 个 SSH 发现断言、432 个目标协议断言
+  及 9 个只读本地 POSIX 探测用例通过。它们是 SDK/协议边界检查，不是完整 GUI 验收。
+- 两个配置迁移用例通过：成功升级移除旧 socket 字段，保留自定义控制文件、
+  身份和无关设置；失败安装不提前覆盖已有配置。
+  另已通过严格 CLI 参数检查，退休的 socket 参数会被拒绝且不会创建身份。
+  隔离的首次及重复 Setup 集成验证也通过：执行真实安装代码，复用客户端和 broker，
+  保留身份与连接配置，并在两端移除旧 socket 字段；SSH 传输边界由测试替身提供。
+- 本次隔离原生验证进程已退出，确认无临时目录引用后移除了验证目录。
+  清理前后可用空间均约 53 GiB、系统内存空闲比例均为 65%；不将其他进程的
+  资源变化记为本次清理收益。仅保留源码、回归用例、文档与验证记录。
+
+本次未执行完整平台测试矩阵，也未新增原生 Windows GUI、真实远端 OMP 全链路、
+剪贴板/文件选择器或多物理设备验收。历史证据不替代这些缺口。
+
 ## 2026-10-30：v0.5.0-beta.2 发布前验证
 
 此修复版包含下文的原生 Windows 适配和通用 SSH 设置修复，继续标记为 Beta。

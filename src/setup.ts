@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import path from "node:path";
 import { z } from "zod";
-import { installOmp, installTern, ternDirectories } from "../scripts/install.ts";
+import { installOmp, installTern } from "../scripts/install.ts";
 import { defaultStateDir, readEndpoint } from "./config.ts";
 import { BridgeError } from "./protocol.ts";
 import { ServerStateSchema } from "./schemas.ts";
@@ -10,7 +10,6 @@ import { detectRemote, packageArchive, remotePath, setupCommand, shellArgument, 
 import { acquireSetupLock, mergeControlFile, privateDirectory, readOptionalJson, writeSetupProgress } from "./setup-state.ts";
 import { setupReadiness, ternReloadReadiness, type PluginReloadStatus } from "./setup-readiness.ts";
 import { resolveTernExecutable } from "./tern-executable.ts";
-import { resolveTernPaneSocket } from "./tern-routing.ts";
 
 export interface SetupOptions {
 	host: string;
@@ -21,8 +20,6 @@ export interface SetupOptions {
 	ternDir?: string;
 	/** This client's native executable; never forwarded to the agent host. */
 	ternExecutable?: string;
-	/** This client's native daemon route; never forwarded to the agent host. */
-	ternPaneSocket?: string;
 }
 
 const AgentResultSchema = z.object({
@@ -39,7 +36,7 @@ export const SetupResultSchema = z.object({
 export type SetupResult = z.infer<typeof SetupResultSchema>;
 
 /** Runs on the agent host from a durable, dependency-complete private release. */
-export async function setupAgent(options: { remoteRoot: string; packageRoot: string; agentDir?: string; ternDir?: string; ternExecutable?: string; ternPaneSocket?: string }): Promise<z.infer<typeof AgentResultSchema>> {
+export async function setupAgent(options: { remoteRoot: string; packageRoot: string; agentDir?: string; ternDir?: string; ternExecutable?: string }): Promise<z.infer<typeof AgentResultSchema>> {
 	if (process.platform !== "linux" && process.platform !== "darwin") throw new BridgeError("UNSUPPORTED_HOST", "Managed agent-host setup requires POSIX Linux or macOS.");
 	const root = remotePath(options.remoteRoot);
 	await privateDirectory(root);
@@ -47,7 +44,7 @@ export async function setupAgent(options: { remoteRoot: string; packageRoot: str
 	try {
 		// The configured loader uses a BrokerClient option, never process-wide environment mutation.
 		const omp = await installOmp(options.agentDir, { stateDir: root });
-		const tern = await installTern({ target: options.ternDir, controlFile: path.join(root, "client.json"), ternExecutable: options.ternExecutable, ternPaneSocket: options.ternPaneSocket });
+		const tern = await installTern({ target: options.ternDir, controlFile: path.join(root, "client.json"), ternExecutable: options.ternExecutable });
 		const broker = await ensureManagedService({ kind: "server", stateDir: root, packageRoot: options.packageRoot });
 		let pluginReload: PluginReloadStatus = options.ternDir ? "isolated" : "unavailable";
 		let pluginReloadMessage = options.ternDir ? "Host plugin reload is unverified for this isolated directory. Reload its intended Tern daemon explicitly, then retry." : "Native Tern plugin reload is unavailable. Open the intended Tern daemon, verify omp-client-bridge is ready and retry.";
@@ -102,7 +99,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
 		const config = await readOptionalJson(path.join(data, "config.json"));
 		const parsedConfig = config === undefined ? {} : z.record(z.string(), z.unknown()).parse(config);
 		const ternExecutable = await resolveTernExecutable({ explicit: options.ternExecutable, saved: parsedConfig.ternExecutable });
-		const ternPaneSocket = await resolveTernPaneSocket({ explicit: options.ternPaneSocket, saved: parsedConfig.ternPaneSocket, configDirectory: ternDirectories().config });
 		await progress("checking-ssh", "Checking the selected trusted SSH host and its platform; no host-key or password prompts are bypassed.");
 		const remote = await detectRemote(options.host, log, options.remoteRoot);
 		await progress("staging-package", "Staging the bridge in a durable private directory on the agent host and preparing compatible runtime dependencies.");
@@ -131,7 +127,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
 		if (!registration.success || registration.data.deviceId !== client.deviceId) throw new BridgeError("CLIENT_HOST_CONFLICT", "This local client is not registered on the selected broker. It may still belong to another host; use its original configuration or stop it explicitly before retrying. Setup did not replace it.");
 		const health = await serviceHealth("client", stateDir);
 		if (!health.connected || health.deviceId !== client.deviceId) throw new BridgeError("CLIENT_NOT_READY", "The signed client disconnected before setup completed. Check SSH connectivity and retry; the plugin configuration was not changed.");
-		await mergeControlFile(data, client.controlFile, ternExecutable, ternPaneSocket);
+		await mergeControlFile(data, client.controlFile, ternExecutable);
 		const completion = setupReadiness({ sessionReady: health.sessionReady, pluginReload: agent.pluginReload, pluginReloadMessage: agent.pluginReloadMessage, client, broker: agent.broker });
 		await writeSetupProgress(data, { ...completion, host: options.host, controlFile: client.controlFile });
 		return SetupResultSchema.parse({ schema: 1, kind: "setup-complete", status: completion.status, stage: completion.stage, host: options.host, controlFile: client.controlFile, message: completion.message, remote: agent, client: { ...client, sessionReady: health.sessionReady } });
