@@ -1,12 +1,14 @@
 # 安装指南
 
-本文面向安装或升级到 `v0.5.0-beta.4` 的用户。推荐先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Set up Bridge** 中授权远端初始化。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
+本文面向安装或升级到 `v0.5.0-beta.5` 的用户。首次安装先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Start / repair Bridge** 中授权初始化。已经初始化的安装在插件重载后自动维护本机客户端，不需要每次重新运行完整 Setup。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
 
 这是包含原生 UI 增强、原生权限、运行时引导、命名管道、上传发布及通用 SSH 设置修复的预发布版本。`v0.5.0-beta.1` 的 Windows CI 失败记录与旧附件保留不变；不要将旧附件视为已更新。macOS PiP 几何与焦点目前在隔离无头渲染器中验收，完整跨设备 GUI 行为仍需分别验收。[原生平台 CI](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/workflows/native-runtime.yml)、[验证记录](verification.md)与[兼容性说明](compatibility.md)区分发布版本、实际验证和未验收范围。
 
 > **注意（Beta.3 新增 UI 与依赖调整）**：本版本已经重构了原生界面与路由机制，包括支持原生的 `exact-pane` 画中画（PiP）浮动与焦点夺取（使用终端 cell 单位提示尺寸，由原生框架约束）、使用原生控件（输入、下拉框、状态指示器等）重写 Setup/Bridge 界面并移除了 Bridge 的 CSS（Setup 仅保留根节点边距样式及地址溢出换行）。同时，完全废弃了 `--tern-pane-socket` 路由方式，在升级合并安装时会自动移除旧有 socket 字段配置（但保留 `ternExecutable` 及自定义 `controlFile`）。新的原生 UI 功能要求 Tern 版本 `>=0.9.9`。
 
-> **Beta.4 启动恢复**：明确安装后保存私有 `client-resume.json`，允许后续 Tern 启动恢复同一本机客户端。恢复保留身份与会话绑定，检查原运行时和包摘要，不自动重新安装远端组件。Beta.3 及更早安装没有这份授权，需要一次明确的 Setup 迁移。历史 `ready` 不代表服务当前在线；界面分别显示本机启动、等待连接和启动失败。删除恢复授权可阻止未来自动启动，但不会停止已经运行的服务。
+> **Beta.5 自动维护**：Tern 加载及窗口运行期间恢复同一本机客户端，并采用已安装插件对应的已校验私有运行包。Beta.3 及更早安装如果保留完整且一致的安装记录、身份和主机配置，会自动迁移；未知、损坏或冲突的记录不会被猜测补齐。更新等待在途操作、传输快照和持久执行上下文释放，通过认证的空闲停机接口切换，不按 PID 强杀。新版启动失败时，在原授权仍有效且没有其他活进程占用的条件下恢复已验证旧包，并退避重试。历史 `ready` 不代表当前在线；只有签名注册完成才显示连接成功。
+
+> **撤销自动恢复**：删除 `client-resume.json`，保留 `client-resume-initialized.json`。初始化标记防止已撤销授权被当作旧安装重新迁移；不要清空整个状态目录。删除授权不会停止正在运行的客户端。自动更新不重写已有连接授权，也不更换身份、主机或会话绑定。
 
 ## 1. 准备本机与 Agent 主机
 
@@ -42,12 +44,12 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 
 ## 2. 下载并校验发行包
 
-打开 [`v0.5.0-beta.4` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.4)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
+打开 [`v0.5.0-beta.5` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.5)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
 
 | 建议使用环境 | 附件 |
 | --- | --- |
-| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.4.tar.gz` |
-| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.4.zip` |
+| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.5.tar.gz` |
+| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.5.zip` |
 
 两种压缩包包含相同的源码保留型包结构，没有捆绑 `node_modules`、凭据或原生可执行文件。本指南使用上述发行附件，不使用 GitHub 自动生成的 **Source code** 压缩包。校验和用于核对下载内容，不能替代对发行来源的信任。
 
@@ -56,7 +58,7 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 在一个新的下载目录中执行，避免覆盖已有的解压目录。
 
 ```sh
-version=v0.5.0-beta.4
+version=v0.5.0-beta.5
 package="tern-omp-client-bridge-$version"
 archive="$package.tar.gz"
 base="https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$version"
@@ -91,7 +93,7 @@ tern plugin install "$(pwd)/$package"
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$Version = 'v0.5.0-beta.4'
+$Version = 'v0.5.0-beta.5'
 $Package = "tern-omp-client-bridge-$Version"
 $Archive = "$Package.zip"
 $Base = "https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$Version"
@@ -113,17 +115,17 @@ tern plugin install $PackageRoot
 
 ### 确认包根目录与已有安装
 
-解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.3`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
+解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.5`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
 
-原生 `tern plugin install` 会复制插件并重载插件列表，不会因此下载 Bridge 运行时、连接 SSH 或启动 Bridge 服务。
+原生 `tern plugin install` 会复制插件并重载插件列表。从未初始化的安装仍需首次授权；已有有效授权或可验证旧安装的窗口会自动准备本机运行包、恢复或更新客户端，不会因此重装远端或重启共享 broker。
 
-- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.3" --force`。
+- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.5" --force`。
 - **已有 linked package** 时，`--force` 不会覆盖链接。若确定切换为发行包副本，先执行 `tern plugin unlink omp-client-bridge`，再安装解压目录；保留原链接指向的源码目录。不要直接删除 `.path` 文件或对未知目录递归删除。
 - 多 profile 或隔离配置必须与实际使用的 Tern daemon 一致。新 profile 需要单独完成正常登录与首次设置，不能复制其他 profile 的凭据。
 
-此时只完成了插件安装，继续下一节。
+首次安装继续下一节；已有安装先观察自动维护及连接结果，不要因为短暂的准备、重连或等待安全切换而重复初始化。
 
-当前源码的启动恢复修复将入口命名为 **OMP → Start / repair Bridge**（已发布 beta.3 的名称仍是 **Set up Bridge**）。本地服务不可达或连接断开时，状态入口和 Toggle Bridge 会打开同一启动侧栏，而不是反复显示错误提示。该入口沿原有授权流程准备两端组件并启动或复用服务；不会静默改选主机、绑定设备或重启 OMP。恢复连接后，Toggle Bridge 回到普通面板。
+入口为 **OMP → Start / repair Bridge**。正常离线和暂时启动失败会自动重试；需要人工检查的授权、身份或配置冲突保留明确错误。该入口可用于显式修复，但不会静默改选主机、绑定设备或重启 OMP。恢复连接后，Toggle Bridge 回到普通面板。
 
 ## 3. 在侧栏授权初始化
 
@@ -187,7 +189,7 @@ bun src/cli.ts setup \
 | 引导只显示笼统的运行时失败 | 查看私有 `setup.log` 中的实际阶段。Windows 引导保留 preparer 的退出码与详细进度，不因子进程 stderr 覆盖后端错误，也不将原始诊断公开到界面。 |
 | `host_sdk_mismatch` 或原生 loader 拒绝扩展 | 核对实际 OMP 与固定 SDK 的兼容性，使用原生扩展安装/加载路径。单独用 Bun 导入模块成功不足以证明兼容；不要替换安全策略来绕过。保留完整包路径，修复后新建 OMP 会话。 |
 | 一直显示 `Awaiting OMP session` | 确认新会话位于安装目标主机，已加载 Bridge 扩展并打开 **Toggle Bridge**。本地 OMP 会话不能完成远端目标的握手；查看是否另有主机插件重载或服务升级要求，不要反复清空状态重装。 |
-| **Reload host plugin** / **Service update required** | 前者要求在正确 daemon 中确认主机插件加载；后者说明已安装新文件但仍在运行旧服务。先确认服务归属和活动任务，在安全维护时段显式处理对应服务，再重试同一目标；连接成功不会消除这些要求。 |
+| **Reload host plugin** / **Service update required** | 核对是远端主机组件还是本机客户端。已有受管理客户端由自动维护安全更新；不具备可验证停机接口的旧进程和手工服务不会被强制接管。共享 broker、远端插件及 OMP 扩展的维护仍需单独审核，不能将客户端连接成功误报为这些组件已经升级。 |
 | 浏览器不可用、没有桌面权限或无法控制窗口 | 检查本机 backend、正常登录且未锁定的交互桌面、操作系统权限及实时人工授权。Bridge 不绕过这些要求；不要借用其他 profile 或改用管理员账号。连接与绑定成功不代表权限齐备，Windows GUI 仍属未验收范围。 |
 | 安装中断、锁归属未知或缺少完成回执 | 回到原目标查看保留的侧栏状态与私有日志。只有确认没有其他初始化运行后，才使用界面提供的显式恢复操作。缺少回执表示结果未确认，不能当作成功；不要删除整个状态目录或夺取活跃锁。 |
 
@@ -198,11 +200,12 @@ bun src/cli.ts setup \
 ### 升级与回退
 
 1. 为新版本保留独立下载与解压目录，重新校验其 `SHA256SUMS`，不要覆盖旧的不可变运行包。
-2. 保持原来的客户端身份和状态目录。按第 2 节更新插件副本，在相同目标重新打开 **Set up Bridge** 并审核安装。broker、client、OMP 扩展和 Tern 两端插件需要配套更新。
-3. 安装器会保留健康的已有服务；文件更新不等于正在运行的代码已更新。出现服务升级要求时，先等待活动操作结束，由服务原有所有者在维护时段显式停止旧服务，再重新初始化。手工前台服务可在原终端用 Ctrl+C 停止；setup 的脱离终端服务需先依据私有记录确认进程归属。本包不提供统一的服务停止命令，不要无差别结束 Bun、OMP 或 Tern 进程。
-4. 通过新 OMP 会话重新观察就绪状态，并在需要时重新绑定。broker 重启会使旧执行上下文失效；保留身份不等于恢复原来的 Eval 内核或所有会话绑定。
+2. 保持原来的身份、状态目录和安装方式，更新本机插件并重载。自动维护会使用已安装插件准备不可变运行包，不会后台拉取尚未安装的其他发行版本，也不要求每次重做 Setup。
+3. 更新中存在调用、传输、待使用快照或持久执行上下文时，旧客户端继续工作，界面显示等待安全切换；释放后自动再检查。无法核实归属或安全停机能力时不强制结束进程。仅有文件更新不代表运行中的代码已经更新。
+4. 新版分离进程启动失败时，自动维护在授权和旧包均有效、没有其他活进程占用的条件下恢复旧客户端，显示回退状态并冷却重试。不会重写连接授权，不会停止共享 broker，也不自动改变绑定。
+5. 远端组件升级、协议不兼容或主机插件修复仍通过明确审核的 Setup 完成。需要加载新的 OMP 扩展时使用新会话；客户端自动维护本身不会重启现有 OMP 会话。
 
-本版本为首个公开预发布，暂不提供更早的公开回退包。后续若需回退，应使用自己保留且已校验、确认兼容的旧包，让两端组件一起回退，并复用原身份；不保证任意版本之间的状态向后兼容。任何服务或 loader 仍引用的旧包、依赖及路径都必须保留，不能仅因为新版本已解压就删除。
+手工回退应使用已校验且确认兼容的发行包，并复用原身份；不保证任意版本间的状态向后兼容。自动回退只使用此前已认证且仍通过摘要校验的运行包。任何服务、loader 或恢复授权仍引用的旧包、依赖及路径都必须保留，不能仅因新版本已解压就删除。
 
 ### 安全移除
 

@@ -721,17 +721,21 @@ SIGTERM; redirecting stdin from an already closed stream is not a daemonization
 method. There is no installed service manager. Wait for shutdown before starting
 another broker in the same state root.
 
-Since beta.4, explicitly approved setup saves a private `client-resume.json` in
-the plugin data directory. On a later Tern start, the plugin may resume that same
-local client using its existing identity, runtime and verified package. Recovery
-does not reinstall remote components, restart OMP sessions or change bindings.
-Older installations without this approval require one explicit Setup migration.
-After observing a healthy local endpoint, the loaded plugin does not automatically
-restart a subsequently stopped client; **Start / repair Bridge** allows an explicit
-retry. A healthy client reconnecting over SSH is not replaced with another process.
-Delete `client-resume.json` to revoke future automatic starts, and separately stop
-the running service if required. Missing or mismatched identity fails recovery
-without generating replacement keys. Historical setup `ready` is not live health.
+自 beta.5 起，Tern 加载及窗口运行期间通过统一的本机维护入口自动恢复客户端，
+并跟随已安装插件准备、校验和切换私有运行包。完整且一致的旧安装记录可自动
+迁移；不会为缺少新恢复文件重复重装远端，也不会猜测主机、生成替代身份或改绑。
+从未初始化、身份缺失或记录冲突的安装仍须明确审核，历史 `ready` 不代表在线。
+
+已经健康但正在重新连接 SSH 的客户端继续自行重连，不重复拉起。客户端退出
+或暂时维护失败会退避重试。更新等待在途调用、未释放快照及持久执行上下文结束；
+通过认证的空闲停机接口切换，不按旧 PID 强杀。新版启动失败时安全恢复已验证
+旧包，并保留冷却期，避免反复中断可用客户端。共享 broker 和 OMP 会话不重启。
+
+删除 `client-resume.json` 撤销未来自动启动，并保留 `client-resume-initialized.json`，
+防止撤销被误识别为尚未迁移的旧安装。已有授权在自动更新中保持不变；启动器
+和分离子进程再次校验授权摘要、配置、身份及执行包。删除授权不停止当前服务，
+如需停用，还应按原有所有权安全关闭它。手工服务不会被自动维护强制接管。
+这些机制属于 Tern 插件及既有客户端，不安装全系统启动服务或改变登录配置。
 
 
 A dropped transport reconnects and authenticates again, but operations, uploads,

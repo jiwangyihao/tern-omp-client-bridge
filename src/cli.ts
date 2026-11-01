@@ -76,7 +76,7 @@ const OPTIONS: Record<string, readonly string[]> = {
 	"setup-agent": ["remote-root", "package-root", "agent-dir", "tern-dir", "tern-executable"],
 	"setup-status": ["state-dir", "device-id"],
 	"managed-start": ["kind", "state-dir", "package-root", "host", "remote-command"],
-	"managed-service": ["kind", "state-dir", "package-root", "host", "remote-command", "expected-device-id", "expected-package-digest", "resume-plugin-data"],
+	"managed-service": ["kind", "state-dir", "package-root", "host", "remote-command", "expected-device-id", "expected-package-digest", "expected-resume-digest", "resume-plugin-data"],
 };
 
 function argumentsFor(command: string, args: string[]): Map<string, string> {
@@ -168,7 +168,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 		case "managed-service": {
 			const kind = z.enum(["server", "client"]).safeParse(required("kind"));
 			if (!kind.success) throw new BridgeError("USAGE", "--kind must be server or client");
-			const managed = { kind: kind.data, stateDir: path.resolve(required("state-dir")), packageRoot: path.resolve(required("package-root")), host: options.get("host"), remoteCommand: options.get("remote-command"), expectedDeviceId: options.get("expected-device-id"), expectedPackageDigest: options.get("expected-package-digest"), resumePluginData: options.get("resume-plugin-data") };
+			const managed = { kind: kind.data, stateDir: path.resolve(required("state-dir")), packageRoot: path.resolve(required("package-root")), host: options.get("host"), remoteCommand: options.get("remote-command"), expectedDeviceId: options.get("expected-device-id"), expectedPackageDigest: options.get("expected-package-digest"), expectedResumeDigest: options.get("expected-resume-digest"), resumePluginData: options.get("resume-plugin-data") };
 			if (command === "managed-start") console.log(JSON.stringify(await ensureManagedService(managed)));
 			else await runManagedService(managed);
 			return;

@@ -30,6 +30,7 @@ interface FixtureOptions {
 	cancelTooLate?: boolean;
 	readClipboardImage?: ClientServiceOptions["readClipboardImage"];
 	readClipboardText?: ClientServiceOptions["readClipboardText"];
+	lifecycle?: { instance: string; packageDigest: string; onShutdown: () => void };
 	beforeIntentReceipt?: (peer: RpcPeer, input: z.infer<typeof UiIntentSchema>, receipt: z.infer<typeof ReceiptSchema>) => Promise<void>;
 }
 const cleanup: Array<() => Promise<void>> = [];
@@ -136,7 +137,7 @@ async function fixture(options: FixtureOptions = {}) {
 		close(socket) { sockets.delete(socket); socket.data.peer?.close(); },
 	} });
 	cleanup.push(async () => { for (const socket of sockets) socket.close(); await server.stop(true); });
-	const client = await startClientService({ identity, readClipboardImage: options.readClipboardImage ?? (async () => undefined), readClipboardText: options.readClipboardText ?? (async () => undefined), stateDir: join(root, "client"), cwd: root, serverName: "Synthetic server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${server.port}`, token } } });
+	const client = await startClientService({ identity, lifecycle: options.lifecycle, readClipboardImage: options.readClipboardImage ?? (async () => undefined), readClipboardText: options.readClipboardText ?? (async () => undefined), stateDir: join(root, "client"), cwd: root, serverName: "Synthetic server", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${server.port}`, token } } });
 	cleanup.push(() => client.close());
 	const peer = await firstRegistration.promise;
 	await client.waitForConnection();
@@ -171,6 +172,57 @@ const ResultFrameSchema = z.object({ kind: z.literal("result"), ok: z.boolean(),
 function text(result: ToolResult): string {
 	return result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
 }
+
+test("managed client updates require authenticated ownership and preserve retained execution contexts", async () => {
+	const instance = crypto.randomUUID();
+	const packageDigest = "a".repeat(64);
+	const stopped = Promise.withResolvers<void>();
+	const f = await fixture({ lifecycle: { instance, packageDigest, onShutdown: () => { void f.client.close().then(stopped.resolve, stopped.reject); } } });
+	const unauthorized = await fetch(f.client.endpoint.url + "/v1/lifecycle");
+	expect(unauthorized.status).toBe(401);
+	await unauthorized.arrayBuffer();
+	const lifecycle = await f.api("/v1/lifecycle");
+	expect(lifecycle.response.status).toBe(200);
+	expect(lifecycle.value).toMatchObject({ instance, packageDigest, deviceId: f.identity.device.id, busy: false });
+	const wrongOwner = await f.api("/v1/lifecycle/shutdown", { instance: crypto.randomUUID(), packageDigest });
+	expect(wrongOwner.response.status).toBe(409);
+	expect(wrongOwner.value).toMatchObject({ code: "SERVICE_CONFLICT" });
+	const first = ToolResultSchema.parse(await f.peer.request("execute", f.invocation("eval", { language: "js", code: "globalThis.maintenanceValue = 41; print(globalThis.maintenanceValue)" })));
+	expect(text(first)).toContain("41");
+	const busy = await f.api("/v1/lifecycle/shutdown", { instance, packageDigest });
+	expect(busy.response.status).toBe(409);
+	expect(busy.value).toMatchObject({ code: "CLIENT_UPDATE_BUSY" });
+	const retained = ToolResultSchema.parse(await f.peer.request("execute", f.invocation("eval", { language: "js", code: "print(globalThis.maintenanceValue + 1)" })));
+	expect(text(retained)).toContain("42");
+	await f.peer.request("context.close", { contextId: "native-context" });
+	const accepted = await f.api("/v1/lifecycle/shutdown", { instance, packageDigest });
+	expect(accepted.response.status).toBe(200);
+	expect(accepted.value).toMatchObject({ accepted: true });
+	await stopped.promise;
+	await expect(fetch(f.client.endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${f.client.endpoint.token}` } })).rejects.toThrow();
+}, 60000);
+
+test("managed client updates wait for unclaimed human captures", async () => {
+	const instance = crypto.randomUUID();
+	const packageDigest = "b".repeat(64);
+	const stopped = Promise.withResolvers<void>();
+	const f = await fixture({ lifecycle: { instance, packageDigest, onShutdown: () => { void f.client.close().then(stopped.resolve, stopped.reject); } } });
+	const selected = join(f.root, "selected.txt");
+	await writeFile(selected, "human-selected bytes");
+	const captured = await f.api("/v1/captures", { kind: "files", paths: [selected] });
+	expect(captured.response.status).toBe(200);
+	const capture = CaptureSchema.parse(captured.value);
+	const busy = await f.api("/v1/lifecycle/shutdown", { instance, packageDigest });
+	expect(busy.response.status).toBe(409);
+	expect(busy.value).toMatchObject({ code: "CLIENT_UPDATE_BUSY" });
+	expect((await f.api("/v1/lifecycle")).value).toMatchObject({ busy: true, draining: false });
+	expect((await f.api("/v1/captures/release", { id: capture.id })).response.status).toBe(200);
+	expect((await f.api("/v1/lifecycle")).value).toMatchObject({ busy: false });
+	const accepted = await f.api("/v1/lifecycle/shutdown", { instance, packageDigest });
+	expect(accepted.response.status).toBe(200);
+	await stopped.promise;
+	expect(await readFile(selected, "utf8")).toBe("human-selected bytes");
+}, 30000);
 
 test("local capture rejects clipboard commands and malformed requests before capture or upload", async () => {
 	const f = await fixture();

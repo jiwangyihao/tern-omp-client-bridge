@@ -133,58 +133,96 @@ local function samePath(a, b)
 end
 
 local function queueRecovery(config)
-	if recovery.attempted or setupBusy then return false end
+	if type(config) ~= "table" or setupBusy or recovery.pending or recovery.queued or recovery.blocked then return false end
+	if recovery.attempted and (recovery.retryAt or 0) > 0 and tern.now() >= recovery.retryAt then recovery.attempted = false end
+	if recovery.attempted then return false end
 	recovery.attempted, recovery.queued, recovery.config = true, true, config
-	recovery.phase, recovery.message = "starting", "Starting this device's authorized local Bridge"
+	recovery.readStep, recovery.plan, recovery.runtime = "plan", nil, nil
+	recovery.phase, recovery.message = "starting", "Maintaining this device's authorized local Bridge"
 	statusError, setupRequired = nil, false
 	return true
 end
 
-local function failRecovery(message)
+local function failRecovery(message, retryable)
 	recovery.phase, recovery.message = "failed", message
 	recovery.pending, recovery.receipt, recovery.queued = nil, nil, nil
 	recovery.manualOrigin, recovery.openSetup = nil, nil
+	recovery.failures = (recovery.failures or 0) + 1
+	recovery.notifyFailure = recovery.failures == 1
+	recovery.attempted, recovery.blocked = true, not retryable
+	recovery.retryAt = retryable and (tern.now() + math.min(60000, 3000 * 2 ^ math.min(recovery.failures - 1, 5))) or 0
 	statusError = message
 end
 
--- Called only by the fresh poll timer. A process receipt never parses JSON,
--- performs IO, schedules native callbacks, or captures a window context.
+local function recoveryUnavailable(cx)
+	recovery.queued, recovery.readStep, recovery.pending = nil, nil, nil
+	recovery.attempted, recovery.blocked, recovery.retryAt = true, false, tern.now() + 30000
+	local online = connection ~= nil and not serviceUnavailable
+	recovery.phase, recovery.message = nil, "Automatic recovery is not authorized for this installation"
+	if not online then recovery.phase = "absent" end
+	setupRequired, statusError = not online, nil
+	if recovery.openSetup then
+		recovery.openSetup, recovery.fallback = nil, true
+		setupBridge(cx)
+		recovery.fallback = nil
+	end
+end
+
+-- One metadata read per fresh timer turn. Process callbacks only deposit receipts.
 local function advanceRecovery(cx)
 	if recovery.queued then
-		recovery.queued = nil
-		local plan, phase = readMetadata(tern.plugin.data .. "/client-resume.json", "local Bridge recovery authorization")
-		if not plan then
-			if phase == "missing" then
-				recovery.phase, recovery.message = "absent", "Open Setup to authorize local Bridge recovery on this device"
-				setupRequired, statusError = true, nil
-				if recovery.openSetup then
-					recovery.openSetup, recovery.fallback = nil, true
-					setupBridge(cx)
-					recovery.fallback = nil
-				end
-			else failRecovery("Cannot read local Bridge recovery authorization; inspect its private file and permissions, then use Start / repair Bridge") end
+		if recovery.readStep == "plan" then
+			local plan, phase = readMetadata(tern.plugin.data .. "/client-resume.json", "local Bridge recovery authorization")
+			if not plan then
+				if phase == "missing" then recovery.readStep = "marker"
+				else failRecovery("Cannot read local Bridge recovery authorization; inspect its private file and permissions") end
+				return true
+			end
+			local valid = plan.schema == 1 and plan.kind == "client-resume" and absolutePath(tern.plugin.data) and absolutePath(tern.plugin.dir)
+			local fields = { schema = true, kind = true, host = true, remoteCommand = true, stateDir = true, controlFile = true, packageRoot = true, runtime = true, deviceId = true, packageDigest = true }
+			for key in plan do if not fields[key] then valid = false end end
+			for _, key in { "stateDir", "controlFile", "packageRoot", "runtime" } do valid = valid and absolutePath(plan[key]) end
+			for _, key in { "host", "remoteCommand", "deviceId" } do valid = valid and type(plan[key]) == "string" and plan[key] ~= "" and not plan[key]:find("%c") end
+			valid = valid and type(plan.packageDigest) == "string" and #plan.packageDigest == 64 and plan.packageDigest:match("^[a-f0-9]+$") ~= nil
+			valid = valid and samePath(plan.controlFile, recovery.config.controlFile) and samePath(plan.controlFile, plan.stateDir:gsub("[/\\]+$", "") .. "/client.json")
+			if not valid then failRecovery("Invalid or mismatched local Bridge recovery authorization; inspect the installed configuration"); return true end
+			recovery.plan, recovery.runtime, recovery.readStep = plan, plan.runtime, "launch"
+			return true
+		elseif recovery.readStep == "marker" then
+			local marker, phase = readMetadata(tern.plugin.data .. "/client-resume-initialized.json", "local recovery initialization record")
+			if marker then recoveryUnavailable(cx)
+			elseif phase == "missing" then recovery.readStep = "legacy"
+			else failRecovery("Cannot verify local recovery revocation; no client was started") end
+			return true
+		elseif recovery.readStep == "legacy" then
+			local previous, phase = readMetadata(tern.plugin.data .. "/setup-state.json", "previous Bridge setup result")
+			if not previous then
+				if phase == "missing" then recoveryUnavailable(cx) else failRecovery("Cannot verify the previous Bridge installation") end
+				return true
+			end
+			if previous.schema ~= 1 or (previous.status ~= "ready" and previous.status ~= "awaiting_session") or type(previous.controlFile) ~= "string" or not samePath(previous.controlFile, recovery.config.controlFile) or type(previous.host) ~= "string" or previous.host == "" or previous.host:find("%c") then recoveryUnavailable(cx); return true end
+			recovery.legacyHost, recovery.readStep = previous.host, "legacy-runtime"
+			return true
+		elseif recovery.readStep == "legacy-runtime" then
+			local directory = recovery.config.controlFile:match("^(.*)[/\\][^/\\]+$")
+			if not directory then failRecovery("Invalid earlier client state directory"); return true end
+			local record, phase = readMetadata(directory .. "/client.managed.json", "previous managed client record")
+			if record then
+				if record.schema ~= 1 or record.kind ~= "client" or record.ownership ~= "managed" or (record.host ~= nil and record.host ~= recovery.legacyHost) or not absolutePath(record.runtime) then failRecovery("The earlier client ownership or runtime cannot be verified"); return true end
+				recovery.runtime = record.runtime
+			elseif phase == "missing" then recovery.runtime = tern.plugin.data .. "/runtime/" .. (tern.runtime.os == "windows" and "bun.exe" or "bun")
+			else failRecovery("Cannot read the earlier client ownership record"); return true end
+			recovery.readStep = "launch"
 			return true
 		end
-		local valid = plan.schema == 1 and plan.kind == "client-resume" and absolutePath(tern.plugin.data)
-		local fields = { schema = true, kind = true, host = true, remoteCommand = true, stateDir = true,
-			controlFile = true, packageRoot = true, runtime = true, deviceId = true, packageDigest = true }
-		for key in plan do if not fields[key] then valid = false end end
-		for _, key in { "stateDir", "controlFile", "packageRoot", "runtime" } do valid = valid and absolutePath(plan[key]) end
-		for _, key in { "host", "remoteCommand", "deviceId" } do valid = valid and type(plan[key]) == "string" and plan[key] ~= "" and not plan[key]:find("%c") end
-		valid = valid and type(plan.packageDigest) == "string" and #plan.packageDigest == 64 and plan.packageDigest:match("^[a-f0-9]+$") ~= nil
-		valid = valid and samePath(plan.controlFile, recovery.config.controlFile)
-			and samePath(plan.controlFile, plan.stateDir:gsub("[/\\]+$", "") .. "/client.json")
-		if not valid then
-			failRecovery("Invalid or mismatched local Bridge recovery authorization; inspect the installed configuration before retrying Setup")
-			return true
-		end
-		recovery.plan, recovery.openSetup, recovery.manualOrigin = plan, nil, nil
-		local pending = { deadline = tern.now() + 45000 }
+		if not absolutePath(recovery.runtime) or not absolutePath(tern.plugin.dir) or not absolutePath(tern.plugin.data) then failRecovery("Invalid local maintenance launch path"); return true end
+		recovery.queued, recovery.readStep, recovery.openSetup, recovery.manualOrigin = nil, nil, nil, nil
+		local pending = { deadline = tern.now() + 900000 }
 		recovery.pending = pending
-		local started = pcall(tern.process.run, { plan.runtime, plan.packageRoot:gsub("[/\\]+$", "") .. "/src/cli.ts", "resume-client", "--plugin-data", tern.plugin.data }, { timeout_ms = 45000 }, function(result)
+		local started = pcall(tern.process.run, { recovery.runtime, tern.plugin.dir .. "/scripts/build.ts", "maintain-client", tern.plugin.dir, tern.plugin.data }, { timeout_ms = 900000 }, function(result)
 			if recovery.pending == pending then recovery.receipt = result or false end
 		end)
-		if not started then failRecovery("Cannot start the authorized local Bridge runtime; inspect the installed package and use Start / repair Bridge") end
+		if not started then failRecovery("Cannot start local Bridge maintenance; it will retry without changing the remote host", true) end
 		return true
 	end
 	if not recovery.pending then return false end
@@ -192,28 +230,37 @@ local function advanceRecovery(cx)
 	if result == nil and tern.now() < recovery.pending.deadline then return true end
 	local timedOut = result == nil or (type(result) == "table" and result.timed_out == true)
 	recovery.pending, recovery.receipt = nil, nil
-	if timedOut then
-		failRecovery("Local Bridge startup timed out; inspect the private client service log, then use Start / repair Bridge. No service was stopped.")
-		return true
-	end
-	if type(result) ~= "table" or result.status ~= 0 or type(result.stdout) ~= "string" or #result.stdout > 16384 then
-		failRecovery("Local Bridge startup failed; inspect the private client service log and authorized package, then use Start / repair Bridge")
-		return true
-	end
+	if timedOut then failRecovery("Local Bridge maintenance timed out; automatic recovery will retry without forcing any service", true); return true end
+	if type(result) ~= "table" or result.status ~= 0 then failRecovery("Local Bridge maintenance could not finish; it will retry automatically", true); return true end
+	if type(result.stdout) ~= "string" or #result.stdout > 65536 then failRecovery("Local maintenance returned invalid output"); return true end
 	local ok, value = pcall(tern.json.decode, result.stdout)
+	if not ok or type(value) ~= "table" then failRecovery("Local maintenance returned no verified result"); return true end
+	if value.kind == "client-maintenance" then
+		if value.status == "disabled" or value.status == "setup-required" then recoveryUnavailable(cx)
+		elseif value.status == "retry" then failRecovery("Local Bridge maintenance is waiting for a safe retry; existing services were not forced", true)
+		else failRecovery("Local Bridge maintenance needs attention; inspect its private maintenance log and authorization") end
+		return true
+	end
 	local plan = recovery.plan
-	if not ok or type(value) ~= "table" or value.kind ~= "client-resumed"
-		or type(value.controlFile) ~= "string" or not samePath(value.controlFile, plan.controlFile)
-		or type(value.stateDir) ~= "string" or not samePath(value.stateDir, plan.stateDir) or value.deviceId ~= plan.deviceId
+	if value.kind ~= "client-resumed" or type(value.controlFile) ~= "string" or not samePath(value.controlFile, recovery.config.controlFile)
+		or type(value.stateDir) ~= "string" or not samePath(value.controlFile, value.stateDir:gsub("[/\\]+$", "") .. "/client.json")
+		or type(value.deviceId) ~= "string" or value.deviceId == "" or (plan and value.deviceId ~= plan.deviceId)
 		or type(value.pid) ~= "number" or value.pid <= 0 or value.pid % 1 ~= 0
 		or type(value.connected) ~= "boolean" or type(value.reused) ~= "boolean"
 		or (value.ownership ~= "managed" and value.ownership ~= "existing")
-		or type(value.sessionReady) ~= "boolean" or value.upgradeRequired ~= false then
-		failRecovery("Local Bridge startup returned no matching verified result; inspect its private service log before retrying")
+		or type(value.sessionReady) ~= "boolean" or type(value.upgradeRequired) ~= "boolean" then
+		failRecovery("Local Bridge maintenance returned no matching verified client; no result was adopted")
 		return true
 	end
-	recovery.phase, recovery.message = "waiting", "Waiting for connection to the local Bridge"
-	connection, connectionConfig, statusError = nil, nil, nil
+	recovery.failures, recovery.blocked, recovery.attempted = 0, false, true
+	local retryDelay = 10000
+	if type(value.retryAfterMs) == "number" and value.retryAfterMs == value.retryAfterMs and value.retryAfterMs > 0 and value.retryAfterMs < math.huge then retryDelay = math.clamp(value.retryAfterMs, 1000, 60000) end
+	recovery.updateDeferred = value.updateDeferred == "rollback" and "rollback" or nil
+	recovery.retryAt = value.upgradeRequired and (tern.now() + retryDelay) or 0
+	recovery.phase = value.upgradeRequired and "pending" or "waiting"
+	recovery.message = not value.upgradeRequired and "Waiting for connection to the local Bridge" or (recovery.updateDeferred == "rollback" and "The update failed; the previous client is running while automatic retry waits" or "Waiting for a safe client update")
+	if not value.reused or serviceUnavailable or not connection then connection, connectionConfig = nil, nil end
+	statusError = nil
 	return true
 end
 
@@ -625,7 +672,7 @@ setupBridge = function(cx)
 		return
 	end
 	if installedConfig and (endpointMissing or serviceUnavailable) and not recovery.fallback and not setupBusy then
-		recovery.attempted, recovery.phase = false, nil
+		recovery.attempted, recovery.phase, recovery.blocked, recovery.retryAt, recovery.failures = false, nil, false, 0, 0
 		recovery.openSetup = true
 		-- Re-read current config/endpoint before admitting an explicit local retry.
 		connection, connectionConfig = nil, nil
@@ -1054,8 +1101,9 @@ end
 
 local function poll(cx)
 	if pollBusy then return end
-	if advanceRecovery(cx) then
-		if recovery.phase == "failed" and cx then cx:toast("error", "OMP Client Bridge", recovery.message) end
+	local advancedRecovery = advanceRecovery(cx)
+	if recovery.notifyFailure and cx then recovery.notifyFailure = nil; cx:toast("error", "OMP Client Bridge", recovery.message) end
+	if advancedRecovery and not connection then
 		expirePending(cx)
 		refreshChrome()
 		tern.timer(recovery.pending and 500 or 0, poll)
@@ -1073,6 +1121,7 @@ local function poll(cx)
 	api("GET", "/v1/state", nil, function(value, err, fresh)
 		pollBusy = false
 		if err then
+			if not recovery.blocked and (recovery.retryAt or 0) == 0 then recovery.attempted = false end
 			serviceUnavailable = true
 			statusError = err
 			connection, connectionConfig = nil, nil
@@ -1083,11 +1132,10 @@ local function poll(cx)
 			state = value
 			serviceUnavailable = false
 			statusError = nil
-			recovery.phase, recovery.message, recovery.openSetup = nil, nil, nil
+			if recovery.phase == "waiting" then recovery.phase, recovery.message = nil, nil end
 			setupRequired, endpointMissing = false, false
-			-- Startup recovery is not a watchdog: observing any healthy local client
-			-- seals automatic launch, including a client still connecting over SSH.
-			recovery.attempted = true
+			-- Inspect the installed package once, then retry pending updates only at their deadline.
+			queueRecovery(installedConfig)
 			if recovery.manualOrigin then defer(setupBridge) end
 			if not state.connected then resolved = {}; resolving = {} end
 			for _, outcome in state.outcomes or {} do
@@ -1249,7 +1297,7 @@ local function statusSegments(viewId)
 	if setupBusy then
 		return { { text = "Setting up · " .. publicText(setupInfo and setupInfo.stage, "Starting"), icon = "clock", tone = "accent", command = action .. "setup" } }
 	end
-	if recovery.phase == "starting" then
+	if recovery.phase == "starting" and (not connection or serviceUnavailable) then
 		return { { text = "Starting local Bridge", icon = "clock", tone = "accent", command = action .. "setup" } }
 	end
 	if recovery.phase == "failed" and (not connection or serviceUnavailable) then
@@ -1269,7 +1317,7 @@ local function statusSegments(viewId)
 	local unavailable = statusError ~= nil or panelError ~= nil
 	local connected = state and state.connected == true
 	local view = state and state.views[viewId]
-	if setupInfo and setupInfo.status == "awaiting_session" and not view and not unavailable then
+	if setupInfo and setupInfo.status == "awaiting_session" and not view and not unavailable and recovery.phase == nil then
 		local label = setupInfo.stage == "awaiting-host-plugin" and "Reload host plugin"
 			or setupInfo.stage == "awaiting-service-upgrade" and "Service update required"
 			or "Open remote OMP · load extension"
@@ -1300,6 +1348,9 @@ local function statusSegments(viewId)
 		{ text = text, icon = icon, tone = tone == "muted" and panel and "accent" or tone,
 			command = action .. (connected and "toggle-bridge" or "setup") },
 	}
+	if recovery.phase == "starting" then table.insert(segments, { text = "Updating local Bridge", icon = "clock", tone = "accent", command = action .. "setup" })
+	elseif recovery.phase == "pending" then table.insert(segments, { text = recovery.updateDeferred == "rollback" and "Update rolled back · retrying" or "Update waiting for safe switch", icon = "clock", tone = "warn", command = action .. "setup" })
+	elseif recovery.phase == "failed" then table.insert(segments, { text = recovery.blocked and "Update needs attention" or "Update retry pending", icon = "warn", tone = "warn", command = action .. "setup" }) end
 	if transferSummary.text then table.insert(segments, { text = transferSummary.text, icon = transferSummary.icon, tone = transferSummary.tone, command = action .. "transfers" }) end
 	if failed > 0 then table.insert(segments, { text = tostring(failed) .. " failed", icon = "warn", tone = "error", command = action .. "transfers" }) end
 	if approvals > 0 then table.insert(segments, { text = tostring(approvals) .. " pending", icon = "shield", tone = "warn", command = action .. "approvals" }) end

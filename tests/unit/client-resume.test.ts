@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { loadClientIdentity, writePrivateJson } from "../../src/config.ts";
 import { ensureManagedService, runManagedService } from "../../src/setup-managed.ts";
 import { inspectSetupPackage } from "../../src/setup-payload.ts";
 import { readOptionalJson } from "../../src/setup-state.ts";
+import { startClientService } from "../../src/client.ts";
 
 const packageRoot = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const roots: string[] = [];
@@ -24,6 +25,33 @@ async function fixture() {
 	await saveClientResumePlan(data, plan);
 	return { data, stateDir, identity, plan, config, planFile: path.join(data, "client-resume.json"), configFile: path.join(data, "config.json"), identityFile: path.join(stateDir, "identity.json") };
 }
+
+test("automatic package maintenance preserves the revocable connection approval", async () => {
+	const f = await fixture();
+	const approval = await readFile(f.planFile, "utf8");
+	const identity = await readFile(f.identityFile, "utf8");
+	const snapshot = await inspectSetupPackage(packageRoot);
+	const prepared = path.join(f.data, "installation", "packages", snapshot.digest);
+	await mkdir(prepared, { recursive: true });
+	for (const file of snapshot.files) {
+		const destination = path.join(prepared, file);
+		await mkdir(path.dirname(destination), { recursive: true });
+		await cp(path.join(packageRoot, file), destination);
+	}
+	await symlink(path.join(packageRoot, "node_modules"), path.join(prepared, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+	await writePrivateJson(path.join(prepared, ".bridge-installation.json"), { schema: 1, source: snapshot.digest, runtime: `${process.platform}-${process.arch}` });
+	const unavailable = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("not ready", { status: 503 }) });
+	const client = await startClientService({ identity: f.identity, stateDir: f.stateDir, serverName: f.plan.host, connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${unavailable.port}`, token: "synthetic-maintenance-broker" } } });
+	try {
+		const child = Bun.spawn([process.execPath, path.join(prepared, "src", "cli.ts"), "resume-client", "--plugin-data", f.data], { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 30000 });
+		const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+		expect(code).toBe(0);
+		expect(stderr).toBe("");
+		expect(JSON.parse(stdout)).toMatchObject({ kind: "client-resumed", reused: true, connected: false, deviceId: f.identity.device.id });
+		expect(await readFile(f.planFile, "utf8")).toBe(approval);
+		expect(await readFile(f.identityFile, "utf8")).toBe(identity);
+	} finally { await client.close(); await unavailable.stop(true); }
+}, 60000);
 
 test("recovery without consented receipt fails before provisioning any local identity", async () => {
 	const data = await mkdtemp(path.join(os.tmpdir(), "bridge-resume-unapproved-"));
@@ -86,7 +114,7 @@ test("recovery refuses missing, replaced and malformed identities without writin
 	await expect(resumeClient(f.data)).rejects.toMatchObject({ code: "INVALID_IDENTITY" });
 	expect(await readFile(f.identityFile, "utf8")).toBe(invalid);
 	expect(await readOptionalJson(f.plan.controlFile)).toBeUndefined();
-});
+}, 30000);
 
 test.skipIf(process.platform === "win32")("symlink approvals and identities are not followed during recovery", async () => {
 	const f = await fixture();
@@ -123,7 +151,7 @@ test("launcher and detached lifecycle both refuse identity deletion after prior 
 	await expect(runManagedService(options)).rejects.toMatchObject({ code: "CLIENT_IDENTITY_CONFLICT" });
 	expect(await readFile(f.identityFile, "utf8")).toBe(replaced);
 	expect(await readOptionalJson(f.plan.controlFile)).toBeUndefined();
-});
+}, 30000);
 
 test("detached lifecycle rechecks the approved package before starting a listener", async () => {
 	const f = await fixture();
