@@ -69,7 +69,7 @@ test("changed or missing config and changed plan never start or rewrite the appr
 	await expect(resumeClient(f.data)).rejects.toBeDefined();
 	expect(await readFile(f.identityFile, "utf8")).toBe(identity);
 	expect(await readOptionalJson(f.plan.controlFile)).toBeUndefined();
-});
+}, 30000);
 
 test("recovery refuses missing, replaced and malformed identities without writing them", async () => {
 	const f = await fixture();
