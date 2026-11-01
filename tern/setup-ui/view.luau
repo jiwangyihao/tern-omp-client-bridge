@@ -471,6 +471,7 @@ local function register(kind)
 					table.insert(main, with(ui.col({
 						with(label("This device · Private runtime and Bridge client"), { role = "setup-scope-row" }),
 						with(label("Remote host · Broker, OMP and Tern integrations"), { role = "setup-scope-row" }),
+						with(label("Future Tern starts may resume this approved local client using its existing identity. No automatic remote installation or session restart."), { role = "setup-scope-row" }),
 						with(label("No sudo or session restarts. Bind a device to authorize native tools under its local safety rules."), { role = "setup-scope-row" }),
 						with(label("Install approves this scope for the target above."), { role = "setup-footer" }),
 					}), { key = "consent", role = "setup-consent" }))

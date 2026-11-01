@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MPL-2.0 */
-/* Only sidebar geometry and unbroken addresses need overrides; native kinds own controls. */
+/* Scoped surface typography/geometry only; native kinds own control skins. */
 .sf-main[data-surface='plugin.omp-bridge-setup.panel'],
 .sf-main[data-surface='plugin.omp-client-bridge.setup'] { padding: 12px; min-width: 0; }
 [data-surface='plugin.omp-bridge-setup.panel'] [data-role='setup-target-heading'],

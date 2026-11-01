@@ -29,9 +29,11 @@ function run(entry)
    end},
    json={null={},encode=encode,decode=function(key)return copy(assert(encoded[key],'bad JSON'))end},
    fetch=function(url,options,callback)
+    table.insert(f.requests,{url=url,method=options.method or 'GET',body=options.body and copy(encoded[options.body]),callback=callback})
     assert(url:sub(1,21)=='http://127.0.0.1:9191','credential left the host loopback endpoint')
     assert(options.headers.Authorization=='Bearer private-host-fixture-token')
-    table.insert(f.requests,{url=url,method=options.method or 'GET',body=options.body and copy(encoded[options.body]),callback=callback})
+    assert(((options.method or 'GET')=='GET' and url:find('/v1/panels?',1,true))
+     or (options.method=='POST' and url=='http://127.0.0.1:9191/v1/panels/closed'),'host attempted a non-display operation')
    end,
    block={define=function(kind,def)if kind=='panel' then f.def=def end end},
   }
@@ -52,6 +54,8 @@ function run(entry)
    (request or f.take()).callback({status=200,body=encode(value)})
   end
   function f.send(value)f.tick();f.reply({closed=false,snapshot=value})end
+  function f.offer(value)f.def.event(f.state,{ev='action',act='bridge-device-selection',value=encode(value)},f.cx)end
+  function f.event(ev)f.def.event(f.state,ev,f.cx)end
   function f.view()return f.def.view(f.state,f.cx)end
   function f.close()f.handlers.pane_exited({pane=101})end
   return f
@@ -59,6 +63,13 @@ function run(entry)
  local function sample()
   return {owner='window-1',panelId='panel-1',source='Laptop',target='Remote draft',agent='Unbound',connected=true,approvals=0,
    devices={{name='Laptop',platform='darwin',online=true,bound=false}},transfers={{id='transfer-1',name='report.txt',phase='uploading',bytesSent=5,totalBytes=10}}}
+ end
+ local function choices(generation)
+  return {owner='window-1',panelId='panel-1',generation=generation or '1',available=true,current='none',options={
+   {key='none',label='Unbound',detail='No agent access',disabled=false},
+   {key='d1',label='Laptop',detail='Online · darwin',disabled=false},
+   {key='d2',label='Desktop',detail='Offline · linux',disabled=true},
+  }}
  end
  local function visit(node,fn)
   fn(node);for _,child in node.c or {} do visit(child,fn) end
@@ -78,11 +89,29 @@ function run(entry)
   end)
   return result
  end
+ local function control(f,kind,key)
+  local found=nil
+  visit(f.view().main,function(n)if n.k==kind and n.p and n.p.key==key then assert(not found);found=n end end)
+  return assert(found,'missing '..kind..' '..key)
+ end
  local function test(name,fn)fn();passed+=1;print('PASS '..name)end
  test('public host snapshots render only through authenticated loopback delivery',function()
   local f=fixture();assert(active(f).paste==nil)
   f.send(sample());assert(f.state.snapshot.transfers[1].bytesSent==5 and active(f).paste~=nil)
   local saved=f.def.save(f.state);assert(next(saved)==nil)
+ end)
+ test('native device choice is local and only a changed offered choice enables Apply',function()
+  local f=fixture();f.send(sample());f.offer(choices())
+  local before=#f.requests
+  assert(active(f).apply==nil and active(f).devices==nil)
+  f.event({ev='toggle',id='main.device.choice-1',open=true});assert(control(f,'select','choice-1').p.open)
+  assert(active(f).apply==nil)
+  f.event({ev='change',id='main.device.choice-1',value='d1'})
+  assert(control(f,'select','choice-1').p.value=='d1' and not control(f,'select','choice-1').p.open)
+  assert(active(f).apply=='omp-bridge-panel://window-1/panel-1/bind/1/d1')
+  f.event({ev='action',act='open',id='main.device.apply'})
+  assert(#f.requests==before and f.exits==0)
+  f.event({ev='change',id='main.device.choice-1',value='none'});assert(active(f).apply==nil)
  end)
  test('owner and panel mismatch cannot replace an accepted snapshot',function()
   local f=fixture();f.send(sample())
@@ -127,22 +156,31 @@ function run(entry)
    end
   end
  end)
+ test('public launch labels stay bounded text and cannot grant or retarget controls',function()
+  local f=fixture({'window-1','panel-1','client-1',string.rep('界',200),'folder\nname',{href='https://evil.invalid',token='secret'}})
+  assert(#f.state.hostName<=240 and utf8.len(f.state.hostName)~=nil)
+  assert(not f.state.workspaceName:find('%c') and f.state.sessionTitle==nil)
+  assert(next(active(f))==nil)
+  f.send(sample())
+  for verb,href in active(f) do assert(href=='omp-bridge-panel://window-1/panel-1/'..verb) end
+  assert(not contains(f.view(),'https://evil.invalid') and not contains(f.view(),'secret'))
+ end)
  test('malformed and failed responses cannot authorize display controls',function()
   local f=fixture();f.tick();f.take().callback({status=200,body='bad JSON'});assert(f.state.snapshot==nil)
   f.tick();f.take().callback({status=401,body='private server failure'});assert(active(f).paste==nil)
   f.send(false);assert(f.state.snapshot==nil)
  end)
  test('action admission follows connection state and never grants device access',function()
-  local f=fixture();assert(active(f).hide~=nil and active(f).paste==nil)
+  local f=fixture();assert(next(active(f))==nil)
   local value=sample();value.approvals=2;f.send(value)
   local links=active(f)
-  for _,verb in {'paste','upload','devices','transfers','approvals','hide'} do
+  for _,verb in {'paste','upload','transfers','approvals'} do
    assert(links[verb]=='omp-bridge-panel://window-1/panel-1/'..verb)
   end
   value.connected=false;f.send(value);links=active(f)
-  assert(links.hide~=nil and links.paste==nil and links.upload==nil and links.devices==nil and links.approvals==nil and links.transfers==nil)
+  assert(next(links)==nil)
   visit(f.view().main,function(n)
-   if n.k=='button' and n.p.key~='hide' then
+   if n.k=='button' then
     assert(type(n.p.disabled)=='string' and #n.p.disabled>0 and n.p.href==nil and n.p.actions==nil)
    end
   end)
@@ -153,7 +191,7 @@ function run(entry)
   assert(f.state.expiresAt==deadline)
   f.clock=deadline-1;assert(active(f).paste~=nil)
   f.clock=deadline;assert(active(f).paste==nil and f.state.snapshot==nil)
-  assert(active(f).hide~=nil)
+  f.close();assert(f.state.closed)
  end)
  test('saved snapshots never restore authority and initial waiting is bounded',function()
   local f=fixture(nil,{snapshot=sample(),owner='window-1',panelId='panel-1',expiresAt=999999})
@@ -218,11 +256,117 @@ function run(entry)
   end)
   assert(ownerCount==1)
  end)
- test('empty device and transfer collections explain the next local action',function()
+ test('empty device offers cannot grant a binding to an absent client',function()
   local f=fixture();local value=sample();value.devices={};value.transfers={};f.send(value)
-  local view=f.view()
-  assert(contains(view,'No devices available') and contains(view,'No transfers yet'))
-  assert(active(f).devices~=nil and active(f).upload~=nil and active(f).approvals==nil)
+  local offer=choices();offer.options={offer.options[1]};f.offer(offer)
+  f.event({ev='change',id='main.device.choice-1',value='d1'})
+  assert(control(f,'select','choice-1').p.value=='none')
+  assert(active(f).devices==nil and active(f).apply==nil and active(f).upload~=nil and active(f).approvals==nil)
+ end)
+ test('unknown keys disabled offers and foreign field events cannot enable Apply',function()
+  local f=fixture();f.send(sample());f.offer(choices())
+  for _,key in {'d2','d3','d0','d33','real-client-id','none/../d1',''} do
+   f.event({ev='change',id='main.device.choice-1',value=key});assert(active(f).apply==nil)
+  end
+  for _,id in {'main.device.choice-0','main.device.choice-2','main.devices','main.choice-1'} do
+   f.event({ev='change',id=id,value='d1'});assert(active(f).apply==nil)
+  end
+  assert(control(f,'select','choice-1').p.value=='none')
+ end)
+ test('a new generation discards pending choices and never reinterprets stale events',function()
+  local f=fixture();f.send(sample());f.offer(choices('9'))
+  f.event({ev='change',id='main.device.choice-9',value='d1'});assert(active(f).apply~=nil)
+  local nextOffer=choices('10');nextOffer.options[2].label='Different device';f.offer(nextOffer)
+  assert(control(f,'select','choice-10').p.value=='none' and active(f).apply==nil)
+  f.event({ev='change',id='main.device.choice-9',value='d1'});f.offer(choices('9'));assert(active(f).apply==nil)
+  f.event({ev='change',id='main.device.choice-10',value='d1'})
+  assert(active(f).apply=='omp-bridge-panel://window-1/panel-1/bind/10/d1')
+ end)
+ test('same generation heartbeats preserve a pending choice but expire independently of snapshots',function()
+  local f=fixture();f.send(sample());f.offer(choices())
+  f.event({ev='change',id='main.device.choice-1',value='d1'})
+  f.clock=5000;f.offer(choices());assert(active(f).apply~=nil)
+  f.clock=10000;f.send(sample())
+  f.clock=19999;f.send(sample());assert(active(f).apply~=nil)
+  f.clock=20000;assert(active(f).apply==nil and control(f,'select','choice-1').p.disabled)
+  f.offer(choices());assert(not control(f,'select','choice-1').p.disabled and active(f).apply==nil)
+  assert(control(f,'select','choice-1').p.value=='none')
+ end)
+ test('revoked and offline choices clear pending authority until a fresh valid offer',function()
+  local f=fixture();f.send(sample());f.offer(choices())
+  f.event({ev='change',id='main.device.choice-1',value='d1'});assert(active(f).apply~=nil)
+  local offline=choices('2');offline.options[2].disabled=true;f.offer(offline)
+  f.event({ev='change',id='main.device.choice-2',value='d1'});assert(active(f).apply==nil)
+  local revoked=choices('3');revoked.available=false;revoked.current='';f.offer(revoked)
+  assert(control(f,'select','choice-3').p.disabled and control(f,'select','choice-3').p.value==nil)
+  f.event({ev='change',id='main.device.choice-3',value='d1'});assert(active(f).apply==nil)
+  f.offer(choices('4'));f.event({ev='change',id='main.device.choice-4',value='d1'});assert(active(f).apply~=nil)
+  local disconnected=sample();disconnected.connected=false;f.send(disconnected)
+  assert(active(f).apply==nil and control(f,'select','choice-4').p.disabled)
+  f.send(sample());assert(active(f).apply==nil and control(f,'select','choice-4').p.value=='none')
+ end)
+ test('same generation mutation revokes choices rather than changing an existing selection',function()
+  local f=fixture();f.send(sample());f.offer(choices())
+  f.event({ev='change',id='main.device.choice-1',value='d1'})
+  local changed=choices();changed.options[2].label='Replacement';f.offer(changed)
+  assert(active(f).apply==nil and control(f,'select','choice-1').p.disabled)
+  f.offer(choices());assert(control(f,'select','choice-1').p.disabled)
+  f.offer(choices('2'));assert(not control(f,'select','choice-2').p.disabled and active(f).apply==nil)
+ end)
+ test('malformed and foreign selection payloads cannot introduce device choices',function()
+  local f=fixture();f.send(sample())
+  local invalid={}
+  for _,bad in {'','0','01','-1','1.5','1/x',string.rep('1',33)} do
+   local offer=choices();offer.generation=bad;table.insert(invalid,offer)
+  end
+  local foreign=choices();foreign.owner='other-window';table.insert(invalid,foreign)
+  foreign=choices();foreign.panelId='other-panel';table.insert(invalid,foreign)
+  local duplicate=choices();duplicate.options[3].key='d1';table.insert(invalid,duplicate)
+  local unknown=choices();unknown.current='d32';table.insert(invalid,unknown)
+  local missing=choices();table.remove(missing.options,1);table.insert(invalid,missing)
+  local badFlag=choices();badFlag.options[2].disabled='false';table.insert(invalid,badFlag)
+  local badKey=choices();badKey.options[2].key='d33';table.insert(invalid,badKey)
+  local tooMany=choices();for i=4,34 do table.insert(tooMany.options,{key='d1',label='Device',detail='',disabled=false})end;table.insert(invalid,tooMany)
+  for _,offer in invalid do
+   f.offer(offer);assert(control(f,'select','choice-waiting').p.disabled and active(f).apply==nil)
+  end
+  f.event({ev='action',act='bridge-device-selection',value='invalid JSON'})
+  f.event({ev='action',act='bridge-device-selection',value=string.rep('x',65537)})
+  assert(control(f,'select','choice-waiting').p.disabled)
+  f.offer(choices());assert(not control(f,'select','choice-1').p.disabled)
+ end)
+ test('selection payloads expose only bounded public option data',function()
+  local f=fixture();f.send(sample());local offer=choices()
+  offer.token='PRIVATE-SENTINEL';offer.sessionId='PRIVATE-SENTINEL';offer.draftToken='PRIVATE-SENTINEL'
+  offer.options[2].clientId='PRIVATE-SENTINEL';offer.options[2].path='PRIVATE-SENTINEL'
+  offer.options[2].label=string.rep('界',400);offer.options[2].detail='Online\nlinux'
+  f.offer(offer);local option=control(f,'select','choice-1').p.options[2]
+  assert(#option.label<=240 and utf8.len(option.label)~=nil and option.detail=='Online linux')
+  assert(not contains(f.view(),'PRIVATE-SENTINEL') and not contains(f.state.selection,'PRIVATE-SENTINEL'))
+  f.event({ev='change',id='main.device.choice-1',value='d1'})
+  assert(active(f).apply=='omp-bridge-panel://window-1/panel-1/bind/1/d1')
+ end)
+ test('native keyboard choice skips offline devices and never submits a binding',function()
+  local f=fixture();f.send(sample());f.offer(choices());local requests=#f.requests
+  assert(f.def.key(f.state,{name='enter'},f.cx)==false and active(f).apply==nil)
+  f.event({ev='toggle',id='main.device.choice-1',open=true})
+  assert(f.def.key(f.state,{name='down'},f.cx))
+  assert(control(f,'select','choice-1').p.active=='d1' and active(f).apply==nil)
+  assert(f.def.key(f.state,{name='down'},f.cx));assert(control(f,'select','choice-1').p.active=='d1')
+  assert(f.def.key(f.state,{name='enter'},f.cx))
+  assert(active(f).apply=='omp-bridge-panel://window-1/panel-1/bind/1/d1' and #f.requests==requests)
+  f.event({ev='toggle',id='main.device.choice-1',open=true})
+  assert(f.def.key(f.state,{name='escape'},f.cx) and not control(f,'select','choice-1').p.open)
+ end)
+ test('explicit unbinding uses the offered none key and closing rejects late choices',function()
+  local f=fixture();f.send(sample());local offer=choices();offer.current='d1';f.offer(offer)
+  assert(control(f,'select','choice-1').p.value=='d1' and active(f).apply==nil)
+  f.event({ev='change',id='main.device.choice-1',value='none'})
+  assert(active(f).apply=='omp-bridge-panel://window-1/panel-1/bind/1/none')
+  f.close();local ack=f.take('POST');assert(ack.url=='http://127.0.0.1:9191/v1/panels/closed')
+  local requests=#f.requests;f.offer(choices('2'))
+  f.event({ev='change',id='main.device.choice-2',value='d1'})
+  assert(next(active(f))==nil and #f.requests==requests and f.state.pendingChoice==nil)
  end)
  print('Host panel regression: '..passed..' cases passed (synthetic SDK boundary only)')
 end

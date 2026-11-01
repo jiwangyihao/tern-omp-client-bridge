@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, timingSafeEqual, verify } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -94,22 +94,32 @@ export function verifyIdentity(challenge: string, device: DeviceDescriptor, publ
 	catch { return false; }
 }
 
-export async function loadClientIdentity(stateDir: string, options: { name?: string } = {}): Promise<ClientIdentity> {
+/** expectedDeviceId is read-only recovery: missing keys must never provision a new device. */
+export async function loadClientIdentity(stateDir: string, options: { name?: string; expectedDeviceId?: string } = {}): Promise<ClientIdentity> {
 	const file = path.join(stateDir, "identity.json");
 	let identity: ClientIdentity;
 	try {
+		if (options.expectedDeviceId !== undefined) {
+			const info = await lstat(file);
+			if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) throw new BridgeError("INVALID_IDENTITY", "Recovery requires a bounded regular identity file.");
+		}
 		identity = ClientIdentitySchema.parse(JSON.parse(await readFile(file, "utf8")));
 		if (publicKeyId(identity.publicKey) !== identity.device.id) throw new BridgeError("INVALID_IDENTITY", "Client identity file is inconsistent");
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+		if (options.expectedDeviceId !== undefined) throw new BridgeError("CLIENT_IDENTITY_REQUIRED", "The approved client identity is missing. Restore it or run explicit setup; recovery will not create a different device.");
 		const pair = generateKeyPairSync("ed25519");
 		const publicKey = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
 		const privateKey = pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 		identity = { device: DeviceDescriptorSchema.parse({ id: publicKeyId(publicKey), name: options.name ?? os.hostname(), platform: process.platform, arch: process.arch }), publicKey, privateKey };
 	}
-	const device = DeviceDescriptorSchema.parse({ ...identity.device, name: options.name ?? identity.device.name });
+	const device = DeviceDescriptorSchema.parse({ ...identity.device, name: options.expectedDeviceId === undefined ? options.name ?? identity.device.name : identity.device.name });
 	identity = { ...identity, device };
 	if (!verifyIdentity("identity-file-check", device, identity.publicKey, signIdentity("identity-file-check", identity))) throw new BridgeError("INVALID_IDENTITY", "Client private and public keys do not match");
+	if (options.expectedDeviceId !== undefined) {
+		if (device.id !== options.expectedDeviceId) throw new BridgeError("CLIENT_IDENTITY_CONFLICT", "The saved identity is not the device approved by setup. Recovery will not replace it.");
+		return identity;
+	}
 	await writePrivateJson(file, identity);
 	return identity;
 }

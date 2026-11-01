@@ -1,0 +1,86 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+/* Bridge interaction motion only; panel.css owns layout and resting colors.
+ * Native contracts: https://docs.stencil.so/tern/elements/input.md
+ * https://docs.stencil.so/tern/styles/css.md
+ * Controls are pointer-only in Tern; focus-visible is supplementary, while
+ * the select's .open/.sel states also reflect the host's keyboard handling.
+ */
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button:not(.disabled, .busy, .sf-hidden, [aria-disabled='true'], [aria-busy='true']),
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select:not(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-btn {
+	transition: background-color 140ms var(--ease), color 140ms var(--ease), border-color 140ms var(--ease), box-shadow 140ms var(--ease), transform 120ms var(--ease);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button:not(.disabled, .busy, .sf-hidden, [aria-disabled='true'], [aria-busy='true']):hover,
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select:not(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-btn:hover {
+	box-shadow: 0 0 0 1px var(--l3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button:not(.disabled, .busy, .sf-hidden, [aria-disabled='true'], [aria-busy='true']):focus-visible,
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select:not(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-btn:focus-visible,
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select.open:not(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-btn {
+	box-shadow: 0 0 0 1px rgb(from var(--accent) r g b / 55%), 0 0 0 3px rgb(from var(--accent) r g b / 12%);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button:not(.disabled, .busy, .sf-hidden, [aria-disabled='true'], [aria-busy='true']):active,
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select:not(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-btn:active {
+	transform: translateY(1px) scale(0.98);
+}
+
+/* Do not ease unavailable controls back toward their enabled appearance.
+ * Native disabled opacity and busy spinner remain entirely native.
+ */
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button:is(.disabled, .busy, .sf-hidden, [aria-disabled='true'], [aria-busy='true']),
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select:is(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-btn {
+	transition: none;
+	transform: none;
+}
+
+/* .sf-select-menu and .sf-select-opt.dis are the native input DOM hooks.
+ * The menu stays inside its select; no positioning or visibility overrides.
+ */
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select.open:not(.disabled, .sf-hidden, [aria-disabled='true']) > .sf-select-menu {
+	animation: omp-client-bridge-menu-enter 140ms var(--out);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] .sf-select:not(.disabled, .sf-hidden, [aria-disabled='true']) .sf-select-opt:not(.dis, [aria-disabled='true']) {
+	transition: background-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+/* Removing .sf-hidden starts one entrance. Unchanged keyed view updates do
+ * not change the animation name. Keep readiness out of this selector so
+ * completing a busy state does not replay the entrance. No opacity is set.
+ * Individual translate leaves the button's press transform independent.
+ */
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button[data-role='bridge-apply']:not(.sf-hidden) {
+	animation: omp-client-bridge-apply-enter 160ms var(--out);
+}
+
+@keyframes omp-client-bridge-menu-enter {
+	from { transform: scale(0.98); }
+	to { transform: scale(1); }
+}
+
+@keyframes omp-client-bridge-apply-enter {
+	from { translate: 0 3px; }
+	to { translate: 0 0; }
+}
+
+/* Respect both Tern's per-surface preference and the system preference.
+ * Keep color/ring feedback, but remove motion, including native press scale.
+ * Target only these controls, not the PiP frame or a busy spinner's children.
+ */
+[data-surface='plugin.omp-client-bridge.panel'].sf-still :is(.sf-button, .sf-select-btn, .sf-select-menu, .sf-select-opt) {
+	transition: none !important;
+	animation: none !important;
+	transform: none !important;
+	translate: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	[data-surface='plugin.omp-client-bridge.panel'] :is(.sf-button, .sf-select-btn, .sf-select-menu, .sf-select-opt) {
+		transition: none !important;
+		animation: none !important;
+		transform: none !important;
+		translate: none !important;
+	}
+}

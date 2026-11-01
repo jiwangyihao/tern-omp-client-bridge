@@ -10,12 +10,14 @@ import { runRelay } from "./relay.ts";
 import { installOmp, installTern } from "../scripts/install.ts";
 import { setup, setupAgent, setupRegistration } from "./setup.ts";
 import { ensureManagedService, runManagedService } from "./setup-managed.ts";
+import { resumeClient } from "./client-resume.ts";
 
 const HELP = `Usage: tern-omp-bridge COMMAND [OPTIONS]
 
   setup --host SSH_ALIAS --plugin-data PATH --package-root PATH
         [--remote-root POSIX_PATH] [--agent-dir POSIX_PATH] [--tern-dir POSIX_PATH]
         [--tern-executable ABSOLUTE_LOCAL_PATH]
+  resume-client --plugin-data PATH
   server [--state-dir PATH] [--port N]
   relay [--state-dir PATH]
   client --host SSH_ALIAS
@@ -70,10 +72,11 @@ const OPTIONS: Record<string, readonly string[]> = {
 	"install-omp": ["target", "state-dir"],
 	"install-tern": ["target", "control-file", "tern-executable"],
 	setup: ["host", "plugin-data", "package-root", "remote-root", "agent-dir", "tern-dir", "tern-executable"],
+	"resume-client": ["plugin-data"],
 	"setup-agent": ["remote-root", "package-root", "agent-dir", "tern-dir", "tern-executable"],
 	"setup-status": ["state-dir", "device-id"],
 	"managed-start": ["kind", "state-dir", "package-root", "host", "remote-command"],
-	"managed-service": ["kind", "state-dir", "package-root", "host", "remote-command"],
+	"managed-service": ["kind", "state-dir", "package-root", "host", "remote-command", "expected-device-id", "expected-package-digest", "resume-plugin-data"],
 };
 
 function argumentsFor(command: string, args: string[]): Map<string, string> {
@@ -149,6 +152,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 			console.log(JSON.stringify(await setup({ host: required("host"), pluginData: required("plugin-data"), packageRoot: required("package-root"), remoteRoot: options.get("remote-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable") })));
 			return;
 		}
+		case "resume-client": {
+			console.log(JSON.stringify(await resumeClient(required("plugin-data"))));
+			return;
+		}
 		case "setup-agent": {
 			console.log(JSON.stringify(await setupAgent({ remoteRoot: required("remote-root"), packageRoot: required("package-root"), agentDir: options.get("agent-dir"), ternDir: options.get("tern-dir"), ternExecutable: options.get("tern-executable") })));
 			return;
@@ -161,7 +168,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 		case "managed-service": {
 			const kind = z.enum(["server", "client"]).safeParse(required("kind"));
 			if (!kind.success) throw new BridgeError("USAGE", "--kind must be server or client");
-			const managed = { kind: kind.data, stateDir: path.resolve(required("state-dir")), packageRoot: path.resolve(required("package-root")), host: options.get("host"), remoteCommand: options.get("remote-command") };
+			const managed = { kind: kind.data, stateDir: path.resolve(required("state-dir")), packageRoot: path.resolve(required("package-root")), host: options.get("host"), remoteCommand: options.get("remote-command"), expectedDeviceId: options.get("expected-device-id"), expectedPackageDigest: options.get("expected-package-digest"), resumePluginData: options.get("resume-plugin-data") };
 			if (command === "managed-start") console.log(JSON.stringify(await ensureManagedService(managed)));
 			else await runManagedService(managed);
 			return;

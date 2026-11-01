@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { afterEach, expect, test } from "bun:test";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,9 @@ import { ensureManagedService, ManagedResultSchema, serviceHealth } from "../../
 import { packageArchive, shellArgument } from "../../src/setup-remote.ts";
 import { processExists, readOptionalJson, SetupProgressSchema } from "../../src/setup-state.ts";
 import { SetupResultSchema, setupRegistration } from "../../src/setup.ts";
+import { ClientResumePlanSchema } from "../../src/client-resume.ts";
+import { inspectSetupPackage } from "../../src/setup-payload.ts";
+import { LocalUiStateSchema } from "../../src/schemas.ts";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const cli = path.join(packageRoot, "src", "cli.ts");
@@ -259,7 +262,7 @@ exec sh -c "$command"
 		const stderr = new Response(child.stderr).text();
 		return { code: await child.exited, stdout: await stdout, stderr: await stderr };
 	}
-	return { data, remoteRoot, agentDir, ternDir, release, ternExecutable, run };
+	return { data, remoteRoot, agentDir, ternDir, release, ternExecutable, env, run };
 }
 
 test.skipIf(process.platform === "win32")("first and repeat plugin setup stage real code, preserve identity/config and await an actual OMP session", async () => {
@@ -275,6 +278,12 @@ test.skipIf(process.platform === "win32")("first and repeat plugin setup stage r
 	expect(first).toMatchObject({ status: "awaiting_session", client: { reused: false, ownership: "managed", connected: true, sessionReady: false }, remote: { root: fixtureState.remoteRoot, pluginReload: "isolated", broker: { reused: false } } });
 	const firstIdentity = await readFile(path.join(fixtureState.data, "bridge", "identity.json"), "utf8");
 	expect(JSON.parse(firstIdentity).device).not.toHaveProperty("capabilities");
+	const resumeFile = path.join(fixtureState.data, "client-resume.json");
+	const resume = ClientResumePlanSchema.parse(await readOptionalJson(resumeFile));
+	if (first.client.deviceId === undefined) throw new Error("Registered client did not return its device identity");
+	expect(resume).toEqual({ schema: 1, kind: "client-resume", host: "fixture-host", stateDir: first.client.stateDir, controlFile: first.controlFile, packageRoot: path.resolve(packageRoot), runtime: process.execPath, deviceId: first.client.deviceId, packageDigest: (await inspectSetupPackage(packageRoot)).digest, remoteCommand: [first.remote.runtime, path.join(first.remote.packageRoot, "src", "cli.ts"), "relay", "--state-dir", fixtureState.remoteRoot].map(shellArgument).join(" ") });
+	expect((await stat(resumeFile)).mode & 0o777).toBe(0o600);
+	expect(JSON.stringify(resume)).not.toMatch(/privateKey|password|token/i);
 	const configFile = path.join(fixtureState.data, "config.json");
 	const savedConfig = JSON.parse(await readFile(configFile, "utf8"));
 	expect(savedConfig).not.toHaveProperty("ternPaneSocket");
@@ -288,6 +297,7 @@ test.skipIf(process.platform === "win32")("first and repeat plugin setup stage r
 	expect(second.controlFile).toBe(first.controlFile);
 	expect(second.remote.broker).toMatchObject({ reused: true, pid: first.remote.broker.pid });
 	expect(await readFile(path.join(fixtureState.data, "bridge", "identity.json"), "utf8")).toBe(firstIdentity);
+	expect(await readOptionalJson(resumeFile)).toEqual(resume);
 	expect(JSON.parse(await readFile(configFile, "utf8"))).toEqual({ preserved: "untouched", nested: { retained: true }, controlFile: first.controlFile, ternExecutable: clientExecutable });
 	expect(JSON.parse(await readFile(first.remote.ternConfig, "utf8"))).toEqual({ ...hostConfig, hostSetting: { retained: true } });
 	const progress = SetupProgressSchema.parse(JSON.parse(await readFile(path.join(fixtureState.data, "setup-state.json"), "utf8")));
@@ -308,6 +318,7 @@ test.skipIf(process.platform === "win32")("failed native installation keeps conf
 	expect(failed.code).not.toBe(0);
 	expect(failed.stdout).toBe("");
 	expect(JSON.parse(await readFile(path.join(fixtureState.data, "config.json"), "utf8"))).toEqual(savedConfig);
+	expect(await readOptionalJson(path.join(fixtureState.data, "client-resume.json"))).toBeUndefined();
 	expect(SetupProgressSchema.parse(JSON.parse(await readFile(path.join(fixtureState.data, "setup-state.json"), "utf8"))).status).toBe("failed");
 	expect(await readFile(path.join(extension, "index.ts"), "utf8")).toBe("// unrelated fixture loader\n");
 	await rm(path.join(extension, "index.ts"));
@@ -330,3 +341,170 @@ test.skipIf(process.platform === "win32")("a cached release marker cannot hide m
 	expect(await readFile(readme, "utf8")).toBe("Changed after publication; the cached marker is now stale.\n");
 	expect(SetupProgressSchema.parse(JSON.parse(await readFile(path.join(fixtureState.data, "setup-state.json"), "utf8"))).status).toBe("failed");
 }, 180000);
+
+test.skipIf(process.platform === "win32")("consented recovery after clean client stop preserves identity, broker and session binding across concurrent windows", async () => {
+	const f = await localSshFixture(await fixture());
+	const setupRun = await f.run();
+	expect(setupRun.code, setupRun.stderr).toBe(0);
+	const installed = SetupResultSchema.parse(JSON.parse(setupRun.stdout));
+	const stateDir = installed.client.stateDir;
+	const planFile = path.join(f.data, "client-resume.json");
+	const plan = await readFile(planFile, "utf8");
+	const config = await readFile(path.join(f.data, "config.json"), "utf8");
+	const identity = await readFile(path.join(stateDir, "identity.json"), "utf8");
+	const brokerRecord = await readFile(path.join(f.remoteRoot, "server.managed.json"), "utf8");
+	const brokerEndpoint = await readEndpoint(path.join(f.remoteRoot, "server.json"));
+	const setupLog = await readFile(path.join(f.data, "setup.log"), "utf8");
+	const api = new BrokerClient({ endpoint: brokerEndpoint });
+	const sessionId = "reboot-existing-session";
+	let endpoint = await readEndpoint(installed.controlFile);
+	async function resume() {
+		const child = Bun.spawn([process.execPath, cli, "resume-client", "--plugin-data", f.data], { env: f.env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		const stdout = new Response(child.stdout).text();
+		const stderr = new Response(child.stderr).text();
+		return { code: await child.exited, stdout: await stdout, stderr: await stderr };
+	}
+	const destinationReady = Promise.withResolvers<DraftDestination>();
+	const completed = new Map<string, string | undefined>();
+	api.openDraft(sessionId, "reboot-existing-draft", {
+		onDestination: destination => { if (destination) destinationReady.resolve(destination); },
+		onIntent: intent => { void api.claimIntent(intent.id, intent.sessionId, intent.draftToken, intent.destinationId).then(() => api.finishIntent(intent.id)).then(() => { completed.set(intent.id, undefined); }, error => { completed.set(intent.id, String(error)); }); },
+		onError: destinationReady.reject,
+	});
+	async function intent(body: unknown) {
+		const response = await fetch(endpoint.url + "/v1/intents", { method: "POST", headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+		expect(response.ok).toBe(true);
+		const receipt = z.object({ id: z.string() }).parse(await response.json());
+		const deadline = Date.now() + 10000;
+		// Real broker HTTP/WebSocket delivery occurs in another process; fake timers cannot advance it.
+		while (!completed.has(receipt.id) && Date.now() < deadline) await Bun.sleep(20);
+		expect(completed.has(receipt.id)).toBe(true);
+		expect(completed.get(receipt.id)).toBeUndefined();
+	}
+	async function resolveViewer(destinationId: string) {
+		await intent({ kind: "resolve", viewId: "reboot-pane", destinationId });
+		// Poll the detached client's actual state, not a timer-driven readiness stub.
+		const deadline = Date.now() + 10000;
+		for (;;) {
+			const state = LocalUiStateSchema.parse(await (await fetch(endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${endpoint.token}` } })).json());
+			const view = state.views["reboot-pane"];
+			if (view?.sessionId === sessionId && view.resolveIntentId) return view;
+			if (Date.now() >= deadline) throw new Error("The resumed viewer did not resolve the existing draft");
+			await Bun.sleep(20);
+		}
+	}
+	try {
+		const destination = await destinationReady.promise;
+		const view = await resolveViewer(destination.id);
+		await intent({ kind: "bind", viewId: view.viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientId: installed.client.deviceId, expectedRevision: 0 });
+		const before = await api.state(sessionId);
+		expect(before.binding.revision).toBe(1);
+		const ownership = RecordSchema.parse(await readOptionalJson(path.join(stateDir, "client.managed.json")));
+		expect(ownership.pid).toBe(endpoint.pid!);
+		expect((await serviceHealth("client", stateDir)).endpoint.pid).toBe(ownership.pid);
+		process.kill(ownership.pid, "SIGTERM");
+		const deadline = Date.now() + 10000;
+		// OS process exit and its asynchronous metadata cleanup cannot use the runner's fake clock.
+		while (Date.now() < deadline && (processExists(ownership.pid) || await readOptionalJson(installed.controlFile) !== undefined || await readOptionalJson(path.join(stateDir, "client.managed.json")) !== undefined)) await Bun.sleep(20);
+		expect(processExists(ownership.pid)).toBe(false);
+		expect(await readOptionalJson(installed.controlFile)).toBeUndefined();
+		expect(await readOptionalJson(path.join(stateDir, "client.managed.json"))).toBeUndefined();
+		expect(await readFile(planFile, "utf8")).toBe(plan);
+		expect((await api.state(sessionId)).binding).toEqual(before.binding);
+		const attempts = await Promise.all([resume(), resume()]);
+		const successful = attempts.filter(result => result.code === 0);
+		expect(successful.length).toBeGreaterThanOrEqual(1);
+		for (const result of attempts.filter(result => result.code !== 0)) expect(result.stderr).toContain("SETUP_BUSY");
+		const resumed = successful.map(result => {
+			const raw = z.object({ kind: z.literal("client-resumed") }).passthrough().parse(JSON.parse(result.stdout));
+			return ManagedResultSchema.parse({ ...raw, kind: "client" });
+		});
+		expect(new Set(resumed.map(result => result.pid)).size).toBe(1);
+		expect(resumed.filter(result => !result.reused)).toHaveLength(1);
+		expect(resumed[0]!.pid).not.toBe(ownership.pid);
+		expect(resumed[0]).toMatchObject({ deviceId: installed.client.deviceId, connected: true, sessionReady: false, ownership: "managed" });
+		endpoint = await readEndpoint(installed.controlFile);
+		expect(endpoint.token).not.toBeUndefined();
+		const reused = await resume();
+		expect(reused.code, reused.stderr).toBe(0);
+		expect(JSON.parse(reused.stdout)).toMatchObject({ kind: "client-resumed", reused: true, pid: resumed[0]!.pid, deviceId: installed.client.deviceId });
+		const restored = await api.state(sessionId);
+		expect(restored.serverInstance).toBe(before.serverInstance);
+		expect(restored.binding).toEqual(before.binding);
+		expect(restored.devices.filter(device => device.online).map(device => device.id)).toEqual([installed.client.deviceId!]);
+		expect((await api.state("new-unbound-session")).binding.revision).toBe(0);
+		await resolveViewer(destination.id);
+		expect((await serviceHealth("client", stateDir)).sessionReady).toBe(true);
+		expect((await api.state(sessionId)).binding).toEqual(before.binding);
+		// A conflicting live owner is never killed, retargeted or overwritten by recovery.
+		const recordFile = path.join(stateDir, "client.managed.json");
+		const record = z.record(z.string(), z.unknown()).parse(await readOptionalJson(recordFile));
+		try {
+			await writePrivateJson(recordFile, { ...record, host: "different-host" });
+			const hostConflict = await resume();
+			expect(hostConflict.code).not.toBe(0);
+			expect(hostConflict.stderr).toContain("SERVICE_HOST_CONFLICT");
+			expect(processExists(resumed[0]!.pid)).toBe(true);
+		} finally { await writePrivateJson(recordFile, record); }
+		try {
+			await writePrivateJson(installed.controlFile, { ...endpoint, token: "incorrect-private-fixture-token" });
+			const unavailable = await resume();
+			expect(unavailable.code).not.toBe(0);
+			expect(unavailable.stderr).toContain("SERVICE_BUSY");
+			expect(unavailable.stderr).not.toContain("incorrect-private-fixture-token");
+			expect(processExists(resumed[0]!.pid)).toBe(true);
+		} finally { await writePrivateJson(installed.controlFile, endpoint); }
+		expect(await readFile(path.join(stateDir, "identity.json"), "utf8")).toBe(identity);
+		expect(await readFile(planFile, "utf8")).toBe(plan);
+		expect(await readFile(path.join(f.data, "config.json"), "utf8")).toBe(config);
+		expect(await readFile(path.join(f.remoteRoot, "server.managed.json"), "utf8")).toBe(brokerRecord);
+		expect(await readEndpoint(path.join(f.remoteRoot, "server.json"))).toEqual(brokerEndpoint);
+		expect(await readFile(path.join(f.data, "setup.log"), "utf8")).toBe(setupLog);
+	} finally { api.close(); }
+}, 180000);
+
+test("managed-service CLI never generates an identity removed between launcher validation and detached startup", async () => {
+	const stateDir = await fixture();
+	const identity = await loadClientIdentity(stateDir);
+	await loadClientIdentity(stateDir, { expectedDeviceId: identity.device.id });
+	await rm(path.join(stateDir, "identity.json"));
+	const child = Bun.spawn([process.execPath, cli, "managed-service", "--kind", "client", "--state-dir", stateDir, "--package-root", packageRoot, "--host", "fixture-host", "--remote-command", "must-not-execute", "--expected-device-id", identity.device.id], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const stdout = new Response(child.stdout).text();
+	const stderr = new Response(child.stderr).text();
+	expect(await child.exited).not.toBe(0);
+	expect(await stdout).toBe("");
+	expect(await stderr).toContain("CLIENT_IDENTITY_REQUIRED");
+	expect(await readOptionalJson(path.join(stateDir, "identity.json"))).toBeUndefined();
+	expect(await readOptionalJson(path.join(stateDir, "client.json"))).toBeUndefined();
+	expect(await readOptionalJson(path.join(stateDir, "client.managed.json"))).toBeUndefined();
+}, 15000);
+
+test.skipIf(process.platform === "win32")("resume-client rejects changed approved package contents before starting any client", async () => {
+	const root = await fixture();
+	const release = path.join(root, "approved package");
+	await mkdir(release);
+	for (const entry of await packageFiles(packageRoot)) {
+		const destination = path.join(release, entry);
+		await mkdir(path.dirname(destination), { recursive: true });
+		await cp(path.join(packageRoot, entry), destination);
+	}
+	await symlink(path.join(packageRoot, "node_modules"), path.join(release, "node_modules"), "dir");
+	const data = path.join(root, "plugin data");
+	const stateDir = path.join(data, "bridge");
+	const identity = await loadClientIdentity(stateDir);
+	const controlFile = path.join(stateDir, "client.json");
+	const plan = { schema: 1, kind: "client-resume", host: "fixture-host", remoteCommand: "must-not-execute", stateDir, controlFile, packageRoot: release, runtime: process.execPath, deviceId: identity.device.id, packageDigest: (await inspectSetupPackage(release)).digest };
+	await writePrivateJson(path.join(data, "config.json"), { controlFile });
+	await writePrivateJson(path.join(data, "client-resume.json"), plan);
+	await writeFile(path.join(release, "README.md"), "Changed after the setup approval.\n");
+	const child = Bun.spawn([process.execPath, path.join(release, "src", "cli.ts"), "resume-client", "--plugin-data", data], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const stdout = new Response(child.stdout).text();
+	const stderr = new Response(child.stderr).text();
+	expect(await child.exited).not.toBe(0);
+	expect(await stdout).toBe("");
+	expect(await stderr).toContain("CLIENT_RESUME_PACKAGE_CONFLICT");
+	expect(await readOptionalJson(controlFile)).toBeUndefined();
+	expect(await readOptionalJson(path.join(stateDir, "client.managed.json"))).toBeUndefined();
+	expect(await loadClientIdentity(stateDir, { expectedDeviceId: identity.device.id })).toEqual(identity);
+	expect(await readOptionalJson(path.join(data, "client-resume.json"))).toEqual(plan);
+}, 15000);

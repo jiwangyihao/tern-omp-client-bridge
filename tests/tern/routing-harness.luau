@@ -7,6 +7,7 @@ function run(entry, loadModule)
 	local function fixture()
 		local handlers, timers, requests, encoded = {}, {}, {}, {}
 		local deferred, inReceipt = {}, false
+		local inProcessReceipt = false
 		local deferredDelays, callbackDelay = {}, nil
 		local original, other = 17592186044423, 17592186044424
 		local focused, remote, clock = original, true, 1
@@ -22,6 +23,7 @@ function run(entry, loadModule)
 		f.processes = {}
 		f.writes = {}
 		f.logs = {}
+		f.deviceEvents = {}
 		f.moduleLoads, f.reads, f.setupOpens = {}, {}, 0
 		f.surfaceChecks = 0
 		local blocks, foreignHosts = {}, {}
@@ -127,7 +129,17 @@ function run(entry, loadModule)
 						if f.missingFloat then result.floats = {} end
 						return result
 					end,
-					event = function() error("numeric pane event must not be used") end,
+					event = function(_, pane, ev)
+						live()
+						assert(not inReceipt, "device publication must use a fresh deferred window context")
+						local block = assert(blocks[pane], "native event targeted a missing panel")
+						assert(opened[pane] and block.block == "omp-client-bridge.panel", "native event targeted another block")
+						assert(ev.ev == "action" and ev.act == "bridge-device-selection" and type(ev.value) == "string")
+						local value = copy(assert(encoded[ev.value], "native event omitted JSON encoding"))
+						assert(value.owner == block.args[1] and value.panelId == block.args[2], "native event crossed panel ownership")
+						if f.eventError then error("native event unavailable") end
+						table.insert(f.deviceEvents, { pane = pane, event = copy(ev), value = value, at = clock })
+					end,
 				},
 				hosts = { list = function()
 					live()
@@ -187,7 +199,7 @@ function run(entry, loadModule)
 					return true
 				end, focus = function(_, pane)
 					live()
-					assert(not inReceipt and callbackDelay ~= nil, "focus must use a fresh deferred callback")
+					assert(not inReceipt, "focus must use a fresh native callback, not an HTTP receipt")
 					assert(opened[pane], "native focus requires an existing exact pane")
 					table.insert(f.focuses, pane)
 					if f.focusError then error("native focus unavailable: private host detail") end
@@ -232,6 +244,7 @@ function run(entry, loadModule)
 				table.insert(f.logs, copy(assert(encoded[value])))
 			end },
 			json = { encode = encode, decode = function(token)
+				assert(not inProcessReceipt, "process callback parsed JSON before a fresh timer")
 				if token == "[]" then return {} end
 				local value = copy(assert(encoded[token], "unknown JSON token"))
 				if value.views then decodedState = value end
@@ -251,8 +264,14 @@ function run(entry, loadModule)
 			end },
 			fs = { read = function(path)
 				ioCount += 1
+				assert(not inProcessReceipt, "process callback performed filesystem IO")
 				table.insert(f.reads, path)
 				if path == "/isolated/plugin-data/setup-state.json" then return encode(assert(f.setupProgress, "no setup state")) end
+				if path == "/isolated/plugin-data/client-resume.json" then
+					if f.resumeReadError then error(f.resumeReadError) end
+					if not f.resumePlan then error("ENOENT") end
+					return f.resumeMalformed and "invalid-json" or encode(f.resumePlan)
+				end
 				if f.missingConnection then error("No such file or directory (os error 2)") end
 				if path == "/isolated/plugin-data/config.json" then
 					if f.configReadError then error(f.configReadError) end
@@ -271,9 +290,12 @@ function run(entry, loadModule)
 			end,
 			process = { run = function(argv, options, callback)
 				ioCount += 1
+				assert(not inProcessReceipt, "process callback launched another process")
+				if f.processStartError then error("private process failure") end
 				table.insert(f.processes, { argv = copy(argv), options = copy(options), callback = callback })
 			end },
 			timer = function(ms, callback)
+				assert(not inProcessReceipt, "process callback scheduled native work")
 				deferredDelays[callback] = ms
 				table.insert(ms > 0 and ms <= 16 and deferred or timers, callback)
 			end,
@@ -282,7 +304,7 @@ function run(entry, loadModule)
 					table.insert(deferred, function(cx) callback(nil, nil, cx) end)
 				end }
 			end,
-			chrome = { refresh = function() end, status = function(callback) handlers.status = callback end },
+			chrome = { refresh = function() assert(not inProcessReceipt, "process callback refreshed chrome") end, status = function(callback) handlers.status = callback end },
 			command = function(command) handlers[command.id] = command.run; f.commands[command.id] = command end,
 			override = function() error("bridge must never override native paste or any native command") end,
 			route = { open = function(fn) handlers.drop = fn end, link = function(fn) handlers.link = fn end },
@@ -340,6 +362,25 @@ function run(entry, loadModule)
 			invoke(callback)
 			f.flush()
 		end
+		function f.untilState(predicate)
+			for _ = 1, 20 do if predicate() then return end; f.tick() end
+			assert(predicate(), "lifecycle did not reach expected state")
+		end
+		function f.authorizeResume()
+			f.resumePlan = { schema = 1, kind = "client-resume", host = "agent", remoteCommand = "bridge relay",
+				stateDir = "/isolated", controlFile = "/isolated/client.json", packageRoot = "/approved/package with spaces",
+				runtime = "/approved/bun", deviceId = "device-fixture", packageDigest = string.rep("a", 64) }
+		end
+		function f.finishResume(result)
+			local process = assert(f.processes[#f.processes], "resume process missing")
+			local before = ioCount
+			inProcessReceipt = true
+			process.callback(result or { status = 0, stdout = encode({ kind = "client-resumed", stateDir = "/isolated",
+				controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = false,
+				ownership = "managed", connected = true, sessionReady = false, upgradeRequired = false }), timed_out = false })
+			inProcessReceipt = false
+			assert(ioCount == before, "process callback performed IO")
+		end
 		-- Raw dispatch expires the route context without draining deferred work, so
 		-- tests can observe the native handled result before any queued UI or IO.
 		function f.dispatch(name, ...) return invoke(assert(handlers[name], "missing native handler"), ...) end
@@ -376,12 +417,19 @@ function run(entry, loadModule)
 		end
 		function f.setTransfers(items) ui.transfers = items; f.poll() end
 		function f.status() return handlers.status({ pane = focused }) end
-		function f.binding(id, devices)
+		function f.binding(id, devices, revision)
 			local view = assert(ui.views[f.viewId])
 			view.state.binding.clientId = id or null
-			view.state.devices = devices
+			view.state.binding.revision = revision or view.state.binding.revision
+			view.state.devices = copy(devices)
 			f.poll()
 		end
+		function f.binds()
+			local result = {}
+			for _, request in requests do if request.path == "/v1/intents" and request.body.kind == "bind" then table.insert(result, request.body) end end
+			return result
+		end
+		function f.choices() return assert(f.deviceEvents[#f.deviceEvents], "native device choices were not delivered").value end
 		function f.advance(ms) clock += ms end
 		function f.receipt(request)
 			serial += 1
@@ -392,10 +440,12 @@ function run(entry, loadModule)
 		end
 		function f.publish(request, id, session, draft)
 			local viewId = request.body.viewId
+			local previous = ui.views[viewId]
 			ui.views[viewId] = {
 				viewId = viewId, destinationId = request.body.destinationId, resolveIntentId = id, sessionId = session, draftToken = draft,
-				state = { serverInstance = "broker-fixture", binding = { sessionId = session, clientId = null, revision = 0 }, devices = {} },
+				state = previous and copy(previous.state) or { serverInstance = "broker-fixture", binding = { sessionId = session, clientId = null, revision = 0 }, devices = {} },
 			}
+			ui.views[viewId].state.binding.sessionId = session
 			f.poll()
 		end
 		function f.resolve(request, session, draft)
@@ -479,7 +529,6 @@ function run(entry, loadModule)
 		end
 		function f.link(verb, pane, owner, id)
 			local result = f.invoke("link", f.linkRequest(verb, pane, owner, id))
-			if verb == "hide" then f.flushPanels() end
 			return result
 		end
 		function f.ioCount() return ioCount end
@@ -565,7 +614,10 @@ function run(entry, loadModule)
 			f.fakeSetup = true
 			f.invoke("setup")
 			local turns = 0
-			while f.setupOpens == 0 do turns += 1; assert(turns < 20); f.tick() end
+			while f.setupOpens == 0 do
+				turns += 1; assert(turns < 20)
+				if f.hasRequest("/v1/state") then f.respond(f.take("/v1/state"), ui) else f.tick() end
+			end
 			f.setupCallbacks.onState({ phase = "awaiting_session", stage = "awaiting-session", message = "Open remote OMP on agent with its extension loaded", ssh = "agent" })
 			local readiness = f.setupCallbacks.onConnected()
 			f.setupCallbacks.refresh()
@@ -620,11 +672,157 @@ function run(entry, loadModule)
 		f.chromeIsPure()
 	end)
 
+	case("reboot missing endpoint resumes only the authorized local client", function(f)
+		f.authorizeResume(); f.missingEndpoint = true
+		assert(f.ioCount() == 0 and #f.moduleLoads == 0, "load hook performed startup IO")
+		f.untilState(function() return #f.processes == 1 end)
+		local process = f.processes[1]
+		assert(#process.argv == 5 and process.argv[1] == "/approved/bun")
+		assert(process.argv[2] == "/approved/package with spaces/src/cli.ts" and process.argv[3] == "resume-client")
+		assert(process.argv[4] == "--plugin-data" and process.argv[5] == "/isolated/plugin-data")
+		assert(process.options.timeout_ms == 45000 and process.options.shell == nil)
+		assert(f.status()[1].text == "Starting local Bridge")
+		f.invoke("setup"); f.invoke("toggle-bridge"); f.tick()
+		assert(#f.processes == 1 and f.setupOpens == 0, "concurrent repair duplicated launch")
+		f.finishResume()
+		assert(f.status()[1].text == "Starting local Bridge", "process receipt mutated presentation")
+		f.missingEndpoint = false
+		f.poll()
+		assert(#f.processes == 1 and f.status()[1].text ~= "Starting local Bridge")
+		f.chromeIsPure()
+	end)
 
-	case("verified install with absent endpoint stays awaiting and later opens ordinary Bridge", function(f)
+	case("missing recovery authorization requires consented Setup", function(f)
+		f.missingEndpoint, f.fakeSetup = true, true
+		f.untilState(function() return f.status()[1].text == "Set up Bridge" end)
+		assert(#f.processes == 0)
+		f.invoke("setup")
+		f.untilState(function() return f.setupOpens == 1 end)
+		assert(#f.processes == 0)
+	end)
+
+	case("explicit repair discovers newly installed recovery authorization", function(f)
+		f.missingEndpoint = true
+		f.untilState(function() return f.status()[1].text == "Set up Bridge" end)
+		f.authorizeResume(); f.invoke("setup")
+		f.untilState(function() return #f.processes == 1 end)
+		assert(f.setupOpens == 0, "new authorization was ignored in favor of provisioning")
+	end)
+
+	for _, fault in { "json", "schema", "kind", "runtime", "packageRoot", "stateDir", "controlFile", "config", "relation", "traversal", "extra", "digest", "permission" } do
+		case("invalid resume authorization fails closed: " .. fault, function(f)
+			f.authorizeResume(); f.missingEndpoint = true
+			if fault == "json" then f.resumeMalformed = true
+			elseif fault == "schema" then f.resumePlan.schema = 2
+			elseif fault == "kind" then f.resumePlan.kind = "setup"
+			elseif fault == "config" then f.resumePlan.controlFile = "/other/client.json"
+			elseif fault == "relation" then f.resumePlan.stateDir = "/other"
+			elseif fault == "traversal" then f.resumePlan.runtime = "/approved/../other/bun"
+			elseif fault == "extra" then f.resumePlan.token = "unapproved-secret"
+			elseif fault == "digest" then f.resumePlan.packageDigest = "changed"
+			elseif fault == "permission" then f.resumeReadError = "Permission denied"
+			else f.resumePlan[fault] = "relative/path" end
+			f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
+			for _ = 1, 6 do f.tick() end
+			assert(#f.processes == 0 and f.setupOpens == 0, "invalid receipt provisioned a service")
+			f.chromeIsPure()
+		end)
+	end
+
+	for _, fault in { "failure", "timeout", "missing callback", "start", "invalid result" } do
+		case("resume failure is bounded and needs explicit retry: " .. fault, function(f)
+			f.authorizeResume(); f.missingEndpoint = true
+			f.processStartError = fault == "start"
+			if f.processStartError then f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
+			else
+				f.untilState(function() return #f.processes == 1 end)
+				if fault == "missing callback" then f.advance(45001)
+				else f.finishResume({ status = fault == "failure" and 1 or 0, timed_out = fault == "timeout", stdout = "invalid-json", stderr = "private-secret" }) end
+				f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
+			end
+			local count = #f.processes
+			for _ = 1, 6 do f.tick() end
+			assert(#f.processes == count and f.setupOpens == 0)
+			f.processStartError = false
+			f.invoke("setup")
+			f.untilState(function() return #f.processes == count + 1 end)
+			assert(f.setupOpens == 0, "authorized retry opened provisioning")
+		end)
+	end
+
+	case("healthy then stopped client never respawns without explicit repair", function(f)
+		f.warm(); f.authorizeResume()
+		f.fetchError, f.missingEndpoint = true, true
+		for _ = 1, 10 do f.tick() end
+		assert(#f.processes == 0 and #f.sent == 0, "intentional stop triggered a watchdog restart")
+		f.invoke("setup")
+		f.untilState(function() return #f.processes == 1 end)
+		f.finishResume(); f.fetchError, f.missingEndpoint = false, false; f.poll()
+		f.fetchError = true
+		for _ = 1, 10 do f.tick() end
+		assert(#f.processes == 1 and #f.sent == 0, "later failure restarted or replayed automatically")
+	end)
+
+	case("cold Setup intent waits for authorized recovery instead of provisioning", function(f)
+		f.authorizeResume(); f.missingEndpoint, f.fakeSetup = true, true
+		f.reload(); f.invoke("setup")
+		assert(#f.moduleLoads == 0 and f.ioCount() == 0)
+		f.untilState(function() return #f.processes == 1 end)
+		assert(f.setupOpens == 0 and #f.moduleLoads == 0)
+		f.finishResume(); f.missingEndpoint = false; f.poll()
+		assert(f.setupOpens == 0 and #f.moduleLoads == 0, "fulfilled cold recovery intent opened provisioning")
+	end)
+
+	case("Setup before first connecting health receipt cannot start another client", function(f)
+		f.authorizeResume(); f.connected(false); f.fakeSetup = true
+		f.tick(); f.invoke("setup")
+		f.untilState(function() return f.hasRequest("/v1/state") end)
+		f.invoke("setup")
+		assert(#f.moduleLoads == 0 and #f.processes == 0)
+		f.poll()
+		assert(f.status()[1].text == "Waiting for connection")
+		assert(#f.moduleLoads == 0 and #f.processes == 0 and f.setupOpens == 0)
+		f.fetchError, f.missingEndpoint = true, true
+		for _ = 1, 10 do f.tick() end
+		assert(#f.processes == 0, "healthy connecting client did not seal automatic recovery")
+	end)
+
+	case("invalid installed configuration never reads or launches resume authorization", function(f)
+		f.authorizeResume(); f.missingEndpoint = true
+		f.config = { controlFile = "relative/client.json" }
+		f.tick(); f.tick()
+		assert(f.status()[1].text == "Bridge endpoint needs attention" and #f.processes == 0)
+		for _, path in f.reads do assert(path ~= "/isolated/plugin-data/client-resume.json") end
+	end)
+
+	case("timed out process cannot overwrite an explicit retry with a late receipt", function(f)
+		f.authorizeResume(); f.missingEndpoint = true
+		f.untilState(function() return #f.processes == 1 end)
+		local stale = f.processes[1].callback
+		f.advance(45001)
+		f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
+		f.invoke("setup")
+		f.untilState(function() return #f.processes == 2 end)
+		stale({ status = 1, stdout = "invalid-json", stderr = "private-secret" })
+		f.tick()
+		assert(f.status()[1].text == "Starting local Bridge", "late process receipt displaced the active retry")
+		f.finishResume(); f.missingEndpoint = false; f.poll()
+		assert(#f.processes == 2 and f.status()[1].text ~= "Bridge start failed")
+	end)
+
+	case("malformed recovery result never becomes a successful start", function(f)
+		f.authorizeResume(); f.missingEndpoint = true
+		f.untilState(function() return #f.processes == 1 end)
+		f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client", controlFile = "/other/client.json", deviceId = "other" }), timed_out = false })
+		f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
+		assert(#f.processes == 1 and f.setupOpens == 0)
+	end)
+
+
+	case("verified install without resume authorization exposes Setup and later opens ordinary Bridge", function(f)
 		f.missingEndpoint = true
 		assert(f.completeSetup() == "awaiting")
-		assert(f.status()[1].text == "Waiting for local Bridge")
+		f.untilState(function() return f.status()[1].text == "Set up Bridge" end)
 		assert(#f.processes == 0 and #f.sent == 0)
 		f.chromeIsPure()
 		f.missingEndpoint = false
@@ -645,17 +843,18 @@ function run(entry, loadModule)
 		assert(#f.creations == 2 and f.setupOpens == 1)
 	end)
 
-	case("verified install with absent config never becomes a reinstall requirement", function(f)
+	case("verified install with absent config exposes actionable configuration error", function(f)
 		f.missingConnection = true
 		assert(f.completeSetup() == "awaiting")
 		f.tick()
-		assert(f.status()[1].text == "Waiting for local Bridge")
+		assert(f.status()[1].text == "Bridge endpoint needs attention")
 		f.missingConnection = false
 		f.poll()
 		assert(f.setupCallbacks.onConnected() == "ready")
 	end)
 
 	case("setup module load failure is visible and a later explicit open can recover", function(f)
+		f.poll()
 		f.moduleError, f.fakeSetup = true, true
 		f.invoke("setup")
 		f.tick(); f.tick()
@@ -683,7 +882,7 @@ function run(entry, loadModule)
 			tern.runtime.os = platform
 			f.endpointReadError = "Fixture filesystem failure (os error 3)"
 			f.tick(); f.tick()
-			assert(f.status()[1].text == (platform == "windows" and "Waiting for local Bridge" or "Bridge endpoint needs attention"))
+			assert(f.status()[1].text == (platform == "windows" and "Starting local Bridge" or "Bridge endpoint needs attention"))
 			f.noRequest("/v1/state")
 			f.chromeIsPure()
 		end)
@@ -699,13 +898,19 @@ function run(entry, loadModule)
 		assert(f.status()[1].text ~= "Bridge endpoint needs attention")
 	end)
 
-	case("synchronous fetch failure releases polling guard for a later retry", function(f)
+	case("failed local service request opens startup recovery instead of repeating an error", function(f)
 		f.fetchError = true
 		f.tick(); f.tick(); f.tick()
-		assert(f.status()[1].text == "Bridge endpoint needs attention")
+		f.fakeSetup = true
+		f.invoke("toggle-bridge")
+		local turns = 0
+		while f.setupOpens == 0 do turns += 1; assert(turns < 20, "dead service has no recovery entry"); f.tick() end
+		assert(#f.creations == 0 and #f.errors == 0)
+		f.noRequest("/v1/panels/open")
 		f.fetchError = false
 		f.poll()
-		assert(f.status()[1].text ~= "Bridge endpoint needs attention")
+		f.toggle()
+		assert(#f.creations == 1 and f.setupOpens == 1, "healthy service remained trapped in recovery")
 	end)
 
 	for _, context in { "local", "terminal", "other agent", "missing widget" } do
@@ -747,13 +952,16 @@ function run(entry, loadModule)
 		f.noRequest("/v1/panels/open")
 	end)
 
-	case("disconnected Bridge remains an error for a valid remote panel target", function(f)
-		f.warm()
+	case("healthy connecting client retains reconnection ownership without duplicate startup", function(f)
+		f.warm(); f.authorizeResume()
 		f.connected(false); f.poll()
-		f.toggle()
-		assert(#f.errors == 1 and f.errors[1] == "This device's Bridge connection is unavailable")
-		assert(f.status()[1].text == "Needs attention" and #f.creations == 0)
+		f.fakeSetup = true
+		f.invoke("toggle-bridge"); f.invoke("setup"); f.invoke("devices")
+		assert(f.status()[1].text == "Waiting for connection")
+		assert(#f.processes == 0 and f.setupOpens == 0 and #f.moduleLoads == 0)
+		assert(#f.errors == 0 and #f.creations == 0)
 		f.noRequest("/v1/panels/open")
+		for _, path in f.reads do assert(path ~= "/isolated/plugin-data/client-resume.json", "healthy client read recovery authorization") end
 	end)
 
 	case("ordinary Bridge relocates its view without moving an in-flight capture", function(f)
@@ -830,7 +1038,7 @@ function run(entry, loadModule)
 		f.toggle()
 		assert(created and floated and #f.floats == 1)
 		assert(f.layout().focus == f.panelPane, "panel did not become interactive")
-		f.link("hide")
+		f.toggle()
 		f.assertOriginalTab()
 		assert(not f.isOpen(f.panelPane) and next(f.layout().floats) == nil and f.tab(f.panelTab) == nil)
 	end)
@@ -907,7 +1115,7 @@ function run(entry, loadModule)
 		assert(f.pasted()[1].viewId == f.viewId and f.pasted()[1].sessionId == "session-A", "panel paste followed panel focus")
 		assert(#f.picks == 0 and #f.prompts == 0, "explicit paste opened a redundant dialog")
 		assert(f.floating(first).focus_size[1] == 47 and f.floating(first).focus_size[2] == 39 and f.floating(first).size[1] == 29 and f.floating(first).size[2] == 31, "paste or polling overwrote either user size")
-		f.link("hide")
+		f.toggle()
 		assert(#f.closes == 1 and f.closes[1] == first and f.isOpen(f.original) and f.isOpen(f.other))
 		assert(f.floating(first) == nil and not f.isOpen(first), "hide left its owned PiP behind")
 		f.assertOriginalTab()
@@ -1288,7 +1496,7 @@ function run(entry, loadModule)
 		f.focus(f.panelPane)
 		assert(f.link("upload").handled)
 		local capture = f.take("/v1/captures/pick-file")
-		f.link("hide")
+		f.toggle()
 		f.noRequest("/v1/transfers/cancel")
 		f.resolve(f.capture(capture, "hidden-file"), "session-A", "draft-A")
 		local upload = f.take("/v1/transfers")
@@ -1364,18 +1572,23 @@ function run(entry, loadModule)
 		f.flushPanels(); assert(#f.snapshots == count + 1 and #f.floats == floats and #f.focuses == focuses)
 	end)
 
-	case("panel focus preserves eligible destination and device picker rejects later conversation", function(f)
+	case("panel focus and inline choice publication never open a picker or submit a binding", function(f)
 		f.warm()
-		f.toggle()
-		f.focus(f.panelPane)
+		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } })
+		f.invoke("devices"); f.flushPanels()
+		local pane = f.panelPane
 		f.invoke("focus", {})
 		f.noRequest("/v1/intents")
-		assert(f.link("devices").handled)
-		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
-		f.choose("label", "Unbound")
-		f.resolve(f.take("/v1/intents", f.viewId), "session-B", "draft-B")
+		-- Native host form-change behavior is covered by the shipped host harness;
+		-- this boundary captures its actual choice event without inventing a bind.
+		assert(f.choices().options[2].key == "d1")
+		f.invoke("devices"); f.flushPanels()
+		f.focus(f.original); f.invoke("devices"); f.flushPanels()
+		assert(f.panelPane == pane and f.layout().focus == pane and #f.creations == 1 and #f.closes == 0,
+			"inline focus changed panel ownership: " .. tostring(f.panelPane == pane) .. "/" .. tostring(f.layout().focus == pane) .. "/" .. tostring(#f.creations) .. "/" .. tostring(#f.closes) .. "/" .. tostring(f.errors[#f.errors]))
+		assert(#f.picks == 0 and #f.binds() == 0, "selection or opening performed a binding")
 		f.noRequest("/v1/intents")
-		assert(#f.errors > 0, "device picker adopted a different conversation")
+		assert(f.link("devices").handled and #f.picks == 0, "obsolete Devices link still opened a picker")
 	end)
 
 	case("panel transfer list does not open an empty picker for another target's uploads", function(f)
@@ -1829,13 +2042,168 @@ function run(entry, loadModule)
 		f.noRequest("/v1/intents")
 	end)
 
-	case("binding admission includes the draft pinned before device selection", function(f)
-		f.warm(); f.invoke("devices")
-		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
-		f.choose("label", "Unbound")
+	case("explicit inline Apply binds only the frozen original client and retains operation receipts", function(f)
+		f.warm()
+		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 7)
+		f.toggle()
+		local choices = f.choices()
+		assert(choices.available and choices.current == "none" and choices.options[2].key == "d1")
+		local request = f.linkRequest("bind/" .. choices.generation .. "/d1")
+		local before = f.ioCount()
+		assert(f.dispatch("link", request).handled and f.ioCount() == before)
+		f.flush()
+		assert(#f.binds() == 0, "Apply skipped fresh conversation validation")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 		local bind = f.take("/v1/intents", f.viewId)
-		assert(bind.body.kind == "bind" and bind.body.draftToken == "draft-A")
+		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 7)
+		assert(bind.body.viewId == f.viewId and bind.body.sessionId == "session-A" and bind.body.draftToken == "draft-A")
+		f.respond(bind, { id = "bind-receipt", expiresAt = 60000 })
+		f.outcomes({ { id = "bind-receipt", viewId = f.viewId, kind = "bind", error = "Binding rejected by agent" } })
+		assert(#f.errors == 1 and f.errors[1] == "Binding rejected by agent")
+		f.poll(); assert(#f.errors == 1 and #f.binds() == 0)
+	end)
+
+	case("inline choices contain only bounded public fields and stable heartbeat generations", function(f)
+		f.warm()
+		local devices = {}
+		for index = 1, 40 do table.insert(devices, { id = "private-device-" .. index, name = string.rep("界", 100), platform = "darwin", online = index ~= 2 }) end
+		f.binding(nil, devices); f.toggle()
+		local value, count = f.choices(), #f.deviceEvents
+		local fields = { owner = true, panelId = true, generation = true, available = true, current = true, options = true }
+		for key in value do assert(fields[key], "private field crossed native selection boundary") end
+		assert(value.generation:match("^[1-9]%d*$") and #value.options == 33 and value.options[1].key == "none")
+		for _, option in value.options do
+			for key in option do assert(key == "key" or key == "label" or key == "detail" or key == "disabled") end
+			assert(#option.label <= 240 and #option.detail <= 240 and utf8.len(option.label) ~= nil)
+		end
+		assert(value.options[3].disabled and not value.options[2].disabled)
+		f.poll(); f.flushPanels(); assert(#f.deviceEvents == count)
+		f.advance(5000); f.poll(); f.flushPanels()
+		assert(#f.deviceEvents == count + 1 and f.choices().generation == value.generation)
+		assert(f.deviceEvents[#f.deviceEvents].at - f.deviceEvents[count].at >= 5000)
+		assert(#f.binds() == 0 and #f.picks == 0)
+	end)
+
+	for _, change in { "generation", "unknown key", "malformed key", "foreign window", "foreign panel", "wrong pane", "focus", "nonce", "expired", "offline", "revoked", "reordered", "revision", "disconnected" } do
+		case("inline Apply fails closed before resolve after " .. change, function(f)
+			f.warm()
+			local devices = {
+				{ id = "client-A", name = "Desk Mac", online = true, platform = "darwin" },
+				{ id = "client-B", name = "Other Mac", online = true, platform = "darwin" },
+			}
+			f.binding(nil, devices, 3); f.toggle()
+			local generation = f.choices().generation
+			local path = "bind/" .. (change == "generation" and "999999" or generation) .. "/" .. (change == "unknown key" and "d32" or change == "malformed key" and "d01" or "d1")
+			local request = f.linkRequest(path, change == "wrong pane" and f.original or nil,
+				change == "foreign window" and "another-window" or nil, change == "foreign panel" and "old-panel" or nil)
+			if change == "focus" then f.focus(f.other)
+			elseif change == "nonce" then f.panelSurfaceOwner = "another-window/another-panel"
+			elseif change == "expired" then f.advance(15001)
+			elseif change == "offline" then devices[1].online = false; f.binding(nil, devices, 3)
+			elseif change == "revoked" then f.binding(nil, { devices[2] }, 3)
+			elseif change == "reordered" then f.binding(nil, { devices[2], devices[1] }, 3)
+			elseif change == "revision" then f.binding(nil, devices, 4)
+			elseif change == "disconnected" then f.connected(false); f.poll() end
+			local before = f.ioCount()
+			assert(f.dispatch("link", request).handled); f.flush()
+			assert(#f.binds() == 0 and #f.picks == 0 and f.ioCount() == before)
+			assert(#f.errors > 0, "invalid inline Apply failed silently")
+		end)
+	end
+
+	for _, change in { "session", "draft", "revision", "offline", "revoked", "reordered", "focus", "panel closed" } do
+		case("inline Apply revalidates frozen choices after fresh resolve changes " .. change, function(f)
+			f.warm()
+			local devices = {
+				{ id = "client-A", name = "Desk Mac", online = true, platform = "darwin" },
+				{ id = "client-B", name = "Other Mac", online = true, platform = "darwin" },
+			}
+			f.binding(nil, devices, 3); f.toggle()
+			local generation = f.choices().generation
+			f.link("bind/" .. generation .. "/d1")
+			local validate = f.take("/v1/intents", f.viewId)
+			if change == "revision" then f.binding(nil, devices, 4)
+			elseif change == "offline" then devices[1].online = false; f.binding(nil, devices, 3)
+			elseif change == "revoked" then f.binding(nil, { devices[2] }, 3)
+			elseif change == "reordered" then f.binding(nil, { devices[2], devices[1] }, 3)
+			elseif change == "focus" then f.focus(f.other)
+			elseif change == "panel closed" then f.toggle() end
+			f.resolve(validate, change == "session" and "session-B" or "session-A", change == "draft" and "draft-B" or "draft-A")
+			assert(#f.binds() == 0 and #f.errors > 0, "changed inline choices retargeted a binding")
+		end)
+	end
+
+	case("reordering unrelated devices invalidates old keys rather than retargeting the selected device", function(f)
+		f.warm()
+		local a = { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }
+		local b = { id = "client-B", name = "Other Mac", online = true, platform = "darwin" }
+		f.binding(nil, { a, b }); f.toggle()
+		local old = f.choices().generation
+		f.binding(nil, { b, a }); f.flushPanels()
+		assert(f.choices().generation ~= old)
+		f.link("bind/" .. old .. "/d1")
+		assert(#f.binds() == 0)
+		-- A new explicit selection of Desk Mac uses its new key, never an old index.
+		f.poll(); f.flushPanels()
+		f.link("bind/" .. f.choices().generation .. "/d2")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		assert(f.take("/v1/intents", f.viewId).body.clientId == "client-A")
+	end)
+
+	case("explicit Unbound Apply uses the cached null mapping and unchanged selection is rejected", function(f)
+		f.warm()
+		f.binding("client-A", { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 2)
+		f.toggle()
+		assert(f.choices().current == "d1")
+		f.link("bind/" .. f.choices().generation .. "/d1")
+		assert(#f.binds() == 0)
+		f.poll(); f.flushPanels()
+		f.link("bind/" .. f.choices().generation .. "/none")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		local bind = f.take("/v1/intents", f.viewId)
+		assert(bind.body.kind == "bind" and bind.body.clientId == tern.json.null and bind.body.expectedRevision == 2)
+	end)
+
+	case("missing current binding stays unavailable without presenting a false Unbound selection", function(f)
+		f.warm()
+		f.binding("revoked-client", { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 4)
+		f.toggle()
+		local choices = f.choices()
+		assert(not choices.available and choices.current == "" and choices.options[1].key == "none")
+		f.link("bind/" .. choices.generation .. "/d1")
+		assert(#f.binds() == 0 and #f.errors == 1)
+	end)
+
+	case("device command in another session preserves the existing owned panel", function(f)
+		f.warm(); f.toggle()
+		local pane = f.panelPane
+		f.currentSession = 2; f.focus(f.other)
+		f.invoke("devices"); f.flushPanels()
+		assert(f.panelPane == pane and f.isOpen(pane) and #f.closes == 0 and #f.creations == 1)
+		assert(f.layout().focus == f.other and #f.picks == 0 and #f.binds() == 0)
+	end)
+
+	case("failed native choice delivery grants no Apply authority", function(f)
+		f.warm()
+		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } })
+		f.eventError = true; f.toggle()
+		assert(#f.deviceEvents == 0)
+		f.link("bind/1/d1")
+		assert(#f.binds() == 0 and #f.errors == 1)
+	end)
+
+	case("inline generation changes with device label and online state but not binding-free refresh", function(f)
+		f.warm()
+		local devices = { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }
+		f.binding(nil, devices); f.toggle()
+		local generation = f.choices().generation
+		devices[1].name = "Renamed Mac"; f.binding(nil, devices); f.flushPanels()
+		assert(f.choices().generation ~= generation and f.choices().options[2].label == "Renamed Mac")
+		generation = f.choices().generation
+		devices[1].online = false; f.binding(nil, devices); f.flushPanels()
+		assert(f.choices().generation ~= generation and f.choices().options[2].disabled)
+		generation = f.choices().generation
+		f.poll(); f.flushPanels(); assert(f.choices().generation == generation and #f.binds() == 0)
 	end)
 
 	print("PASS: " .. tostring(passed) .. " synthetic SDK-boundary cases executing shipped window.luau; native Tern/clipboard/editor acceptance remains separate")

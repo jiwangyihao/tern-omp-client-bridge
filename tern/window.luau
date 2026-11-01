@@ -7,6 +7,10 @@ local statusError = nil
 local connectionConfig = nil
 local connectionStatus, connectionMessage = "checking", "Checking this device's Bridge endpoint"
 local installationVerified = false
+local installedConfig = nil
+local endpointMissing = false
+local recovery = { attempted = false }
+local setupBridge
 local targets = {}
 local pending = {}
 local operations = {}
@@ -27,6 +31,7 @@ local transferSummary = { failed = 0 }
 local transferPhases = {}
 local transferDoneUntil, transferDoneCount = 0, 0
 local setupRequired = false
+local serviceUnavailable = false
 local setupBusy = false
 local setupChecking = false
 local setupInfo = nil
@@ -115,36 +120,143 @@ local function readMetadata(path, label)
 	return value
 end
 
+local function absolutePath(value)
+	if type(value) ~= "string" or value == "" or value:find("%c") then return false end
+	if value:sub(1, 1) ~= "/" and not (tern.runtime.os == "windows" and (value:match("^%a:[/\\]") or value:match("^\\\\[^\\]+\\[^\\]+"))) then return false end
+	for part in value:gmatch("[^/\\]+") do if part == "." or part == ".." then return false end end
+	return true
+end
+
+local function samePath(a, b)
+	if tern.runtime.os == "windows" then return a:gsub("\\", "/"):lower() == b:gsub("\\", "/"):lower() end
+	return a == b
+end
+
+local function queueRecovery(config)
+	if recovery.attempted or setupBusy then return false end
+	recovery.attempted, recovery.queued, recovery.config = true, true, config
+	recovery.phase, recovery.message = "starting", "Starting this device's authorized local Bridge"
+	statusError, setupRequired = nil, false
+	return true
+end
+
+local function failRecovery(message)
+	recovery.phase, recovery.message = "failed", message
+	recovery.pending, recovery.receipt, recovery.queued = nil, nil, nil
+	recovery.manualOrigin, recovery.openSetup = nil, nil
+	statusError = message
+end
+
+-- Called only by the fresh poll timer. A process receipt never parses JSON,
+-- performs IO, schedules native callbacks, or captures a window context.
+local function advanceRecovery(cx)
+	if recovery.queued then
+		recovery.queued = nil
+		local plan, phase = readMetadata(tern.plugin.data .. "/client-resume.json", "local Bridge recovery authorization")
+		if not plan then
+			if phase == "missing" then
+				recovery.phase, recovery.message = "absent", "Open Setup to authorize local Bridge recovery on this device"
+				setupRequired, statusError = true, nil
+				if recovery.openSetup then
+					recovery.openSetup, recovery.fallback = nil, true
+					setupBridge(cx)
+					recovery.fallback = nil
+				end
+			else failRecovery("Cannot read local Bridge recovery authorization; inspect its private file and permissions, then use Start / repair Bridge") end
+			return true
+		end
+		local valid = plan.schema == 1 and plan.kind == "client-resume" and absolutePath(tern.plugin.data)
+		local fields = { schema = true, kind = true, host = true, remoteCommand = true, stateDir = true,
+			controlFile = true, packageRoot = true, runtime = true, deviceId = true, packageDigest = true }
+		for key in plan do if not fields[key] then valid = false end end
+		for _, key in { "stateDir", "controlFile", "packageRoot", "runtime" } do valid = valid and absolutePath(plan[key]) end
+		for _, key in { "host", "remoteCommand", "deviceId" } do valid = valid and type(plan[key]) == "string" and plan[key] ~= "" and not plan[key]:find("%c") end
+		valid = valid and type(plan.packageDigest) == "string" and #plan.packageDigest == 64 and plan.packageDigest:match("^[a-f0-9]+$") ~= nil
+		valid = valid and samePath(plan.controlFile, recovery.config.controlFile)
+			and samePath(plan.controlFile, plan.stateDir:gsub("[/\\]+$", "") .. "/client.json")
+		if not valid then
+			failRecovery("Invalid or mismatched local Bridge recovery authorization; inspect the installed configuration before retrying Setup")
+			return true
+		end
+		recovery.plan, recovery.openSetup, recovery.manualOrigin = plan, nil, nil
+		local pending = { deadline = tern.now() + 45000 }
+		recovery.pending = pending
+		local started = pcall(tern.process.run, { plan.runtime, plan.packageRoot:gsub("[/\\]+$", "") .. "/src/cli.ts", "resume-client", "--plugin-data", tern.plugin.data }, { timeout_ms = 45000 }, function(result)
+			if recovery.pending == pending then recovery.receipt = result or false end
+		end)
+		if not started then failRecovery("Cannot start the authorized local Bridge runtime; inspect the installed package and use Start / repair Bridge") end
+		return true
+	end
+	if not recovery.pending then return false end
+	local result = recovery.receipt
+	if result == nil and tern.now() < recovery.pending.deadline then return true end
+	local timedOut = result == nil or (type(result) == "table" and result.timed_out == true)
+	recovery.pending, recovery.receipt = nil, nil
+	if timedOut then
+		failRecovery("Local Bridge startup timed out; inspect the private client service log, then use Start / repair Bridge. No service was stopped.")
+		return true
+	end
+	if type(result) ~= "table" or result.status ~= 0 or type(result.stdout) ~= "string" or #result.stdout > 16384 then
+		failRecovery("Local Bridge startup failed; inspect the private client service log and authorized package, then use Start / repair Bridge")
+		return true
+	end
+	local ok, value = pcall(tern.json.decode, result.stdout)
+	local plan = recovery.plan
+	if not ok or type(value) ~= "table" or value.kind ~= "client-resumed"
+		or type(value.controlFile) ~= "string" or not samePath(value.controlFile, plan.controlFile)
+		or type(value.stateDir) ~= "string" or not samePath(value.stateDir, plan.stateDir) or value.deviceId ~= plan.deviceId
+		or type(value.pid) ~= "number" or value.pid <= 0 or value.pid % 1 ~= 0
+		or type(value.connected) ~= "boolean" or type(value.reused) ~= "boolean"
+		or (value.ownership ~= "managed" and value.ownership ~= "existing")
+		or type(value.sessionReady) ~= "boolean" or value.upgradeRequired ~= false then
+		failRecovery("Local Bridge startup returned no matching verified result; inspect its private service log before retrying")
+		return true
+	end
+	recovery.phase, recovery.message = "waiting", "Waiting for connection to the local Bridge"
+	connection, connectionConfig, statusError = nil, nil, nil
+	return true
+end
+
 local function loadConnection()
 	local configStep = connectionConfig == nil
+	if configStep then installedConfig = nil end
 	local value, phase, message = readMetadata(configStep and (tern.plugin.data .. "/config.json") or connectionConfig.controlFile,
 		configStep and "Bridge configuration" or "local Bridge endpoint metadata")
 	if not value then
+		endpointMissing = not configStep and phase == "missing"
+		if endpointMissing and queueRecovery(connectionConfig) then connectionConfig = nil; return true end
+		if endpointMissing and recovery.phase == "waiting" then failRecovery("The resumed local Bridge endpoint is missing; inspect its private service log and use Start / repair Bridge") end
 		connectionConfig = nil
 		connectionStatus, connectionMessage = phase == "missing" and "awaiting" or "error", message
-		setupRequired = configStep and phase == "missing" and not installationVerified
-		statusError = phase == "error" and message or nil
+		if configStep and phase == "missing" and installationVerified then
+			connectionStatus, connectionMessage = "error", "The installed Bridge configuration is missing; use Start / repair Bridge to inspect or restore Setup"
+		end
+		setupRequired = (configStep and phase == "missing" and not installationVerified) or recovery.phase == "absent"
+		statusError = connectionStatus == "error" and connectionMessage or nil
 		return false
 	end
 	if configStep then
 		setupRequired = false
-		if type(value.controlFile) ~= "string" or value.controlFile == "" or value.controlFile:find("%c") then
+		if not absolutePath(value.controlFile) then
 			connectionStatus, connectionMessage = "error", "Invalid Bridge control-file configuration; inspect this device's Bridge configuration and retry"
 			statusError = connectionMessage
 			return false
 		end
 		connectionConfig = value
+		installedConfig = value
 		connectionStatus, connectionMessage = "checking", "Checking this device's Bridge endpoint metadata"
 		setupRequired = false
 		return true
 	end
 	connectionConfig = nil
+	endpointMissing = false
 	-- Never disclose the local bearer to a remote URL or to the agent host.
 	if type(value.url) ~= "string" or not value.url:match("^http://127%.0%.0%.1:%d+/?$") then
 		connectionStatus, connectionMessage = "error", "Client UI endpoint must be http://127.0.0.1:PORT; correct this device's Bridge endpoint metadata"
 	elseif type(value.token) ~= "string" or value.token == "" then
 		connectionStatus, connectionMessage = "error", "Missing local UI token; check this device's Bridge endpoint metadata"
 	else
+		if serviceUnavailable and queueRecovery(installedConfig) then return true end
 		connection = { url = value.url:gsub("/$", ""), token = value.token }
 		connectionStatus, connectionMessage = "ready", nil
 		setupRequired = false
@@ -328,40 +440,6 @@ local function deviceName(view, id)
 	return "Unavailable device"
 end
 
-local function picker(cx, explicit)
-	local target = explicit or destination(cx)
-	if not target then cx:toast("info", "Focus a remote OMP pane to select its client"); return end
-	target = pinDestination(cx, target)
-	if not target then return end
-	validateConversation(target, function(view, err, fresh)
-		if err then report(fresh, err); return end
-		local binding = view.state.binding
-		local items = { { label = "Unbound", detail = "Agent-host operations only", clientId = tern.json.null, current = binding.clientId == nil } }
-		for _, device in view.state.devices do
-			local own = state and device.id == state.device.id
-			table.insert(items, {
-				label = device.name .. (own and " — This device" or ""),
-				detail = device.platform .. " · " .. (device.online and "Online" or "Offline") .. " · Bind to use this computer under its native safety rules",
-				clientId = device.id, current = binding.clientId == device.id,
-			})
-		end
-		fresh:pick({ items = items, placeholder = "Agent client for this OMP session", action = "bind" }):next(function(item, pickError, current)
-			if pickError then report(current, pickError); return end
-			if not item then return end
-			validateConversation(target, function(currentView, changed, currentCx)
-				if changed then report(currentCx, changed); return end
-				if currentView.draftToken ~= target.draftToken then report(currentCx, "Original OMP draft changed; select the device again"); return end
-				api("POST", "/v1/intents", {
-					kind = "bind", viewId = target.viewId, sessionId = target.sessionId, draftToken = target.draftToken,
-					clientId = item.clientId, expectedRevision = binding.revision,
-				}, function(receipt, failure, live)
-					if failure then report(live, failure); return end
-					operations[receipt.id] = { viewId = target.viewId, deadline = tern.now() + 65000 }
-				end)
-			end)
-		end)
-	end)
-end
 
 local function transfers(cx, target)
 	if not state or #state.transfers == 0 then cx:toast("info", "No human transfers"); return end
@@ -486,7 +564,6 @@ local function preparedAction(operation)
 		prepareAction(cx, target, function(fresh) operation(fresh, target) end)
 	end
 end
-picker = preparedAction(picker)
 pasteRemote = preparedAction(pasteRemote)
 uploadRemote = preparedAction(uploadRemote)
 
@@ -517,9 +594,46 @@ local function setupModule(name, cx)
 	report(cx, "Cannot load the Bridge setup module; reload the installed plugin package, then reopen setup")
 	return nil
 end
-local function setupBridge(cx)
+setupBridge = function(cx)
 	if not cx then return end
 	if clipboardRequest or filePickerOpen then cx:toast('info', 'Finish or cancel the current transfer before setup'); return end
+	-- A click during cold discovery is an intent, not evidence of a missing client.
+	-- The normal bounded poll classifies config, endpoint and first health receipt.
+	if not recovery.fallback and not recovery.pending and not recovery.queued
+		and (connectionStatus == "checking" or (connection and not state and not serviceUnavailable)) then
+		local origin = cx.sessions:current()
+		recovery.manualOrigin = { id = origin.id, host = origin.host }
+		recovery.openSetup = true
+		return
+	end
+	if recovery.manualOrigin then
+		local origin, current = recovery.manualOrigin, cx.sessions:current()
+		recovery.manualOrigin = nil
+		if current.id ~= origin.id or current.host ~= origin.host then
+			recovery.openSetup = nil
+			cx:toast('info', 'Bridge setup', 'The displayed session changed. Open Bridge again in the intended session.')
+			return
+		end
+	end
+	if recovery.pending or recovery.queued then
+		recovery.openSetup = recovery.queued and true or nil
+		cx:toast('info', 'OMP Client Bridge', 'Starting local Bridge; wait for this attempt to finish')
+		return
+	end
+	if connection and not serviceUnavailable and state and not state.connected then
+		cx:toast('info', 'OMP Client Bridge', 'Waiting for connection. The local client is running and owns SSH reconnection; no duplicate client was started.')
+		return
+	end
+	if installedConfig and (endpointMissing or serviceUnavailable) and not recovery.fallback and not setupBusy then
+		recovery.attempted, recovery.phase = false, nil
+		recovery.openSetup = true
+		-- Re-read current config/endpoint before admitting an explicit local retry.
+		connection, connectionConfig = nil, nil
+		statusError = nil
+		connectionStatus, connectionMessage = "checking", "Checking local Bridge recovery authorization"
+		refreshChrome()
+		return
+	end
 	if setupController then setupController.open(cx); return end
 	if setupLoading then return end
 	setupLoading = true
@@ -569,6 +683,96 @@ local function sameSnapshot(a, b)
 	return true
 end
 
+-- Device choices travel only to our native panel. Real identities never cross
+-- this display boundary; each generation pins scalar identity and opaque keys.
+local function deviceSelection(owned)
+	local target = owned.target
+	local view = state and state.views[target.viewId]
+	local binding = view and view.state.binding
+	local available = connection ~= nil and state ~= nil and state.connected == true and view ~= nil and binding ~= nil
+		and liveTarget(target) == true and statusError == nil
+		and type(view.sessionId) == "string" and view.sessionId ~= ""
+		and type(view.draftToken) == "string" and view.draftToken ~= ""
+		and type(binding.revision) == "number" and binding.revision >= 0 and binding.revision < math.huge
+		and binding.revision % 1 == 0
+	local clients = { none = tern.json.null }
+	local options = { table.freeze({ key = "none", label = "Unbound", detail = "Agent-host operations only", disabled = false }) }
+	local bound = binding and binding.clientId
+	local current = (bound == nil or bound == tern.json.null) and "none" or ""
+	for index, device in view and view.state.devices or {} do
+		if index > 32 then break end
+		local key = "d" .. tostring(index)
+		clients[key] = device.id
+		if device.id == bound then current = key end
+		table.insert(options, table.freeze({ key = key,
+			label = publicText(device.name),
+			detail = publicText(device.platform .. " · " .. (device.online == true and "Online" or "Offline") .. (state.device and device.id == state.device.id and " · This device" or "")),
+			disabled = device.online ~= true }))
+	end
+	if current == "" then available = false end
+	return table.freeze({ target = table.freeze({ destinationId = target.destinationId, viewId = target.viewId,
+			sessionId = view and view.sessionId, draftToken = view and view.draftToken }),
+		revision = binding and binding.revision, clients = table.freeze(clients),
+		available = available == true, current = current, options = table.freeze(options) })
+end
+
+local function publishDeviceSelection(cx, owned)
+	local selection = deviceSelection(owned)
+	if not sameSnapshot(owned.selection, selection) then
+		owned.selection = selection
+		owned.selectionSerial = (owned.selectionSerial or 0) + 1
+		owned.selectionGeneration = string.format("%.0f", owned.selectionSerial)
+		owned.selectionHeartbeat, owned.selectionSentAt = nil, nil
+	end
+	if tern.now() < (owned.selectionHeartbeat or 0) then return end
+	local session = cx.sessions:current()
+	if session.id ~= owned.session or session.host ~= owned.host or not panelSurface(cx, owned.pane) then return end
+	local payload = tern.json.encode({ owner = windowId, panelId = owned.id,
+		generation = owned.selectionGeneration, available = selection.available,
+		current = selection.current, options = selection.options })
+	local ok = pcall(function()
+		cx.session:event(owned.pane, { ev = "action", act = "bridge-device-selection", value = payload })
+	end)
+	-- Missing native delivery never grants Apply authority or renews its lease.
+	owned.selectionHeartbeat = tern.now() + 5000
+	if ok then owned.selectionSentAt = tern.now() end
+end
+
+local function applyDevice(cx, generation, key)
+	local owned = panel
+	local selection = owned.selection
+	local function valid(fresh)
+		if not fresh or panel ~= owned or owned.selection ~= selection
+			or generation ~= owned.selectionGeneration or not selection or not selection.available
+			or not owned.selectionSentAt or tern.now() >= owned.selectionSentAt + 15000
+			or owned.appliedGeneration == generation or selection.clients[key] == nil
+			or key == selection.current or not sameSnapshot(selection, deviceSelection(owned)) then return false end
+		local offered = false
+		for _, option in selection.options do if option.key == key and not option.disabled then offered = true end end
+		local session = fresh.sessions:current()
+		return offered and session.id == owned.session and session.host == owned.host
+			and fresh.session:focused() == owned.pane and panelSurface(fresh, owned.pane)
+	end
+	if owned.applying then return end
+	if not valid(cx) then report(cx, "Device choices changed or expired; select a current online device and apply again"); return end
+	owned.applying = true
+	validateConversation(selection.target, function(view, err, fresh)
+		owned.applying = false
+		if err then report(fresh, err); return end
+		if not valid(fresh) or view.draftToken ~= selection.target.draftToken or view.state.binding.revision ~= selection.revision then
+			report(fresh, "Original conversation, draft, binding or device choices changed; nothing was bound")
+			return
+		end
+		owned.appliedGeneration = generation
+		api("POST", "/v1/intents", { kind = "bind", viewId = selection.target.viewId,
+			sessionId = selection.target.sessionId, draftToken = selection.target.draftToken,
+			clientId = selection.clients[key], expectedRevision = selection.revision }, function(receipt, failure, live)
+			if failure then report(live, failure); return end
+			operations[receipt.id] = { viewId = selection.target.viewId, deadline = tern.now() + 65000 }
+		end)
+	end)
+end
+
 
 local function hidePanel(cx)
 	local owned = panel
@@ -582,12 +786,14 @@ end
 
 local function publishPanel(cx)
 	if not cx or not panel then return end
-	if panel.creating or panel.publishing then return end
+	if panel.creating then return end
 	for _, item in state and state.panels or {} do
 		if item.owner == windowId and item.panelId == panel.id and item.phase == "closed" then
 			panel = nil; refreshChrome(); return
 		end
 	end
+	publishDeviceSelection(cx, panel)
+	if panel.publishing then return end
 	local target = panel.target
 	local view = state and state.views[target.viewId]
 	local available = liveTarget(target)
@@ -693,7 +899,7 @@ local function panelPipStep(cx, owned)
 		-- Hidden tabs need not render a TSP surface. The returned pane ID identifies
 		-- our new block; validate its surface nonce once it becomes visible as a PiP.
 		local called, floated = pcall(function()
-			return cx.layout:float(owned.pane, owned.target.pane, "tr", { focus = false, size = { 32, 24 } })
+			return cx.layout:float(owned.pane, owned.target.pane, "tr", { focus = false, size = { 31, 13 } })
 		end)
 		if not called or not floated then
 			owned.pip = nil
@@ -773,13 +979,18 @@ local function togglePanel(cx)
 			diagnostic("panel.target_changed", { sessionMatch = session.id == owned.session, hostMatch = session.host == owned.host, destinationMatch = focused ~= nil and focused.destinationId == target.destinationId }, operation)
 			hidePanel(fresh); report(fresh, "The displayed OMP target changed before Bridge opened; retry in the intended session"); return
 		end
-		local ok, pane = pcall(function() return fresh:new_block(panelKind, { windowId, owned.id, state.device.id }, "tab", { focus = false }) end)
+		-- Public display context only; routing and admission still use the first three locators.
+		local folder = type(target.cwd) == "string" and target.cwd:match("([^/\\]+)[/\\]*$")
+		local labels = { publicText(state.serverName, "Remote host"), publicText(folder, "Remote session"), publicText(target.title, "Remote OMP") }
+		local ok, pane = pcall(function()
+			return fresh:new_block(panelKind, { windowId, owned.id, state.device.id, labels[1], labels[2], labels[3] }, "tab", { focus = false })
+		end)
 		diagnostic("panel.block.result", { created = ok and pane ~= nil and pane ~= false, exception = not ok }, operation)
 		if not ok or not pane then hidePanel(fresh); report(fresh, "Install or reload the Bridge host plugin on the intended host"); return end
 		owned.pane, owned.creating = pane, false
 		diagnostic("panel.opened", { created = true }, operation)
 		panelError = nil
-		publishPanel(fresh)
+		defer(publishPanel)
 		refreshChrome()
 		owned.pip = { phase = "wait", deadline = tern.now() + 10000 }
 		tern.timer(16, function(current) return panelPipStep(current, owned) end)
@@ -843,9 +1054,17 @@ end
 
 local function poll(cx)
 	if pollBusy then return end
+	if advanceRecovery(cx) then
+		if recovery.phase == "failed" and cx then cx:toast("error", "OMP Client Bridge", recovery.message) end
+		expirePending(cx)
+		refreshChrome()
+		tern.timer(recovery.pending and 500 or 0, poll)
+		return
+	end
 	if not connection then
 		expirePending(cx)
 		local advanced = loadConnection()
+		if recovery.manualOrigin and not advanced then setupBridge(cx) end
 		refreshChrome()
 		tern.timer(advanced and 0 or 3000, poll)
 		return
@@ -854,6 +1073,7 @@ local function poll(cx)
 	api("GET", "/v1/state", nil, function(value, err, fresh)
 		pollBusy = false
 		if err then
+			serviceUnavailable = true
 			statusError = err
 			connection, connectionConfig = nil, nil
 			connectionStatus, connectionMessage = "error", "Local Bridge request failed; check this device's Bridge service and retry"
@@ -861,7 +1081,14 @@ local function poll(cx)
 			resolving = {}
 		else
 			state = value
+			serviceUnavailable = false
 			statusError = nil
+			recovery.phase, recovery.message, recovery.openSetup = nil, nil, nil
+			setupRequired, endpointMissing = false, false
+			-- Startup recovery is not a watchdog: observing any healthy local client
+			-- seals automatic launch, including a client still connecting over SSH.
+			recovery.attempted = true
+			if recovery.manualOrigin then defer(setupBridge) end
 			if not state.connected then resolved = {}; resolving = {} end
 			for _, outcome in state.outcomes or {} do
 				local operation = operations[outcome.id]
@@ -917,11 +1144,11 @@ local function poll(cx)
 	end)
 end
 
-tern.command({ id = "setup", title = "Set up Bridge", icon = "plug", group = "OMP", run = setupBridge })
+tern.command({ id = "setup", title = "Start / repair Bridge", icon = "plug", group = "OMP", run = setupBridge })
 tern.command({ id = "toggle-bridge", title = "Toggle Bridge", icon = "panel-right", group = "OMP", run = function(cx)
 	diagnosticSerial += 1
 	diagnostic("entry.command", { context = cx ~= nil, connected = state and state.connected == true })
-	if setupBusy or setupRequired or (not connection and connectionStatus == "awaiting") then
+	if setupBusy or setupRequired or serviceUnavailable or (state and state.connected ~= true) or (not connection and connectionStatus == "awaiting") then
 		setupBridge(cx)
 	else
 		if not connection and connectionStatus == "error" then cx:toast("error", "OMP Client Bridge", connectionMessage); return end
@@ -932,18 +1159,20 @@ end })
 local function handlePanelLink(req, cx)
 	-- All links in our scheme are consumed, including malformed, foreign and stale
 	-- links. Never let a rejected action fall through to a system URL handler.
-	local owner, id, verb = req.url:match("^omp%-bridge%-panel://([%w_.%-]+)/([%w_.%-]+)/([a-z]+)$")
+	local owner, id, path = req.url:match("^omp%-bridge%-panel://([%w_.%-]+)/([%w_.%-]+)/(.+)$")
+	local verb = path and path:match("^([a-z]+)$")
+	local generation, key
+	if path then generation, key = path:match("^bind/([1-9]%d*)/([%w]+)$") end
 	if not panel or owner ~= windowId or id ~= panel.id or req.pane ~= panel.pane
 		or cx.session:focused() ~= req.pane or not panelSurface(cx) then
 		cx:toast("error", "OMP Client Bridge", "This Bridge panel is stale or belongs to another window; open Toggle Bridge in this window")
 		return { handled = true }
 	end
-	if verb == "hide" then hidePanel(cx); return { handled = true } end
 	local target = destination(cx, panel.target)
 	if not target then report(cx, "Original remote OMP pane is no longer available"); return { handled = true } end
 	if verb == "paste" then pasteRemote(cx, target)
 	elseif verb == "upload" then uploadRemote(cx, target)
-	elseif verb == "devices" then picker(cx, target)
+	elseif generation and #generation <= 32 and (key == "none" or (key:match("^d[1-9]%d?$") and tonumber(key:sub(2)) <= 32)) then applyDevice(cx, generation, key)
 	elseif verb == "transfers" then transfers(cx, target)
 	elseif verb == "approvals" then interactions(cx)
 	else cx:toast("error", "OMP Client Bridge", "Unknown Bridge panel action") end
@@ -958,7 +1187,31 @@ tern.route.link(function(req, cx)
 	end
 	return setupController and setupController.route(req, cx) or nil
 end)
-tern.command({ id = "devices", title = "Select agent device", group = "OMP", run = picker })
+tern.command({ id = "devices", title = "Select agent device", group = "OMP", run = function(cx)
+	if panel then
+		local owned = panel
+		defer(function(fresh)
+			if panel ~= owned or not fresh or owned.creating then return end
+			local session = fresh.sessions:current()
+			if session.id ~= owned.session or session.host ~= owned.host or not panelSurface(fresh, owned.pane) then
+				fresh:toast("info", "OMP Client Bridge", "Return to the original Bridge panel to select its agent device")
+				return
+			end
+			publishPanel(fresh)
+			if fresh.session:focused() ~= owned.pane then
+				local ok = pcall(function() fresh.layout:focus(owned.pane) end)
+				if not ok then report(fresh, "Cannot focus the owned Bridge panel with the native window API") end
+			end
+		end)
+	elseif setupBusy or setupRequired or serviceUnavailable or (state and state.connected ~= true) or (not connection and connectionStatus == "awaiting") then
+		setupBridge(cx)
+	elseif not connection and connectionStatus == "error" then
+		cx:toast("error", "OMP Client Bridge", connectionMessage)
+	else
+		if setupController then setupController.hide(cx) end
+		togglePanel(cx)
+	end
+end })
 tern.command({ id = "transfers", title = "Human transfers", group = "OMP", run = transfers })
 tern.command({ id = "approvals", title = "Pending client approvals", group = "OMP", run = interactions })
 tern.command({ id = "paste-remote", title = "Paste to remote", icon = "clipboard", group = "OMP", run = function(cx)
@@ -996,12 +1249,21 @@ local function statusSegments(viewId)
 	if setupBusy then
 		return { { text = "Setting up · " .. publicText(setupInfo and setupInfo.stage, "Starting"), icon = "clock", tone = "accent", command = action .. "setup" } }
 	end
-	if setupRequired then
+	if recovery.phase == "starting" then
+		return { { text = "Starting local Bridge", icon = "clock", tone = "accent", command = action .. "setup" } }
+	end
+	if recovery.phase == "failed" and (not connection or serviceUnavailable) then
+		return { { text = "Bridge start failed", icon = "warn", tone = "error", command = action .. "setup" } }
+	end
+	if setupRequired or recovery.phase == "absent" then
 		return { { text = "Set up Bridge", icon = "plug", tone = "warn", command = action .. "setup" } }
 	end
 	if not connection then
 		local fault = connectionStatus == "error"
-		return { { text = fault and "Bridge endpoint needs attention" or "Waiting for local Bridge", icon = "plug", tone = fault and "error" or "warn", command = action .. "toggle-bridge" } }
+		return { { text = serviceUnavailable and "Start / repair Bridge" or (fault and "Bridge endpoint needs attention" or "Waiting for local Bridge"), icon = "plug", tone = fault and "error" or "warn", command = action .. (serviceUnavailable and "setup" or "toggle-bridge") } }
+	end
+	if serviceUnavailable then
+		return { { text = "Start / repair Bridge", icon = "plug", tone = "warn", command = action .. "setup" } }
 	end
 	local failed, approvals = transferSummary.failed, state and #state.interactions or 0
 	local unavailable = statusError ~= nil or panelError ~= nil
@@ -1013,7 +1275,7 @@ local function statusSegments(viewId)
 			or "Open remote OMP · load extension"
 		return { { text = label, icon = "terminal", tone = "warn", command = action .. "toggle-bridge" } }
 	end
-	local text, icon, tone = "Disconnected", "plug", "warn"
+	local text, icon, tone = "Waiting for connection", "clock", "warn"
 	if connected then
 		text, tone = viewId and targets[viewId] and "Connected · Resolving" or "Connected · No session", "muted"
 		if view then
@@ -1036,7 +1298,7 @@ local function statusSegments(viewId)
 	if unavailable then text, icon, tone = "Needs attention", "warn", "error" end
 	local segments = {
 		{ text = text, icon = icon, tone = tone == "muted" and panel and "accent" or tone,
-			command = action .. "toggle-bridge" },
+			command = action .. (connected and "toggle-bridge" or "setup") },
 	}
 	if transferSummary.text then table.insert(segments, { text = transferSummary.text, icon = transferSummary.icon, tone = transferSummary.tone, command = action .. "transfers" }) end
 	if failed > 0 then table.insert(segments, { text = tostring(failed) .. " failed", icon = "warn", tone = "error", command = action .. "transfers" }) end

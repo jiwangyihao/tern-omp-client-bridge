@@ -52,6 +52,26 @@ test("setup creates an identity without grants and preserves its keys and device
 	expect(repaired.device).toEqual(renamed.device);
 });
 
+test("recovery reads only the approved existing identity and never repairs missing or mismatched keys", async () => {
+	const root = await fixture();
+	const identity = await loadClientIdentity(root);
+	const file = path.join(root, "identity.json");
+	const original = await readFile(file, "utf8");
+	const options = { expectedDeviceId: identity.device.id };
+	expect(await loadClientIdentity(root, options)).toEqual(identity);
+	expect(await readFile(file, "utf8")).toBe(original);
+	await expect(loadClientIdentity(root, { expectedDeviceId: "client_" + "0".repeat(32) })).rejects.toMatchObject({ code: "CLIENT_IDENTITY_CONFLICT" });
+	expect(await readFile(file, "utf8")).toBe(original);
+	await rm(file);
+	await expect(loadClientIdentity(root, options)).rejects.toMatchObject({ code: "CLIENT_IDENTITY_REQUIRED" });
+	expect(await readOptionalJson(file)).toBeUndefined();
+	const other = await loadClientIdentity(await fixture());
+	await writePrivateJson(file, { ...identity, privateKey: other.privateKey });
+	const corrupted = await readFile(file, "utf8");
+	await expect(loadClientIdentity(root, options)).rejects.toMatchObject({ code: "INVALID_IDENTITY" });
+	expect(await readFile(file, "utf8")).toBe(corrupted);
+});
+
 test.each([{ capabilities: [] }, { capabilities: ["files", "exec", "browser"] }])("legacy identity migration strips grants without rotating identity (%j)", async ({ capabilities }) => {
 	const root = await fixture();
 	const original = await loadClientIdentity(root, { name: "Existing device" });

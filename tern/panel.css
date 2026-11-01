@@ -1,0 +1,382 @@
+/* SPDX-License-Identifier: MPL-2.0 */
+/* Connection-card body only. Tern owns the pane frame and hidden/disabled states.
+ * Native DOM hooks: docs.stencil.so/tern/elements/input.md.
+ * Theme colors and fonts intentionally follow Tern rather than the prototype's
+ * fixed palette. The native select retains its menu/checkmark/chevron behavior.
+ * Hover/state motion is supplied separately by panel-motion.css.
+ */
+.sf-main[data-surface='plugin.omp-client-bridge.panel'] {
+  --tv-font: var(--sans);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--t1);
+  /* The native pane already contributes its grid inset outside this region. */
+  padding: max(0px, calc(16px - var(--tv-py, 0px) / var(--sf-zoom, 1))) max(0px, calc(16px - var(--tv-px, 0px) / var(--sf-zoom, 1)));
+  gap: 0 !important;
+  min-width: 0;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-identity'] {
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 10px !important;
+  min-width: 0;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-host-mark'] {
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0 !important;
+  border-radius: var(--r-ctl);
+  background: var(--raise);
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-host-mark'] .sf-icon,
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-host-mark'] .ico {
+  width: 18px;
+  height: 18px;
+  color: inherit;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-host-info'] {
+  min-width: 0;
+  gap: 3px !important;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-host-name'] {
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  color: var(--t1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-host-kind'] {
+  font-size: 11px;
+  line-height: 13px;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-status'] {
+  display: flex;
+  align-items: center;
+  align-self: flex-start;
+  flex-shrink: 0;
+  gap: 5px;
+  margin-left: auto;
+  padding-top: 3px;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-status'][data-tone='success'] {
+  color: var(--ok);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-status'][data-tone='pending'] {
+  color: var(--accent-ink);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-status']::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-destination'] {
+  min-width: 0;
+  margin: 16px 0 14px;
+  padding-left: 11px;
+  border-left: 2px solid var(--l2);
+  gap: 5px !important;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-workspace'] {
+  min-width: 0;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px !important;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 550;
+  color: var(--t1);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-workspace'] .sf-text {
+  min-width: 0;
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: inherit;
+  overflow-wrap: anywhere;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-workspace'] .sf-icon,
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-workspace'] .ico {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-target'] {
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--t3);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-source'] {
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px !important;
+  margin-bottom: 8px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-source'] .sf-text {
+  min-width: 0;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-source-name'] {
+  font-family: var(--mono);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-actions'] {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px !important;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-actions'] > .sf-button,
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button[data-role='bridge-apply'] {
+  box-sizing: border-box;
+  height: 28px;
+  min-height: 28px;
+  align-self: flex-start;
+  padding: 0 10px;
+  gap: 6px;
+  border: 1px solid var(--l2);
+  border-radius: var(--r-chip);
+  background: var(--raise);
+  box-shadow: none;
+  color: var(--t1);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+}
+
+/* --accent-fill is Tern's contrast-corrected fill for white text. */
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-actions'] > .sf-button[data-variant='primary'] {
+  border-color: transparent;
+  background: var(--accent-fill);
+  color: white;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-actions'] .sf-btn-ic,
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-actions'] .sf-btn-ic .ico {
+  width: 14px;
+  height: 14px;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] .sf-field[data-role='bridge-agent'] {
+  position: relative;
+  min-width: 0;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--l2);
+  gap: 8px;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] > .sf-field-lbl {
+  max-width: 50%;
+  margin: 0;
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 500;
+  color: var(--t1);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] > .sf-field-ctl {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+/* Native field children: meta, decorative icon, select, optional Apply.
+ * Caption occupies the right half of the native label line, not a form row.
+ */
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-device-meta'] {
+  position: absolute;
+  top: -22px;
+  right: 0;
+  max-width: 50%;
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 400;
+  color: var(--t3);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-select-icon'] {
+  position: absolute;
+  top: 9px;
+  left: 10px;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  color: var(--t3);
+  pointer-events: none;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-select-icon'] .ico {
+  width: 14px;
+  height: 14px;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] .sf-select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  align-self: stretch;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] .sf-select-btn {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px 0 32px;
+  border: 1px solid var(--l2);
+  border-radius: calc(var(--r-ctl) - 1px);
+  background: var(--card);
+  box-shadow: none;
+  color: var(--t1);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] .sf-select-v {
+  flex-grow: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] .sf-select-chev {
+  flex-shrink: 0;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-agent'] .sf-select-menu {
+  box-sizing: border-box;
+  min-width: 100%;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+/* Do not set display: native .sf-hidden alone decides Apply visibility. */
+[data-surface='plugin.omp-client-bridge.panel'] .sf-button[data-role='bridge-apply'] {
+  margin-top: 8px;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-footer'] {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px !important;
+  margin-top: 16px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-empty'] {
+  min-width: 0;
+  align-items: center;
+  gap: 5px !important;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--t3);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-empty'] .sf-text {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-empty'] .sf-icon,
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-empty'] .ico {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--t4);
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-footer'] > .sf-button {
+  box-sizing: border-box;
+  height: 20px;
+  min-height: 20px;
+  margin-left: auto;
+  padding: 3px 0;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--t3);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 400;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-footer'] .sf-btn-ic,
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-footer'] .sf-btn-ic .ico {
+  width: 12px;
+  height: 12px;
+}
+
+[data-surface='plugin.omp-client-bridge.panel'] [data-role='bridge-transfer-list'] {
+  min-width: 0;
+  margin-top: 8px;
+  gap: 6px !important;
+  font-size: 11px;
+  line-height: 16px;
+}

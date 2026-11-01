@@ -1,6 +1,6 @@
 # Tern / OMP Client Bridge
 
-**Beta 预发布版 `v0.5.0-beta.3`** · [下载与版本说明](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.3) · [安装指南](docs/installation.md)
+**Beta 预发布版 `v0.5.0-beta.4`** · [下载与版本说明](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.4) · [安装指南](docs/installation.md)
 
 让远端 OMP 会话使用你手动绑定的客户端设备上的文件与原生工具，同时保留 Tern 的原生 OMP 界面。客户端主动通过 SSH 连接远端主机，只负责工具执行，不运行额外的推理 Agent。
 
@@ -19,8 +19,8 @@
 
 ## 三步开始
 
-1. **在本机安装原生插件**。从[版本下载页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.3)选择 `.tar.gz` 或 `.zip` 附件，按 `SHA256SUMS` 校验并解压，再用本机 Tern 的原生 `tern plugin install` 安装包目录。完整命令见[安装指南](docs/installation.md)。仅加载插件不会下载运行时或启动服务。
-2. **选择 OMP → Set up Bridge**。在 Tern 命令面板打开常驻原生侧栏，核对远端主机并完成 SSH 检查。首次准备远端设置界面与完整 Bridge 安装分别征求明确授权；完整安装获准后才准备运行时、依赖和后台服务。
+1. **在本机安装原生插件**。从[版本下载页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.4)选择 `.tar.gz` 或 `.zip` 附件，按 `SHA256SUMS` 校验并解压，再用本机 Tern 的原生 `tern plugin install` 安装包目录。完整命令见[安装指南](docs/installation.md)。首次加载插件不会自行下载运行时或启动未授权的服务。
+2. **选择 OMP → Set up Bridge**。在 Tern 命令面板打开常驻原生侧栏，核对远端主机并完成 SSH 检查。首次准备远端设置界面与完整 Bridge 安装分别征求明确授权；完整安装获准后才准备运行时、依赖和后台服务，并保存后续 Tern 启动时恢复同一本机客户端的授权。旧版本没有恢复授权的安装需要一次明确迁移；恢复不会重新安装远端组件、生成新身份或改变会话绑定。
 3. **新建远端 OMP 会话并显式绑定设备**。新会话加载扩展后，在 Bridge 面板中手动选择供 Agent 使用的客户端。**Awaiting OMP session** 仅表示安装和客户端注册完成，仍需真实会话握手与就绪检查。初始化不会重启现有会话，也不会自动绑定设备。
 
 ## 已实现的操作
@@ -51,12 +51,20 @@
 - **设备传输与展示体验**：提供带边界的设备列表滚动视图、可折叠区域以及传输进度展示，并全部保留原生按钮与状态提示。
 - **废弃 Socket 参数**：不再通过 CLI 传递、使用或验证 `--tern-pane-socket`。现有自定义 `controlFile` 与身份配置（如 `ternExecutable` 用于 Setup/插件重载）不受影响。升级 Setup 合并时，会安全丢弃旧配置中的 `ternPaneSocket` 字段。
 
+### 当前源码的后续修正（未另发版本）
+
+- 启动入口为 **OMP → Start / repair Bridge**；服务不可达时直接进入恢复流程，不再反复打开错误面板。
+- 设备选择改为 Bridge 内嵌 **Agent device** 字段；只有显式点击 **Use device** 才应用更改，不再打开全局选择器。
+- 按已认可的连接卡片稿实现身份标记、会话信息、独立操作按钮、完整设备选择框与紧凑传输行；专属样式跟随 Tern 主题。扣除原生 pane 已提供的网格内边距，避免重复留白；初始尺寸提示为 `{31,13}`，仍尊重用户后续调整。
+- 已在实际连接的 macOS Tern 窗口检查面板及下拉菜单，并恢复原工作区；未改变设备绑定。详见[验证记录](docs/verification.md)。以上源码已更新到本机及目标远端插件，不改变已发布 beta.3 附件。
+- 补齐悬停、按下、选择框展开和 Apply 出现的短过渡；支持系统减少动态效果及 Tern 的静态 surface。PiP 外框与聚焦放大动画仍由 Tern 管理。
+
 ## Beta 验证范围
 验证记录与实现范围分开维护，不作跨平台通用保证。
 
 - **已有验证记录**。本地原生 Windows 已通过完整测试、类型检查、打包和 CLI 检查，并实测 Tern 设置侧栏中的自动 SSH 识别和手动修正。macOS 普通 daemon 转发、Luau 边界及原生 Linux 解析另有通过记录；这些结果不等同于全部桌面交互验收。当前 CI 见[原生平台工作流](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/workflows/native-runtime.yml)，[beta.1 历史 CI](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/40898284516)保留不变。
 - **Windows 修复版**。`v0.5.0-beta.2` 包含 ACL、PowerShell 5.1 原子替换、Tern 命名管道路由、上传发布防覆盖及跨系统换行修复；ConPTY 回归使用原生 Enter 字节，产品仍保留原始输入。通用 SSH 设置支持关联别名、多候选预检与手动修正。原生验证范围见[验证记录](docs/verification.md)，不以 WSL 结果代替 Windows 验收。
-- **仍待实际验收**。本机设置、连接和单次会话握手证据不代表全部 GUI 场景通过。新版原生 UI 目前仅通过 macOS 隔离无头渲染器验收，未进行完整的 Windows GUI 验证。主窗口 PiP 的尺寸与焦点、三台物理客户端共同使用、跨设备桌面控制、完整粘贴与拖放，以及真实 Android 设备操作仍需分别验收。
+- **仍待实际验收**。本机设置、连接和单次会话握手证据不代表全部 GUI 场景通过。连接卡片已在实际 macOS Tern 窗口检查，动效及减少动态效果另经隔离原生渲染器验证；完整 Windows GUI、三台物理客户端共同使用、跨设备桌面控制、完整粘贴与拖放，以及真实 Android 设备操作仍需分别验收。
 
 具体环境、历史结果与未完成项见[兼容性与验证边界](docs/compatibility.md)和[验证记录](docs/verification.md)。Linux 主机或安装检查通过，不代表全部客户端交互能力可用。
 

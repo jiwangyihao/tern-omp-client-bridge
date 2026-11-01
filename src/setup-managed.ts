@@ -11,6 +11,7 @@ import { BridgeError, PROTOCOL_VERSION } from "./protocol.ts";
 import { LocalUiStateSchema } from "./schemas.ts";
 import { acquireSetupLock, privateDirectory, processExists, readOptionalJson } from "./setup-state.ts";
 import { inspectSetupPackage } from "./setup-payload.ts";
+import { validateClientResumeLaunch } from "./client-resume.ts";
 
 const KindSchema = z.enum(["server", "client"]);
 const RecordSchema = z.object({
@@ -31,6 +32,11 @@ export interface ManagedOptions {
 	packageRoot: string;
 	host?: string;
 	remoteCommand?: string;
+	/** Recovery never provisions or rotates identity, including in the detached child. */
+	expectedDeviceId?: string;
+	expectedPackageDigest?: string;
+	/** Only resume supplies this; ordinary consented setup does not require a receipt. */
+	resumePluginData?: string;
 }
 export interface ServiceHealth { endpoint: Endpoint; connected: boolean; deviceId?: string; sessionReady: boolean }
 
@@ -72,12 +78,14 @@ export async function ensureManagedService(options: ManagedOptions): Promise<Man
 	await privateDirectory(stateDir);
 	const release = await acquireSetupLock(path.join(stateDir, `${options.kind}.launch.lock`));
 	try {
+		if (options.resumePluginData !== undefined) await validateClientResumeLaunch(options);
+		if (options.expectedPackageDigest !== undefined && (await inspectSetupPackage(options.packageRoot)).digest !== options.expectedPackageDigest) throw new BridgeError("CLIENT_RESUME_PACKAGE_CONFLICT", "The approved bridge package changed before launch. Run explicit setup to review it.");
 		const recordFile = path.join(stateDir, `${options.kind}.managed.json`);
 		const rawRecord = await readOptionalJson(recordFile);
 		let record = rawRecord === undefined ? undefined : RecordSchema.parse(rawRecord);
 		if (record && record.kind !== options.kind) throw new BridgeError("SERVICE_CONFLICT", "Managed service metadata has a different service kind.");
 		if (record?.host && options.host && record.host !== options.host && processExists(record.pid)) throw new BridgeError("SERVICE_HOST_CONFLICT", "This client is already owned by a different SSH host. Use its original configuration or a separate plugin data directory; setup will not retarget a live client.");
-		const identity = options.kind === "client" ? await setupIdentity(stateDir) : undefined;
+		const identity = options.kind === "client" ? await loadClientIdentity(stateDir, { expectedDeviceId: options.expectedDeviceId }) : undefined;
 		let health: ServiceHealth | undefined;
 		try { health = await serviceHealth(options.kind, stateDir); } catch { /* Inspect process ownership before considering a restart. */ }
 		if (health && identity && health.deviceId !== identity.device.id) throw new BridgeError("SERVICE_IDENTITY_CONFLICT", "The running client does not match the saved identity. Setup will not overwrite its connection metadata.");
@@ -93,6 +101,9 @@ export async function ensureManagedService(options: ManagedOptions): Promise<Man
 			if (options.kind === "client") {
 				if (!options.host || !options.remoteCommand) throw new BridgeError("USAGE", "A managed client requires an SSH host and a remote relay command.");
 				args.push("--host", options.host, "--remote-command", options.remoteCommand);
+				args.push("--expected-device-id", identity!.device.id);
+				if (options.expectedPackageDigest !== undefined) args.push("--expected-package-digest", options.expectedPackageDigest);
+				if (options.resumePluginData !== undefined) args.push("--resume-plugin-data", options.resumePluginData);
 			}
 			const log = await open(path.join(stateDir, `${options.kind}.service.log`), "w", 0o600);
 			try {
@@ -147,14 +158,19 @@ export async function runManagedService(options: ManagedOptions): Promise<void> 
 	}, { exitOnly: true });
 	let service: { endpoint: Endpoint; close(): Promise<void> } | undefined;
 	try {
+		if (options.resumePluginData !== undefined) await validateClientResumeLaunch(options);
 		const { digest } = await inspectSetupPackage(options.packageRoot);
+		if (options.expectedPackageDigest !== undefined && digest !== options.expectedPackageDigest) throw new BridgeError("CLIENT_RESUME_PACKAGE_CONFLICT", "The approved bridge package changed before the child started. Run explicit setup to review it.");
 		let existing: Endpoint | undefined;
 		try { existing = await readEndpoint(path.join(stateDir, `${options.kind}.json`)); } catch { /* Missing metadata is expected on first installation. */ }
 		if (existing?.pid && processExists(existing.pid)) throw new BridgeError("SERVICE_BUSY", "Another live service already owns this endpoint. Use managed-start to authenticate and reuse it.");
 		if (options.kind === "server") service = await startBroker({ stateDir });
 		else {
 			if (!options.host || !options.remoteCommand) throw new BridgeError("USAGE", "A managed client requires an SSH host and a remote relay command.");
-			service = await startClientService({ stateDir, identity: await setupIdentity(stateDir), serverName: options.host, connection: { kind: "ssh", host: options.host, remoteCommand: options.remoteCommand } });
+			const identity = await loadClientIdentity(stateDir, { expectedDeviceId: options.expectedDeviceId });
+			// Recheck revocation after package/identity IO, immediately before creating the client.
+			if (options.resumePluginData !== undefined) await validateClientResumeLaunch(options);
+			service = await startClientService({ stateDir, identity, serverName: options.host, connection: { kind: "ssh", host: options.host, remoteCommand: options.remoteCommand } });
 		}
 		await writePrivateJson(recordFile, { schema: 1, kind: options.kind, pid: process.pid, instance, ownership: "managed", startedAt: Date.now(), packageRoot: path.resolve(options.packageRoot), packageDigest: digest, runtime: process.execPath, ...(options.host ? { host: options.host } : {}) });
 		await stopped.promise;

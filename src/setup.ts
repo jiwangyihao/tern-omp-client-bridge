@@ -10,6 +10,8 @@ import { detectRemote, packageArchive, remotePath, setupCommand, shellArgument, 
 import { acquireSetupLock, mergeControlFile, privateDirectory, readOptionalJson, writeSetupProgress } from "./setup-state.ts";
 import { setupReadiness, ternReloadReadiness, type PluginReloadStatus } from "./setup-readiness.ts";
 import { resolveTernExecutable } from "./tern-executable.ts";
+import { saveClientResumePlan } from "./client-resume.ts";
+import { inspectSetupPackage } from "./setup-payload.ts";
 
 export interface SetupOptions {
 	host: string;
@@ -128,6 +130,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
 		const health = await serviceHealth("client", stateDir);
 		if (!health.connected || health.deviceId !== client.deviceId) throw new BridgeError("CLIENT_NOT_READY", "The signed client disconnected before setup completed. Check SSH connectivity and retry; the plugin configuration was not changed.");
 		await mergeControlFile(data, client.controlFile, ternExecutable);
+		await saveClientResumePlan(data, { schema: 1, kind: "client-resume", host: options.host, remoteCommand: relay, stateDir: client.stateDir, controlFile: client.controlFile, packageRoot, runtime: process.execPath, deviceId: client.deviceId!, packageDigest: (await inspectSetupPackage(packageRoot)).digest });
 		const completion = setupReadiness({ sessionReady: health.sessionReady, pluginReload: agent.pluginReload, pluginReloadMessage: agent.pluginReloadMessage, client, broker: agent.broker });
 		await writeSetupProgress(data, { ...completion, host: options.host, controlFile: client.controlFile });
 		return SetupResultSchema.parse({ schema: 1, kind: "setup-complete", status: completion.status, stage: completion.stage, host: options.host, controlFile: client.controlFile, message: completion.message, remote: agent, client: { ...client, sessionReady: health.sessionReady } });

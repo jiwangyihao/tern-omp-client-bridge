@@ -24,9 +24,9 @@ SSH server or public listener. Keep remote relay stdout free of unrelated output
 
 ## Initialization consent
 
-Installing/loading the Tern plugin does not authorize downloads, remote changes,
-or service startup. A cold-host setup sidebar is prepared only after interface-only
-consent, through Tern's already-authenticated connected-host command transport.
+Installing/loading the Tern plugin alone does not authorize downloads, remote
+changes, or first-time service startup. A cold-host setup sidebar is prepared only
+after interface-only consent, through Tern's already-authenticated connected-host command transport.
 The client uses an owned preparation pane and a nonce-qualified result, then checks
 the native block catalog. It never types deployment commands into an existing user
 shell or agent pane. This isolated UI package cannot overwrite the full Bridge.
@@ -41,6 +41,16 @@ private runtimes, dependencies, integrations,
 and background services. It does not install OMP or Tern themselves, use sudo,
 modify SSH trust, restart active conversations, or change session bindings.
 Registration alone does not bind a session or authorize agent operations.
+
+Consented setup also records a private `client-resume.json` approval for future
+Tern starts to resume the same local client. Recovery checks the existing identity,
+installed configuration, runtime and approved package digest; it does not provision
+a new identity, install remote components, restart conversations or change bindings.
+After observing a healthy local client, that loaded plugin instance does not
+automatically restart it following a later stop. Explicit Start / repair may retry.
+Delete the recovery approval to revoke future automatic starts; this does not stop
+an already running service. Older installations without an approval require one
+explicit setup migration rather than treating historical readiness as consent.
 
 Setup logs and service credentials remain private. Public progress excludes raw
 subprocess output and bearer/private-key material. Services are checked through

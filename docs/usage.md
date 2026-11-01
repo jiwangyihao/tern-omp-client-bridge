@@ -417,14 +417,15 @@ file into an issue or chat. Run one client service per chosen client state root.
 ## Choose the shared execution target
 
 Focus the live remote OMP conversation in Tern and use **OMP: Select agent client**
-or the bridge's device status segment. The plugin resolves the actual OMP
-conversation before changing its binding. New sessions are **Unbound**. Choose
-an authorized device explicitly; **This device** identifies the current viewer,
-not necessarily the agent target.
+or the bridge's device status segment. This focuses the Bridge panel's inline
+**Agent device** field, not a global picker. Select a device, then explicitly
+click **Use device** to apply a changed choice. Opening the field or navigating
+options never changes the binding. New sessions are **Unbound**; **This device**
+identifies the current viewer, not necessarily the agent target.
 
 The selection belongs to the OMP session, not its pane, SSH username, or latest
-viewer. All viewers see ordered changes with the actor and old/new targets. A
-stale picker selection is rejected; reopen the picker to use current state.
+viewer. All viewers see ordered changes with the actor and old/new targets.
+Stale choices are rejected; use the refreshed inline field before applying again.
 Focus changes and reconnects do not auto-select. An offline selected device stays
 selected and fails client operations rather than falling back to the agent host.
 
@@ -560,7 +561,7 @@ The right-aligned status control shows connection and agent-device state rather
 than the word Bridge: `Connected · Unbound`, `Connected · <device>`, or
 `Device offline · <device>`. Device names are capped at 24 Unicode characters.
 Without a resolved target it distinguishes `No session` from `Resolving`;
-client disconnects show `Disconnected`, and errors show `Needs attention`.
+client disconnects show `Waiting for connection`, and errors show `Needs attention`.
 Connection refers to the client/broker link, not proof that a remote OMP pane is usable.
 The transfer segment shows `Preparing`, byte-weighted `Uploading 42%`, or
 `Handing to OMP`, with the active transfer count when more than one exists.
@@ -581,7 +582,7 @@ created in a background temporary tab without showing that tab or taking focus,
 then floated by exact pane ID over the saved originating OMP owner, still without
 taking focus. Tern removes the empty temporary tab; the original tiled tree is
 never split, resized or rebuilt, and there is no intermediate visible-tab switch.
-The float call supplies `{size={32,24}, focus=false}` directly to the native API.
+The current source supplies `{size={31,13}, focus=false}` to the native API (the published beta.3 used `{32,24}`).
 These are terminal-cell hints constrained by the owner frame, not fixed pixel
 dimensions. Once the floated surface and owner association are verified,
 `cx.layout:focus` focuses the exact panel pane. Tern controls focus growth and
@@ -603,24 +604,31 @@ continually restoring either. Another viewer cannot use the panel to read its
 own clipboard under the originating window's identity. Opening/focusing never
 retargets transfers away from the originating OMP Block.
 
-The panel uses native buttons, statuses, and bounded scroll areas without custom
-CSS, inheriting Tern's font and theme colors directly. The separate setup panel
-retains root padding and long-address wrapping in `tern/setup-ui/panel.css`. Bare plugin surfaces
-otherwise inherit the terminal monospace font. The shell path, pane metrics, OMP
-composer and other plugins are unchanged.
+The panel keeps native buttons, select behavior and bounded scroll areas, with
+the approved connection-card skin in `tern/panel.css`. Its 16px intended body
+inset accounts for the native pane's existing grid padding through `--tv-px`,
+`--tv-py` and `--sf-zoom`, rather than adding both insets. Setup-only styles remain
+in `tern/setup-ui/panel.css`; shell metrics, the OMP composer and other plugins
+are unchanged. Host name, directory basename and title are bounded display-only
+launch labels; they never replace the routing locators or authorize actions.
 
-The compact panel uses a header close control instead of a full-width footer
-button. Paste/upload share one action row; agent selection is one row, available
-devices are collapsed by default, transfer history is a small header action, and
-approvals appear only when pending. Without a live snapshot, it shows a concise
-connection empty state rather than unknown fields and a stack of disabled buttons.
-The reference-led composition groups the remote workspace, this device, and human
-transfer actions in one compact context card. Native icon and item nodes present
-devices; transfer rows keep file, phase, and progress together. The visual rationale
-and the distinction between website demos and shipped chrome are recorded in
-[Tern design reference](research/tern-design-reference.md).
+The native PiP frame owns the title and close action; the body does not repeat
+them. A compact workspace identity and source-device line precede the shared
+paste/upload action row. The inline agent field is separate from human transfer
+actions. **Use device** appears only for a changed, valid choice. Empty transfers
+occupy one quiet row beside History; approvals appear only when pending.
+Without a live snapshot, the panel shows a concise connection empty state.
+These inline selection and compact presentation changes are post-beta.3 source
+changes, installed locally for actual-window verification, not new release assets.
+See [Tern design reference](research/tern-design-reference.md) for the rationale.
 
-Opening paste/upload/device choosers refreshes expired destination identity before
+`tern/panel-motion.css` adds 120–160ms control feedback: hover rings, a 1px/0.98
+press transform, native-menu entrance and a short Apply entrance. It does not
+animate the entire card on each snapshot heartbeat or change the PiP frame.
+System `prefers-reduced-motion: reduce` and Tern's `.sf-still` surface disable
+these transforms, animations and transitions while retaining visible state cues.
+
+Opening paste/upload choosers refreshes expired destination identity before
 showing the chooser, instead of consuming the click and requiring another click.
 A known conversation or draft replacement aborts preparation. This performs no
 clipboard read, file capture, upload or binding change; those still require the
@@ -713,6 +721,19 @@ SIGTERM; redirecting stdin from an already closed stream is not a daemonization
 method. There is no installed service manager. Wait for shutdown before starting
 another broker in the same state root.
 
+Since beta.4, explicitly approved setup saves a private `client-resume.json` in
+the plugin data directory. On a later Tern start, the plugin may resume that same
+local client using its existing identity, runtime and verified package. Recovery
+does not reinstall remote components, restart OMP sessions or change bindings.
+Older installations without this approval require one explicit Setup migration.
+After observing a healthy local endpoint, the loaded plugin does not automatically
+restart a subsequently stopped client; **Start / repair Bridge** allows an explicit
+retry. A healthy client reconnecting over SSH is not replaced with another process.
+Delete `client-resume.json` to revoke future automatic starts, and separately stop
+the running service if required. Missing or mismatched identity fails recovery
+without generating replacement keys. Historical setup `ready` is not live health.
+
+
 A dropped transport reconnects and authenticates again, but operations, uploads,
 and uncertain attachment sends are not replayed. Inspect the original device or
 remote draft before explicitly retrying a side effect. Cancellation is not a
@@ -740,8 +761,9 @@ requests disposal of that session's owned client contexts.
 ### Retention and removal
 
 - `identity.json` persists the device key and label across starts. Protect it;
-  removing it creates a different identity next time rather than revoking an
-  already running process.
+  approved recovery refuses a missing identity rather than generating a new one.
+  Explicit first-time provisioning can create a new identity; deleting the file
+  does not revoke an already running process.
 - `server.json`/`client.json` hold private endpoint credentials. Normal shutdown
   removes owned metadata; the broker also releases its own `server.lock`.
 - `captures/` contains private client-side snapshots. Normal release/close removes
