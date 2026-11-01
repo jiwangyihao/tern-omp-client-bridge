@@ -14,9 +14,17 @@ import { startClientService } from "../../src/client.ts";
 const packageRoot = path.resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
-async function fixture() {
-	const data = await mkdtemp(path.join(os.tmpdir(), "bridge-resume-unit-"));
-	roots.push(data);
+async function fixture(aliasedParent = false) {
+	const root = await mkdtemp(path.join(os.tmpdir(), "bridge-resume-unit-"));
+	roots.push(root);
+	let data = root;
+	if (aliasedParent) {
+		const actual = path.join(root, "actual");
+		const alias = path.join(root, "alias");
+		await mkdir(actual);
+		await symlink(actual, alias, process.platform === "win32" ? "junction" : "dir");
+		data = path.join(alias, "plugin-data");
+	}
 	const stateDir = path.join(data, "bridge");
 	const identity = await loadClientIdentity(stateDir);
 	const plan: ClientResumePlan = { schema: 1, kind: "client-resume", host: "fixture-host", remoteCommand: "fixture-relay", stateDir, controlFile: path.join(stateDir, "client.json"), packageRoot, runtime: process.execPath, deviceId: identity.device.id, packageDigest: (await inspectSetupPackage(packageRoot)).digest };
@@ -26,8 +34,8 @@ async function fixture() {
 	return { data, stateDir, identity, plan, config, planFile: path.join(data, "client-resume.json"), configFile: path.join(data, "config.json"), identityFile: path.join(stateDir, "identity.json") };
 }
 
-test("automatic package maintenance preserves the revocable connection approval", async () => {
-	const f = await fixture();
+for (const aliasedParent of [false, true]) test(`automatic package maintenance preserves the revocable connection approval (${aliasedParent ? "parent alias" : "ordinary directory"})`, async () => {
+	const f = await fixture(aliasedParent);
 	const approval = await readFile(f.planFile, "utf8");
 	const identity = await readFile(f.identityFile, "utf8");
 	const snapshot = await inspectSetupPackage(packageRoot);
@@ -45,12 +53,29 @@ test("automatic package maintenance preserves the revocable connection approval"
 	try {
 		const child = Bun.spawn([process.execPath, path.join(prepared, "src", "cli.ts"), "resume-client", "--plugin-data", f.data], { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 30000 });
 		const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-		expect(code).toBe(0);
+		expect(code, stderr).toBe(0);
 		expect(stderr).toBe("");
 		expect(JSON.parse(stdout)).toMatchObject({ kind: "client-resumed", reused: true, connected: false, deviceId: f.identity.device.id });
 		expect(await readFile(f.planFile, "utf8")).toBe(approval);
 		expect(await readFile(f.identityFile, "utf8")).toBe(identity);
 	} finally { await client.close(); await unavailable.stop(true); }
+}, 60000);
+
+test("prepared package validation rejects redirected installation cache children", async () => {
+	// Real directory aliases exercise native filesystem resolution without changing the saved approval.
+	const f = await fixture();
+	const outside = await mkdtemp(path.join(os.tmpdir(), "bridge-outside-cache-"));
+	roots.push(outside);
+	const digest = "b".repeat(64);
+	const escaped = path.join(outside, "packages", digest);
+	await mkdir(escaped, { recursive: true });
+	await writePrivateJson(path.join(escaped, ".bridge-installation.json"), { schema: 1, source: digest, runtime: `${process.platform}-${process.arch}` });
+	await symlink(outside, path.join(f.data, "installation"), process.platform === "win32" ? "junction" : "dir");
+	const approval = await readFile(f.planFile, "utf8");
+	await expect(validateClientResumeLaunch({ kind: "client", stateDir: f.stateDir, packageRoot: path.join(f.data, "installation", "packages", digest), host: f.plan.host, remoteCommand: f.plan.remoteCommand, expectedDeviceId: f.plan.deviceId, expectedPackageDigest: digest, expectedResumeDigest: new Bun.CryptoHasher("sha256").update(JSON.stringify(f.plan)).digest("hex"), resumePluginData: f.data })).rejects.toMatchObject({ code: "CLIENT_RESUME_PACKAGE_CONFLICT" });
+	expect(await readFile(f.planFile, "utf8")).toBe(approval);
+	expect(await readOptionalJson(f.plan.controlFile)).toBeUndefined();
+	expect(await readOptionalJson(path.join(f.stateDir, "client.managed.json"))).toBeUndefined();
 }, 60000);
 
 test("recovery without consented receipt fails before provisioning any local identity", async () => {

@@ -55,6 +55,13 @@ clients, complete remote Windows GUI behavior, or attached-device ADB acceptance
 - 未执行整机重启；本轮不扩展 macOS/Linux GUI 冷启动、完整跨设备桌面、剪贴板
   或真实 Android 设备的验收范围。各发布提交的 CI 回执以发行说明链接为准。
 
+首次候选 `238493a` 的 [CI 41344883090](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/runs/41344883090)
+暴露了私有执行包的路径文本比较问题：原生父目录别名经模块加载器规范化后，
+合法包会被误判为不在安装目录。Windows 目录 junction 已复现同一拒绝错误。
+修复先规范化数据目录，再比较真实执行包位置；仍拒绝包目录链接及被重定向的
+安装缓存子树，不改写授权路径或放宽摘要检查。普通目录、父目录别名和缓存逃逸
+三个定向回归通过（14 次断言），类型检查通过；最终平台 CI 见发行说明。
+
 ## 2026-11-01：Beta.4 本机客户端启动恢复
 
 - 根因：旧版脱离终端的客户端不会跨系统重启存活，插件只读取临时端点；历史 setup `ready` 不能证明服务在线。

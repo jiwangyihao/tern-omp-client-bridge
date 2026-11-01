@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { createHash } from "node:crypto";
-import { lstat, rm } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -38,8 +38,11 @@ async function matchingConfig(data: string, controlFile: string): Promise<void> 
 
 async function assertPreparedClientPackage(data: string, packageRoot: string, packageDigest: string): Promise<void> {
 	const marker = z.object({ schema: z.literal(1), source: z.string(), runtime: z.string() }).safeParse(await readOptionalJson(path.join(packageRoot, ".bridge-installation.json")));
-	const info = await lstat(packageRoot);
-	if (packageRoot !== path.join(data, "installation", "packages", packageDigest) || !info.isDirectory() || info.isSymbolicLink() || !marker.success || marker.data.source !== packageDigest || marker.data.runtime !== `${process.platform}-${process.arch}`) throw new BridgeError("CLIENT_RESUME_PACKAGE_CONFLICT", "The replacement client is not a verified private installation package.");
+	const [info, dataInfo, actualRoot, actualData] = await Promise.all([lstat(packageRoot), lstat(data), realpath(packageRoot), realpath(data)]);
+	// Native parent aliases (/var on macOS, Windows short names/junctions) do not change ownership.
+	// Resolve only the data root before constructing the expected cache path: redirected cache children still fail.
+	const expectedRoot = path.join(actualData, "installation", "packages", packageDigest);
+	if (!dataInfo.isDirectory() || dataInfo.isSymbolicLink() || path.relative(expectedRoot, actualRoot) !== "" || !info.isDirectory() || info.isSymbolicLink() || !marker.success || marker.data.source !== packageDigest || marker.data.runtime !== `${process.platform}-${process.arch}`) throw new BridgeError("CLIENT_RESUME_PACKAGE_CONFLICT", "The replacement client is not a verified private installation package.");
 }
 
 /** Explicit setup and verified legacy migration establish revocable local recovery. */
