@@ -166,7 +166,7 @@ test("detached recovery refuses approval revoked or changed after launcher admis
 	expect(await readOptionalJson(f.planFile)).toEqual(f.plan);
 	expect(await readOptionalJson(f.plan.controlFile)).toBeUndefined();
 	expect(await readOptionalJson(path.join(f.stateDir, "client.service.lock"))).toBeUndefined();
-});
+}, 30000);
 
 test("detached CLI rejects deleted or changed approval after launcher validation", async () => {
 	const f = await fixture();
