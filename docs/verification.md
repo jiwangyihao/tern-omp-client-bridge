@@ -20,6 +20,14 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## 2026-11-02：插件侧 Tern 原生工具展示修复
+
+- 用户明确禁止修改 OMP，并在接口实测后选择仅修复 Tern 语义展示、保持既有纯终端行为。Bridge 只接入宿主公开的 describeCall/describeResult 与语义合并规则，不伪造内置工具来源、不复制 ANSI renderer、不安装 Edit openArgStream。
+- 实际宿主探针：本机 OMP 18.14.2-1.1.73、远端编译版 18.15.0 均将静态公开导入绑定到宿主 registry；导入 VERSION 与宿主一致，公开 ask renderer 对象身份一致。远端无磁盘 pi-tui 包仍能正确加载，不能仅凭 import.meta.resolve 判定来源。
+- 120 项定向用例、1329 次断言与类型检查通过，覆盖语义展示、旧 Bridge ANSI 行为不变、工具元数据、agent 执行与会话审批隔离。Edit 预览测试只验证已有输入的展示，不声称恢复执行前流式预览生产。
+- 在远端实际 OMP 18.15.0 中，七类工具的原生/扩展语义输出在 data-first 与 fallback-card 两种模式下共 14 组一致。将其中 Bash、Edit 结果经 TSP 输入隔离的真实 Tern 原生渲染器，截图确认命令/输出区、结果 diff 和统计呈现一致；不是浏览器仿制。
+- 仅更新远端 Bridge 自有扩展 loader 和独立运行包，原 OMP 可执行文件 SHA-256 前后一致；未修改 OMP 源码、安装依赖或全局渲染器，未重启既有会话。新会话或原生扩展重载后生效；没有对用户正在运行的会话强制重载。
+
 ## v0.5.0-beta.7：SSH 别名复用与旧客户端迁移
 
 - SSH 地址不再单独决定客户端归属。Setup 在远端安装前核验候选 broker 与现有客户端的认证身份；同一 broker 的别名保留原连接和恢复授权，不把客户端改接到另一 broker。

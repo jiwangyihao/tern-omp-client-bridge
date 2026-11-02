@@ -9,6 +9,8 @@ export interface NativeMetadata extends Pick<ToolDefinition, "approval" | "label
 	readonly formatApprovalDetails?: (args: unknown) => string[];
 	readonly customFormat?: { syntax: "lark"; definition: string };
 	readonly customWireName?: string;
+	/** Renderer-only metadata; never expose this as the registered tool's mode. */
+	readonly presentationEditMode?: InstanceType<ExtensionAPI["pi"]["EditTool"]>["mode"];
 }
 
 export interface MetadataContext extends Pick<ExtensionContext, "cwd" | "hasUI" | "localProtocolOptions" | "model"> {
@@ -56,5 +58,6 @@ export function nativeMetadata(api: Pick<ExtensionAPI, "pi">, context: () => Met
 			...("customFormat" in tool ? { customFormat: tool.customFormat, customWireName: tool.customWireName } : {}),
 		};
 	}
+	result.edit = { ...result.edit, get presentationEditMode() { return tools.edit.mode; } };
 	return result;
 }

@@ -456,6 +456,17 @@ conversation's binding but separate execution contexts. Client Eval does not
 provide model completion, judgment, image questions, or reasoning-agent spawning.
 Nested native helpers stay in the client context; unsupported helpers fail.
 
+In Tern, the overrides explicitly delegate `describeCall` and `describeResult`
+to the active OMP host's public native renderer registry. Host module identity
+is verified before any overrides are registered; a mismatched package-local
+renderer is rejected rather than silently imposing another OMP version's style.
+Execution routing, approval and result payloads are unchanged. ANSI terminals
+retain the previous Bridge presentation. This does not restore pre-execution
+Edit streaming previews: no `openArgStream` or resource-bearing preview hook is
+installed. Semantic Edit mode is supplied only to describe callbacks, without
+changing the tool's execution or preview-wait lifecycle.
+
+
 **Ordinary Bash uses native embedded brush/POSIX syntax on Windows too.** It is
 neither WSL nor an implicit `cmd.exe`/PowerShell session. Run an explicitly chosen
 native executable if its syntax is required. Named PTY services use the native

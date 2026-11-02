@@ -7,6 +7,7 @@ import { BridgeError, type ToolName } from "../protocol.ts";
 import { DraftBridge } from "./draft.ts";
 import { parameters, routeTool, withTarget } from "./routing.ts";
 import { nativeMetadata, type NativeMetadata } from "./native-metadata.ts";
+import { nativePresentations } from "./native-presentation.ts";
 import { BackgroundDelivery } from "./background.ts";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { NativeAttachmentEditor } from "./native-attachment-editor.ts";
@@ -43,6 +44,9 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	if (Settings !== api.pi.Settings) {
 		throw new BridgeError("host_sdk_mismatch", "Client bridge loaded a different Settings module than the active OMP host. Load this extension through OMP's native extension loader so config/settings resolves to the host SDK; refusing to use a package-local approval scope.");
 	}
+	let metadata: Record<ToolName, NativeMetadata> | undefined;
+	// Validate every public semantic renderer before registering any override.
+	const presentations = nativePresentations(api, () => metadata?.edit.presentationEditMode);
 	const registered = new Set<string>();
 	const owned = new Map<string, ExecutionIdentity>();
 	let draft: DraftBridge | undefined;
@@ -55,7 +59,6 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	let activation = 0;
 	let closed = false;
 	let attachmentEditorInstalled = false;
-	let metadata: Record<ToolName, NativeMetadata> | undefined;
 	let sessionPolicy: { sessionId: string; settings: Settings } | undefined;
 	const background = new BackgroundDelivery(api, () => closed ? undefined : activeIdentity, owned);
 
@@ -88,8 +91,11 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 			if (!Object.hasOwn(TOOL_NAMES, native.name) || registered.has(native.name) || native.sourceInfo.source !== "builtin") continue;
 			const name = native.name as ToolName;
 			const execution = name === "eval" || name === "bash";
+			// Keep renderer-only mode off the tool itself: mode enables preview gates.
+			const { presentationEditMode: _presentationEditMode, ...executionMetadata } = metadata![name];
 			const definition: ToolDefinition = {
-				...metadata![name],
+				...executionMetadata,
+				...presentations[name],
 				name,
 				description: `${native.description}\n${execution ? 'Optional target: "agent" (default) or "client" (the manually bound device); target is fixed for the entire invocation.' : 'Explicit client:// paths and bridge-owned artifact/proc handles route to their client. Other paths retain native agent-host behavior.'}`,
 				parameters: execution ? withTarget(native.parameters) : native.parameters,
@@ -107,7 +113,7 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 					return broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate });
 				},
 			};
-			// No custom renderer: same-name native TUI/TSP renderer dispatch stays in control.
+			// Tern uses the official semantic hooks; ANSI keeps its existing fallback.
 			api.registerTool(definition);
 			registered.add(name);
 		}
