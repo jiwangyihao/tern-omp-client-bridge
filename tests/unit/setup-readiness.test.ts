@@ -32,7 +32,6 @@ test("an OMP view handshake cannot override failed host loading or a retained ol
 		const result = setupReadiness({ sessionReady: true, pluginReload: "reloaded", client: { ...managed, upgradeRequired: owner === "client" }, broker: { ...managed, upgradeRequired: owner === "broker" } });
 		expect(result.status).toBe("awaiting_session");
 		expect(result.stage).toBe("awaiting-service-upgrade");
-		expect(result.message).toContain("earlier version");
 	}
 	expect(setupReadiness({ sessionReady: false, pluginReload: "reloaded", client: managed, broker: managed }).status).toBe("awaiting_session");
 	expect(setupReadiness({ sessionReady: true, pluginReload: "reloaded", client: managed, broker: managed }).status).toBe("ready");

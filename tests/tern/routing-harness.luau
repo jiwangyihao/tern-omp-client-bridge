@@ -783,6 +783,21 @@ function run(entry, loadModule)
 		assert(f.setupOpens == 0 and #f.sent == 0)
 	end)
 
+	for _, reason in { "legacy", "unmanaged" } do
+		case("unsupported client update stays actionable without automatic retry: " .. reason, function(f)
+			f.authorizeResume(); f.warm()
+			f.untilState(function() return #f.processes == 1 end)
+			f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-resumed", stateDir = "/isolated", controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = true, ownership = "managed", connected = true, sessionReady = true, upgradeRequired = true, updateDeferred = reason }), timed_out = false })
+			f.poll(); f.poll()
+			f.advance(120001); f.poll(); f.poll()
+			assert(#f.processes == 1, "unsupported update retried automatically")
+			assert(f.status()[1].text ~= "Needs attention", "healthy client was reported broken")
+			f.invoke("setup")
+			assert(f.setupOpens == 0 and #f.processes == 1, "update explanation opened provisioning")
+			assert(f.toasts[#f.toasts].level == "info")
+		end)
+	end
+
 	for _, fault in { "json", "schema", "kind", "runtime", "packageRoot", "stateDir", "controlFile", "config", "relation", "traversal", "extra", "digest", "permission" } do
 		case("invalid resume authorization fails closed: " .. fault, function(f)
 			f.authorizeResume(); f.missingEndpoint = true

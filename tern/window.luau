@@ -255,10 +255,16 @@ local function advanceRecovery(cx)
 	recovery.failures, recovery.blocked, recovery.attempted = 0, false, true
 	local retryDelay = 10000
 	if type(value.retryAfterMs) == "number" and value.retryAfterMs == value.retryAfterMs and value.retryAfterMs > 0 and value.retryAfterMs < math.huge then retryDelay = math.clamp(value.retryAfterMs, 1000, 60000) end
-	recovery.updateDeferred = value.updateDeferred == "rollback" and "rollback" or nil
-	recovery.retryAt = value.upgradeRequired and (tern.now() + retryDelay) or 0
+	local blockedUpdate = value.upgradeRequired and (value.updateDeferred == "legacy" or value.updateDeferred == "unmanaged")
+	recovery.updateDeferred = value.updateDeferred
+	recovery.blocked = blockedUpdate == true
+	recovery.retryAt = value.upgradeRequired and not blockedUpdate and (tern.now() + retryDelay) or 0
 	recovery.phase = value.upgradeRequired and "pending" or "waiting"
-	recovery.message = not value.upgradeRequired and "Waiting for connection to the local Bridge" or (recovery.updateDeferred == "rollback" and "The update failed; the previous client is running while automatic retry waits" or "Waiting for a safe client update")
+	recovery.message = not value.upgradeRequired and "Waiting for connection to the local Bridge"
+		or (value.updateDeferred == "legacy" and "The running client predates safe updates. Use the explicit legacy migration command after reviewing active work; automatic maintenance will not stop it."
+		or value.updateDeferred == "unmanaged" and "This client is managed outside Bridge. Update it through its original owner; automatic maintenance will not stop it."
+		or value.updateDeferred == "rollback" and "The update failed; the previous client is running while automatic retry waits"
+		or "Waiting for active client work to finish before a safe update")
 	if not value.reused or serviceUnavailable or not connection then connection, connectionConfig = nil, nil end
 	statusError = nil
 	return true
@@ -665,6 +671,10 @@ setupBridge = function(cx)
 	if recovery.pending or recovery.queued then
 		recovery.openSetup = recovery.queued and true or nil
 		cx:toast('info', 'OMP Client Bridge', 'Starting local Bridge; wait for this attempt to finish')
+		return
+	end
+	if recovery.blocked and (recovery.updateDeferred == "legacy" or recovery.updateDeferred == "unmanaged") then
+		cx:toast('info', 'Bridge update requires action', recovery.message)
 		return
 	end
 	if connection and not serviceUnavailable and state and not state.connected then
@@ -1349,7 +1359,7 @@ local function statusSegments(viewId)
 			command = action .. (connected and "toggle-bridge" or "setup") },
 	}
 	if recovery.phase == "starting" then table.insert(segments, { text = "Updating local Bridge", icon = "clock", tone = "accent", command = action .. "setup" })
-	elseif recovery.phase == "pending" then table.insert(segments, { text = recovery.updateDeferred == "rollback" and "Update rolled back · retrying" or "Update waiting for safe switch", icon = "clock", tone = "warn", command = action .. "setup" })
+	elseif recovery.phase == "pending" then table.insert(segments, { text = recovery.updateDeferred == "legacy" and "Legacy client migration required" or recovery.updateDeferred == "unmanaged" and "Client owner update required" or recovery.updateDeferred == "rollback" and "Update rolled back · retrying" or "Update waiting for active work", icon = "clock", tone = "warn", command = action .. "setup" })
 	elseif recovery.phase == "failed" then table.insert(segments, { text = recovery.blocked and "Update needs attention" or "Update retry pending", icon = "warn", tone = "warn", command = action .. "setup" }) end
 	if transferSummary.text then table.insert(segments, { text = transferSummary.text, icon = transferSummary.icon, tone = transferSummary.tone, command = action .. "transfers" }) end
 	if failed > 0 then table.insert(segments, { text = tostring(failed) .. " failed", icon = "warn", tone = "error", command = action .. "transfers" }) end

@@ -12,6 +12,7 @@ import { LocalUiStateSchema } from "./schemas.ts";
 import { acquireSetupLock, privateDirectory, processExists, readOptionalJson } from "./setup-state.ts";
 import { inspectSetupPackage } from "./setup-payload.ts";
 import { validateClientResumeLaunch } from "./client-resume.ts";
+import { stopLegacyClientForMigration } from "./client-migration.ts";
 
 const KindSchema = z.enum(["server", "client"]);
 const RecordSchema = z.object({
@@ -25,6 +26,7 @@ export const ManagedResultSchema = z.object({
 	reused: z.boolean(), ownership: z.enum(["managed", "existing"]), connected: z.boolean(),
 	deviceId: z.string().optional(), sessionReady: z.boolean(),
 	packageRoot: z.string().optional(), runtime: z.string().optional(), packageDigest: z.string().optional(), upgradeRequired: z.boolean(),
+	updateDeferred: z.enum(["busy", "legacy", "unmanaged"]).optional(),
 });
 export type ManagedResult = z.infer<typeof ManagedResultSchema>;
 export interface ManagedOptions {
@@ -33,6 +35,8 @@ export interface ManagedOptions {
 	packageRoot: string;
 	host?: string;
 	remoteCommand?: string;
+	/** Explicit setup revalidates a preflight-proven live broker; never used to launch a replacement. */
+	verifyExistingClient?: (health: ServiceHealth) => Promise<void>;
 	/** Recovery never provisions or rotates identity, including in the detached child. */
 	expectedDeviceId?: string;
 	expectedPackageDigest?: string;
@@ -42,8 +46,10 @@ export interface ManagedOptions {
 	resumePluginData?: string;
 	/** Recovery preserves any live client; update may switch an authenticated idle client. */
 	clientMaintenance?: "recover" | "update";
+	/** Explicit human-reviewed legacy migration only; never forwarded to the child. */
+	legacyMigrationConfirmation?: string;
 }
-export interface ServiceHealth { endpoint: Endpoint; connected: boolean; deviceId?: string; sessionReady: boolean }
+export interface ServiceHealth { endpoint: Endpoint; connected: boolean; deviceId?: string; serverInstance?: string; sessionReady: boolean }
 
 export async function setupIdentity(stateDir: string): Promise<ClientIdentity> {
 	return loadClientIdentity(stateDir);
@@ -63,8 +69,11 @@ export async function serviceHealth(kind: "server" | "client", stateDir: string)
 		return { endpoint, connected: true, sessionReady: false };
 	}
 	const state = LocalUiStateSchema.parse(JSON.parse(text));
+	// Older clients expose the authenticated broker instance only in resolved view state.
+	const viewInstances = new Set(Object.values(state.views).map(view => view.state.serverInstance));
+	const serverInstance = state.serverInstance ?? (state.connected && viewInstances.size === 1 ? [...viewInstances][0] : undefined);
 	// connected becomes true only after the client's existing signed-registration path completes.
-	return { endpoint, connected: state.connected, deviceId: state.device.id, sessionReady: state.connected && Object.values(state.views).some(view => !!view.sessionId && !!view.resolveIntentId) };
+	return { endpoint, connected: state.connected, deviceId: state.device.id, serverInstance, sessionReady: state.connected && Object.values(state.views).some(view => !!view.sessionId && !!view.resolveIntentId) };
 }
 
 async function clearDeadBrokerLock(stateDir: string): Promise<void> {
@@ -77,29 +86,30 @@ async function clearDeadBrokerLock(stateDir: string): Promise<void> {
 	if (JSON.stringify(current) === JSON.stringify(saved)) await rm(file);
 }
 
-async function requestClientUpdate(record: z.infer<typeof RecordSchema>, health: ServiceHealth, deviceId: string): Promise<boolean> {
-	if (record.kind !== "client" || record.ownership !== "managed" || record.pid !== health.endpoint.pid || !record.host || !record.packageRoot || !record.runtime || !record.packageDigest) return false;
+export async function requestClientUpdate(record: z.infer<typeof RecordSchema>, health: ServiceHealth, deviceId: string, beforeShutdown?: () => Promise<void>): Promise<"updated" | "busy" | "legacy" | "unmanaged"> {
+	if (record.kind !== "client" || record.ownership !== "managed" || record.pid !== health.endpoint.pid || !record.host || !record.packageRoot || !record.runtime || !record.packageDigest) return "unmanaged";
 	const headers = { authorization: `Bearer ${health.endpoint.token}` };
 	const response = await fetch(health.endpoint.url + "/v1/lifecycle", { headers, redirect: "error", signal: AbortSignal.timeout(3000) });
-	if (response.status === 404) { await response.arrayBuffer(); return false; }
+	if (response.status === 404) { await response.arrayBuffer(); return "legacy"; }
 	if (!response.ok) throw new BridgeError("SERVICE_CONFLICT", "The current client did not authenticate its lifecycle; it was not stopped.");
 	const text = await response.text();
 	if (text.length > 16384) throw new BridgeError("SERVICE_CONFLICT", "The current client returned invalid lifecycle metadata.");
 	const parsed = ClientLifecycleSchema.safeParse(JSON.parse(text));
 	if (!parsed.success || parsed.data.pid !== record.pid || parsed.data.instance !== record.instance || parsed.data.packageDigest !== record.packageDigest || parsed.data.deviceId !== deviceId) throw new BridgeError("SERVICE_CONFLICT", "The authenticated client does not match its managed ownership record; it was not stopped.");
-	if (parsed.data.busy || parsed.data.draining) return false;
+	if (parsed.data.busy || parsed.data.draining) return "busy";
+	await beforeShutdown?.();
 	const stopped = await fetch(health.endpoint.url + "/v1/lifecycle/shutdown", {
 		method: "POST", headers: { ...headers, "content-type": "application/json" }, redirect: "error", signal: AbortSignal.timeout(5000),
 		body: JSON.stringify({ instance: record.instance, packageDigest: record.packageDigest }),
 	});
 	const acknowledgement: unknown = await stopped.json();
-	if (stopped.status === 409 && z.object({ code: z.literal("CLIENT_UPDATE_BUSY") }).safeParse(acknowledgement).success) return false;
+	if (stopped.status === 409 && z.object({ code: z.literal("CLIENT_UPDATE_BUSY") }).safeParse(acknowledgement).success) return "busy";
 	const accepted = z.object({ accepted: z.literal(true), instance: z.literal(record.instance) }).safeParse(acknowledgement);
 	if (!stopped.ok || !accepted.success) throw new BridgeError("SERVICE_CONFLICT", "The managed client did not accept the idle update request; no process signal was sent.");
 	const deadline = Date.now() + 10000;
 	while (processExists(record.pid) && Date.now() < deadline) await Bun.sleep(50);
 	if (processExists(record.pid)) throw new BridgeError("CLIENT_UPDATE_PENDING", "The owned client is still finishing its graceful shutdown; automatic maintenance will retry without forcing it.");
-	return true;
+	return "updated";
 }
 
 /** Finite launcher; the child owns listeners, identity and signal cleanup, never this SSH/stdin pipe. */
@@ -121,8 +131,21 @@ export async function ensureManagedService(options: ManagedOptions): Promise<Man
 		let health: ServiceHealth | undefined;
 		try { health = await serviceHealth(options.kind, stateDir); } catch { /* Inspect process ownership before considering a restart. */ }
 		if (health && identity && health.deviceId !== identity.device.id) throw new BridgeError("SERVICE_IDENTITY_CONFLICT", "The running client does not match the saved identity. Setup will not overwrite its connection metadata.");
-		if (options.clientMaintenance === "update" && identity && health && record?.ownership === "managed" && record.pid === health.endpoint.pid && record.packageDigest !== requestedDigest) {
-			if (await requestClientUpdate(record, health, identity.device.id)) { health = undefined; record = undefined; }
+		if (options.verifyExistingClient) {
+			if (!health || options.kind !== "client" || options.clientMaintenance) throw new BridgeError("SERVICE_HOST_UNPROVEN", "The preflight-proven client is no longer available for reuse. Retry setup without replacing its original connection.");
+			await options.verifyExistingClient(health);
+		}
+		let updateDeferred: ManagedResult["updateDeferred"];
+		if (options.legacyMigrationConfirmation !== undefined) {
+			if (options.kind !== "client" || options.clientMaintenance !== "update") throw new BridgeError("USAGE", "Explicit legacy migration can only replace the confirmed client.");
+			await stopLegacyClientForMigration(options);
+			health = undefined; record = undefined;
+		} else if (options.clientMaintenance === "update" && identity && health && record?.packageDigest !== requestedDigest) {
+			const outcome = record ? await requestClientUpdate(record, health, identity.device.id, async () => {
+				if (options.resumePluginData !== undefined) await validateClientResumeLaunch(options);
+			}) : "unmanaged";
+			if (outcome === "updated") { health = undefined; record = undefined; }
+			else updateDeferred = outcome;
 		}
 		let reused = true;
 		let launched: ChildProcess | undefined;
@@ -177,7 +200,7 @@ export async function ensureManagedService(options: ManagedOptions): Promise<Man
 			await writePrivateJson(recordFile, record);
 		}
 		const upgradeRequired = (options.clientMaintenance !== undefined || record.ownership === "managed") && record.packageDigest !== requestedDigest;
-		return { kind: options.kind, stateDir, controlFile: path.join(stateDir, `${options.kind}.json`), pid: record.pid, reused, ownership: record.ownership, connected: health.connected, ...(health.deviceId ? { deviceId: health.deviceId } : {}), sessionReady: health.sessionReady, packageRoot: record.packageRoot, runtime: record.runtime, packageDigest: record.packageDigest, upgradeRequired };
+		return { kind: options.kind, stateDir, controlFile: path.join(stateDir, `${options.kind}.json`), pid: record.pid, reused, ownership: record.ownership, connected: health.connected, ...(health.deviceId ? { deviceId: health.deviceId } : {}), sessionReady: health.sessionReady, packageRoot: record.packageRoot, runtime: record.runtime, packageDigest: record.packageDigest, upgradeRequired, ...(upgradeRequired && updateDeferred ? { updateDeferred } : {}) };
 	} finally { await release(); }
 }
 

@@ -77,6 +77,8 @@ export interface LocalUiState {
 	readonly device: DeviceDescriptor;
 	readonly connected: boolean;
 	readonly serverName: string;
+	/** Broker instance received on this client's authenticated registration channel. */
+	readonly serverInstance?: string;
 	readonly views: Readonly<Record<string, ResolvedView>>;
 	readonly transfers: readonly TransferStatus[];
 	readonly interactions: readonly InteractionRequest[];

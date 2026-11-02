@@ -45,7 +45,8 @@ export function setupReadiness(input: {
 	const messages = [ready ? "Bridge is ready: signed registration, host plugin readiness and an actual OMP view handshake were confirmed." : "Signed client registration is confirmed; setup is not fully ready."];
 	if (!input.sessionReady) messages.push("Open/select a new OMP session or explicitly reload its extension to complete the view handshake. Setup never restarts OMP sessions.");
 	if (!hostReady) messages.push(input.pluginReloadMessage ?? (input.pluginReload === "isolated" ? "Host plugin reload is unverified for this isolated directory. Reload its intended Tern daemon explicitly, then retry." : "Host plugin readiness was not confirmed. Inspect its native load diagnostics, reload the intended Tern daemon and retry."));
-	if (upgrade) messages.push("Updated source is installed, but retained bridge services still run an earlier version. Restart those bridge services explicitly when safe, then retry; setup preserved active OMP sessions.");
+	if (input.client.upgradeRequired) messages.push("Client update pending. Check local maintenance for active-work delay, legacy migration or original-owner action; plugin installation alone does not upgrade the client.");
+	if (input.broker.upgradeRequired) messages.push("Broker update requires its owner's safe maintenance window; local maintenance never restarts it.");
 	const existing = [input.client.ownership === "existing" ? "client" : undefined, input.broker.ownership === "existing" ? "broker" : undefined].filter(value => value !== undefined);
 	if (existing.length) messages.push(`Reused existing ${existing.join(" and ")}; their lifetime remains with the original terminal/service manager. Setup did not detach or restart them.`);
 	messages.push("Existing device identity was retained. Bind the session manually to authorize client tools under native policy and OS permissions.");

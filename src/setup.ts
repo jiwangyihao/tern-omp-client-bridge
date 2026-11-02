@@ -10,8 +10,8 @@ import { detectRemote, packageArchive, remotePath, setupCommand, shellArgument, 
 import { acquireSetupLock, mergeControlFile, privateDirectory, readOptionalJson, writeSetupProgress } from "./setup-state.ts";
 import { setupReadiness, ternReloadReadiness, type PluginReloadStatus } from "./setup-readiness.ts";
 import { resolveTernExecutable } from "./tern-executable.ts";
-import { saveClientResumePlan } from "./client-resume.ts";
 import { inspectSetupPackage } from "./setup-payload.ts";
+import { admitExistingClientRoute, saveSetupClientResumePlan } from "./setup-alias.ts";
 
 export interface SetupOptions {
 	host: string;
@@ -101,8 +101,17 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
 		const config = await readOptionalJson(path.join(data, "config.json"));
 		const parsedConfig = config === undefined ? {} : z.record(z.string(), z.unknown()).parse(config);
 		const ternExecutable = await resolveTernExecutable({ explicit: options.ternExecutable, saved: parsedConfig.ternExecutable });
+		let stateDir = path.join(data, "bridge");
+		if (parsedConfig.controlFile !== undefined) {
+			if (typeof parsedConfig.controlFile !== "string" || !path.isAbsolute(parsedConfig.controlFile) || path.basename(parsedConfig.controlFile) !== "client.json") throw new BridgeError("SETUP_CONFIG_CONFLICT", "The saved controlFile is not an absolute client.json path. Correct that setting explicitly before setup can repair it.");
+			stateDir = path.dirname(parsedConfig.controlFile);
+		} else if (await readOptionalJson(path.join(defaultStateDir(), "identity.json")) !== undefined) {
+			// Adopt an earlier manual installation without generating another identity/registration.
+			stateDir = defaultStateDir();
+		}
 		await progress("checking-ssh", "Checking the selected trusted SSH host and its platform; no host-key or password prompts are bypassed.");
 		const remote = await detectRemote(options.host, log, options.remoteRoot);
+		const existingRoute = await admitExistingClientRoute({ pluginData: data, stateDir, host: options.host, remoteRoot: remote.root, log });
 		await progress("staging-package", "Staging the bridge in a durable private directory on the agent host and preparing compatible runtime dependencies.");
 		const source = await packageArchive(packageRoot, data, log);
 		const installed = await stageRemote(options.host, remote, source, log);
@@ -114,23 +123,17 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
 		const agent = AgentResultSchema.parse(JSON.parse(await setupCommand("ssh", sshCommand(options.host, agentArgs), { log, timeout: 180000, message: "Remote bridge installation or broker startup failed. Inspect the private setup log and any existing service owner, then retry. No OMP session was restarted." })));
 		if (agent.root !== remote.root || agent.packageRoot !== installed.packageRoot || agent.broker.stateDir !== remote.root) throw new BridgeError("REMOTE_STATE_CONFLICT", "The remote installer returned a different broker state directory; no local client was started.");
 		await progress("starting-client", "Starting or reusing this device's private client and completing signed registration. Existing device identity is retained.");
-		let stateDir = path.join(data, "bridge");
-		if (parsedConfig.controlFile !== undefined) {
-			if (typeof parsedConfig.controlFile !== "string" || !path.isAbsolute(parsedConfig.controlFile) || path.basename(parsedConfig.controlFile) !== "client.json") throw new BridgeError("SETUP_CONFIG_CONFLICT", "The saved controlFile is not an absolute client.json path. Correct that setting explicitly before setup can repair it.");
-			stateDir = path.dirname(parsedConfig.controlFile);
-		} else if (await readOptionalJson(path.join(defaultStateDir(), "identity.json")) !== undefined) {
-			// Adopt an earlier manual installation without generating another identity/registration.
-			stateDir = defaultStateDir();
-		}
 		const relay = [...remoteCli, "relay", "--state-dir", remote.root].map(shellArgument).join(" ");
-		const client = await ensureManagedService({ kind: "client", stateDir, packageRoot, host: options.host, remoteCommand: relay });
+		const client = await ensureManagedService({ kind: "client", stateDir, packageRoot, host: existingRoute?.host ?? options.host, remoteCommand: existingRoute?.plan?.remoteCommand ?? relay, verifyExistingClient: existingRoute?.verify });
 		await progress("checking-registration", "Verifying this signed client on the selected broker before saving the plugin connection.");
 		const registration = z.object({ registered: z.literal(true), deviceId: z.string() }).safeParse(JSON.parse(await setupCommand("ssh", sshCommand(options.host, [...remoteCli, "setup-status", "--state-dir", remote.root, "--device-id", client.deviceId!]), { log, message: "Could not verify this client's signed registration on the selected broker. Check SSH access and retry." })));
 		if (!registration.success || registration.data.deviceId !== client.deviceId) throw new BridgeError("CLIENT_HOST_CONFLICT", "This local client is not registered on the selected broker. It may still belong to another host; use its original configuration or stop it explicitly before retrying. Setup did not replace it.");
 		const health = await serviceHealth("client", stateDir);
 		if (!health.connected || health.deviceId !== client.deviceId) throw new BridgeError("CLIENT_NOT_READY", "The signed client disconnected before setup completed. Check SSH connectivity and retry; the plugin configuration was not changed.");
+		if (existingRoute) await existingRoute.verify(health);
 		await mergeControlFile(data, client.controlFile, ternExecutable);
-		await saveClientResumePlan(data, { schema: 1, kind: "client-resume", host: options.host, remoteCommand: relay, stateDir: client.stateDir, controlFile: client.controlFile, packageRoot, runtime: process.execPath, deviceId: client.deviceId!, packageDigest: (await inspectSetupPackage(packageRoot)).digest });
+		// Reusing an alias never changes the original revocable connection grant, even its package fields.
+		await saveSetupClientResumePlan(data, { schema: 1, kind: "client-resume", host: options.host, remoteCommand: relay, stateDir: client.stateDir, controlFile: client.controlFile, packageRoot, runtime: process.execPath, deviceId: client.deviceId!, packageDigest: (await inspectSetupPackage(packageRoot)).digest }, existingRoute);
 		const completion = setupReadiness({ sessionReady: health.sessionReady, pluginReload: agent.pluginReload, pluginReloadMessage: agent.pluginReloadMessage, client, broker: agent.broker });
 		await writeSetupProgress(data, { ...completion, host: options.host, controlFile: client.controlFile });
 		return SetupResultSchema.parse({ schema: 1, kind: "setup-complete", status: completion.status, stage: completion.stage, host: options.host, controlFile: client.controlFile, message: completion.message, remote: agent, client: { ...client, sessionReady: health.sessionReady } });

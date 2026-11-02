@@ -11,6 +11,7 @@ import { installOmp, installTern } from "../scripts/install.ts";
 import { setup, setupAgent, setupRegistration } from "./setup.ts";
 import { ensureManagedService, runManagedService } from "./setup-managed.ts";
 import { resumeClient } from "./client-resume.ts";
+import { inspectLegacyClientMigration } from "./client-migration.ts";
 
 const HELP = `Usage: tern-omp-bridge COMMAND [OPTIONS]
 
@@ -18,6 +19,8 @@ const HELP = `Usage: tern-omp-bridge COMMAND [OPTIONS]
         [--remote-root POSIX_PATH] [--agent-dir POSIX_PATH] [--tern-dir POSIX_PATH]
         [--tern-executable ABSOLUTE_LOCAL_PATH]
   resume-client --plugin-data PATH
+  migrate-legacy-client --plugin-data PATH
+        [--confirmation SHA256 --acknowledge-context-loss yes]
   server [--state-dir PATH] [--port N]
   relay [--state-dir PATH]
   client --host SSH_ALIAS
@@ -45,6 +48,11 @@ uses outbound SSH without agent forwarding; default remote command is
 
 Ports must be integers from 1 to 65535; omission selects an ephemeral port.
 Foreground server/client/relay commands stop on stdin EOF or SIGINT/SIGTERM.
+Legacy migration without confirmation only inspects the current approval, identity,
+authenticated endpoint, managed process/start instance and package. Review its
+warning: old clients cannot prove that owned contexts/operations are idle. Execution
+requires the returned exact-process confirmation and explicit context-loss acknowledgement.
+Only one graceful SIGTERM is allowed; keys, grant, broker and OMP sessions are preserved.
 
 install-omp verifies its candidate with the installed omp executable on PATH in
 an isolated, no-prompt host before replacing extensions/tern-omp-client-bridge/index.ts
@@ -73,6 +81,7 @@ const OPTIONS: Record<string, readonly string[]> = {
 	"install-tern": ["target", "control-file", "tern-executable"],
 	setup: ["host", "plugin-data", "package-root", "remote-root", "agent-dir", "tern-dir", "tern-executable"],
 	"resume-client": ["plugin-data"],
+	"migrate-legacy-client": ["plugin-data", "confirmation", "acknowledge-context-loss"],
 	"setup-agent": ["remote-root", "package-root", "agent-dir", "tern-dir", "tern-executable"],
 	"setup-status": ["state-dir", "device-id"],
 	"managed-start": ["kind", "state-dir", "package-root", "host", "remote-command"],
@@ -154,6 +163,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 		}
 		case "resume-client": {
 			console.log(JSON.stringify(await resumeClient(required("plugin-data"))));
+			return;
+		}
+		case "migrate-legacy-client": {
+			const data = required("plugin-data");
+			if (!options.has("confirmation") && !options.has("acknowledge-context-loss")) console.log(JSON.stringify(await inspectLegacyClientMigration(data)));
+			else {
+				if (options.get("acknowledge-context-loss") !== "yes" || !/^[a-f0-9]{64}$/.test(required("confirmation"))) throw new BridgeError("CLIENT_MIGRATION_CONFIRMATION_REQUIRED", "Review a fresh migration inspection and supply --confirmation SHA256 --acknowledge-context-loss yes. Legacy clients cannot prove that owned contexts or operations are idle.");
+				console.log(JSON.stringify(await resumeClient(data, required("confirmation"))));
+			}
 			return;
 		}
 		case "setup-agent": {

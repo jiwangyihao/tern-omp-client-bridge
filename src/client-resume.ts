@@ -20,7 +20,7 @@ export const ClientResumePlanSchema = z.object({
 	deviceId: z.string().regex(/^client_[a-f0-9]{32}$/), packageDigest: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict().refine(plan => plan.controlFile === path.join(plan.stateDir, "client.json"));
 export type ClientResumePlan = z.infer<typeof ClientResumePlanSchema>;
-export type ClientResumeResult = Omit<ManagedResult, "kind"> & { kind: "client-resumed"; updateDeferred?: "busy" | "rollback"; retryAfterMs?: number };
+export type ClientResumeResult = Omit<ManagedResult, "kind" | "updateDeferred"> & { kind: "client-resumed"; updateDeferred?: "busy" | "rollback" | "legacy" | "unmanaged"; retryAfterMs?: number };
 const OwnedClientSnapshot = z.object({ schema: z.literal(1), kind: z.literal("client"), ownership: z.literal("managed"), pid: z.number().int().positive(), instance: z.string().uuid(), host: z.string(), packageRoot: AbsolutePathSchema, runtime: AbsolutePathSchema, packageDigest: z.string().regex(/^[a-f0-9]{64}$/) });
 const UpdateFallback = z.object({ schema: z.literal(1), requestedDigest: z.string().regex(/^[a-f0-9]{64}$/), packageRoot: AbsolutePathSchema, packageDigest: z.string().regex(/^[a-f0-9]{64}$/), retryAfter: z.number().finite().nonnegative() }).strict();
 
@@ -80,10 +80,11 @@ export async function validateClientResumeLaunch(options: ManagedOptions, execut
 }
 
 /** Maintain the existing client with the installed, verified private package; never alter its broker. */
-export async function resumeClient(pluginData: string): Promise<ClientResumeResult> {
+export async function resumeClient(pluginData: string, legacyMigrationConfirmation?: string): Promise<ClientResumeResult> {
 	const data = path.resolve(pluginData);
 	const raw = await readOptionalJson(path.join(data, "client-resume.json"));
 	if (raw !== undefined && !ClientResumePlanSchema.safeParse(raw).success) throw new BridgeError("CLIENT_RESUME_INVALID", "The saved local recovery plan is invalid. Automatic maintenance will not replace it.");
+	if (legacyMigrationConfirmation !== undefined && (!/^[a-f0-9]{64}$/.test(legacyMigrationConfirmation) || raw === undefined)) throw new BridgeError("CLIENT_MIGRATION_CONFIRMATION_REQUIRED", "Explicit legacy migration requires a current recovery approval and the confirmation from a fresh migration inspection.");
 	const release = await acquireSetupLock(path.join(data, "setup.lock"));
 	try {
 		if (JSON.stringify(await readOptionalJson(path.join(data, "client-resume.json"))) !== JSON.stringify(raw)) throw new BridgeError("CLIENT_RESUME_CONFLICT", "The local recovery approval changed while acquiring maintenance ownership.");
@@ -105,7 +106,7 @@ export async function resumeClient(pluginData: string): Promise<ClientResumeResu
 		if (raw === undefined) await saveClientResumePlan(data, plan);
 		else await rememberRecoveryInitialization(data);
 		const expectedResumeDigest = createHash("sha256").update(JSON.stringify(plan)).digest("hex");
-		const maintain = (root: string, digest: string, mode: "recover" | "update") => ensureManagedService({ kind: "client", stateDir: plan.stateDir, packageRoot: root, host: plan.host, remoteCommand: plan.remoteCommand, expectedDeviceId: plan.deviceId, expectedPackageDigest: digest, expectedResumeDigest: root === plan.packageRoot && digest === plan.packageDigest ? undefined : expectedResumeDigest, resumePluginData: data, clientMaintenance: mode });
+		const maintain = (root: string, digest: string, mode: "recover" | "update") => ensureManagedService({ kind: "client", stateDir: plan.stateDir, packageRoot: root, host: plan.host, remoteCommand: plan.remoteCommand, expectedDeviceId: plan.deviceId, expectedPackageDigest: digest, expectedResumeDigest: root === plan.packageRoot && digest === plan.packageDigest ? undefined : expectedResumeDigest, resumePluginData: data, clientMaintenance: mode, ...(mode === "update" && legacyMigrationConfirmation !== undefined ? { legacyMigrationConfirmation } : {}) });
 		const fallbackFile = path.join(data, "client-update-failure.json");
 		const previous = OwnedClientSnapshot.safeParse(await readOptionalJson(path.join(plan.stateDir, "client.managed.json")));
 		const health = await serviceHealth("client", plan.stateDir).catch(() => undefined);
@@ -119,7 +120,7 @@ export async function resumeClient(pluginData: string): Promise<ClientResumeResu
 		const failure = UpdateFallback.safeParse(failureRaw);
 		if (failureRaw !== undefined && !failure.success) throw new BridgeError("CLIENT_RESUME_CONFLICT", "The client update recovery record is invalid.");
 		const now = Date.now();
-		if (failure.success && failure.data.requestedDigest === desired.packageDigest && failure.data.retryAfter > now && failure.data.retryAfter - now <= 60000 && (!health || (previousClient?.packageRoot === failure.data.packageRoot && previousClient.packageDigest === failure.data.packageDigest))) {
+		if (legacyMigrationConfirmation === undefined && failure.success && failure.data.requestedDigest === desired.packageDigest && failure.data.retryAfter > now && failure.data.retryAfter - now <= 60000 && (!health || (previousClient?.packageRoot === failure.data.packageRoot && previousClient.packageDigest === failure.data.packageDigest))) {
 			await verifyFallback(failure.data.packageRoot, failure.data.packageDigest);
 			const retained = await maintain(failure.data.packageRoot, failure.data.packageDigest, "recover");
 			if (retained.packageDigest !== desired.packageDigest) return { ...retained, kind: "client-resumed", upgradeRequired: true, updateDeferred: "rollback", retryAfterMs: Math.max(1000, failure.data.retryAfter - Date.now()) };
@@ -131,7 +132,7 @@ export async function resumeClient(pluginData: string): Promise<ClientResumeResu
 		try {
 			const result = await maintain(desired.packageRoot, desired.packageDigest, "update");
 			if (!result.upgradeRequired) await rm(fallbackFile, { force: true });
-			return { ...result, kind: "client-resumed", ...(result.upgradeRequired ? { updateDeferred: "busy" as const, retryAfterMs: 10000 } : {}) };
+			return { ...result, kind: "client-resumed", ...(result.upgradeRequired ? { updateDeferred: result.updateDeferred ?? "unmanaged", ...(result.updateDeferred === "busy" ? { retryAfterMs: 10000 } : {}) } : {}) };
 		} catch (error) {
 			if (!rollback || processExists(rollback.pid)) throw error;
 			const approval = ClientResumePlanSchema.safeParse(await readOptionalJson(path.join(data, "client-resume.json")));

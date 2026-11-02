@@ -20,6 +20,14 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0-beta.7：SSH 别名复用与旧客户端迁移
+
+- SSH 地址不再单独决定客户端归属。Setup 在远端安装前核验候选 broker 与现有客户端的认证身份；同一 broker 的别名保留原连接和恢复授权，不把客户端改接到另一 broker。
+- 生命周期接口 404 明确分类为旧版迁移，不再当作忙时等待；非托管客户端由原所有者更新。维护状态文件记录最终 ready/waiting/blocked，而不是停留在带失败文案的 installing。
+- 显式旧版迁移提供只读预览与绑定进程、授权、端点及候选包的确认值。核验 OS 所有者、启动时间、执行文件和监听进程后只发送一次 SIGTERM；无法验证或目标变化即拒绝，不强杀。旧客户端不能证明执行上下文空闲，必须明确接受上下文中断风险。
+- 本机经用户确认后从 beta.4 PID 81994 迁移到 beta.7 候选 PID 52805，认证连接恢复。身份、配置和恢复授权文件摘要一致；共享 broker PID 与实例标识保持一致。实际 `wawa-dev` 别名只读核验通过，保留原 `root@173.231.15.27` 连接。
+- 定向验证：200 项 Luau 窗口用例、26 项迁移/就绪用例、9 项 alias 集成用例及类型检查通过。未执行整机重启；Windows 旧进程显式迁移不使用 POSIX 证据冒充支持，须由原进程所有者处理。
+
 ## 2026-11-02：关闭面板后的残留告警
 
 - 现场原生状态栏显示 `Needs attention`，但本机认证接口 `connected=true`、操作回执无错误，客户端仍为原 PID 81994。日志同时存在网络中断与原生 timer 超时；历史日志没有保存具体发布错误，不能断言唯一触发事件。

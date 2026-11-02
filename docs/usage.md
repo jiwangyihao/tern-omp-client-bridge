@@ -737,6 +737,26 @@ another broker in the same state root.
 如需停用，还应按原有所有权安全关闭它。手工服务不会被自动维护强制接管。
 这些机制属于 Tern 插件及既有客户端，不安装全系统启动服务或改变登录配置。
 
+Beta.7 distinguishes an active-work delay from a legacy client that has no safe
+shutdown interface. `Legacy client migration required` does not retry indefinitely;
+`Client owner update required` leaves externally managed clients with their owner.
+Plugin version and running-client version are separate readiness facts.
+
+For a legacy managed client, run the installed private package's CLI with its
+approved Bun runtime: `migrate-legacy-client --plugin-data PATH`. This is a read-only
+preview of the exact process and candidate package. Only after reviewing its warning,
+repeat with `--confirmation SHA256 --acknowledge-context-loss yes`. The old client
+cannot prove that no execution contexts or transfers remain: this explicit migration
+may interrupt them. Admission rechecks authorization, authenticated endpoint and OS
+process ownership; it sends only graceful SIGTERM, never a force kill. Unsupported
+process inspection fails closed. Broker and OMP sessions are not restarted.
+
+SSH aliases for the same authenticated broker may reuse the existing client without
+rewriting its approved connection. Alias equality is proved against broker identity,
+not hostname spelling or IP equality. A different or unprovable broker is rejected;
+one existing client is not silently retargeted or multiplexed across brokers.
+
+
 
 A dropped transport reconnects and authenticates again, but operations, uploads,
 and uncertain attachment sends are not replayed. Inspect the original device or

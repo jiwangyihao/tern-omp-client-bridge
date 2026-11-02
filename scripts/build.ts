@@ -148,7 +148,7 @@ async function bootstrap(source: string, data: string, host: string | undefined,
 	const dependencyStage = path.join(installation, `.dependencies-${crypto.randomUUID()}`);
 	let releaseLock: (() => Promise<void>) | undefined;
 	let backendStarted = false;
-	const progress = (status: "installing" | "failed") => atomicJson(path.join(data, maintenance ? "client-maintenance.json" : "setup-state.json"), { schema: 1, status, stage: stageName, message, updatedAt: Date.now() });
+	const progress = (status: "installing" | "failed" | "ready" | "waiting" | "blocked") => atomicJson(path.join(data, maintenance ? "client-maintenance.json" : "setup-state.json"), { schema: 1, status, stage: stageName, message, updatedAt: Date.now() });
 	try {
 		if (maintenance) {
 			const eligibility = await maintenanceEligibility(data);
@@ -224,7 +224,7 @@ async function bootstrap(source: string, data: string, host: string | undefined,
 		}
 		if (maintenance) {
 			stageName = "client";
-			message = "Local client maintenance failed. Existing identity and remote services were preserved; inspect the private maintenance log.";
+			message = "Checking the running client and preparing a safe local update; existing services remain available.";
 			await progress("installing");
 			const child = Bun.spawn([process.execPath, path.join(managed, "src", "cli.ts"), "resume-client", "--plugin-data", data], { cwd: managed, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 120000 });
 			const [code, output, diagnostics] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -234,6 +234,7 @@ async function bootstrap(source: string, data: string, host: string | undefined,
 				const info = await lstat(log).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return undefined; });
 				if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error("Unsafe maintenance diagnostics path");
 				await writeFile(log, diagnostics, { mode: 0o600 });
+				message = "Local client maintenance failed. Existing identity and remote services were preserved; inspect client-maintenance.log.";
 				await progress("failed");
 				const failure = diagnostics.match(/^([A-Z_]+):/)?.[1] ?? "CLIENT_MAINTENANCE_FAILED";
 				const retry = ["SETUP_BUSY", "SETUP_COMMAND_FAILED", "SERVICE_NOT_READY", "SERVICE_START_FAILED", "CLIENT_UPDATE_PENDING", "CLIENT_MAINTENANCE_FAILED"].includes(failure);
@@ -243,6 +244,13 @@ async function bootstrap(source: string, data: string, host: string | undefined,
 			const receipt: unknown = JSON.parse(output);
 			if (!isMetadata(receipt) || receipt.kind !== "client-resumed" || typeof receipt.connected !== "boolean" || typeof receipt.upgradeRequired !== "boolean") throw new Error("Invalid client maintenance receipt");
 			await atomicJson(path.join(installation, "current.json"), { schema: 1, packageRoot: managed, fingerprint: sourceHash });
+			const blocked = receipt.upgradeRequired && (receipt.updateDeferred === "legacy" || receipt.updateDeferred === "unmanaged");
+			message = !receipt.upgradeRequired ? "The requested client package is running."
+				: receipt.updateDeferred === "legacy" ? "The old client lacks safe update support; explicit legacy migration is required."
+				: receipt.updateDeferred === "unmanaged" ? "Update this client through its original owner."
+				: receipt.updateDeferred === "rollback" ? "The previous client was restored; an automatic retry is pending."
+				: "Active client work prevents an update; automatic maintenance will retry.";
+			await progress(blocked ? "blocked" : receipt.upgradeRequired ? "waiting" : "ready");
 			console.log(output.trim());
 			return;
 		}

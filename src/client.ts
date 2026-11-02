@@ -517,7 +517,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 			if (request.method === "GET" && route === "/v1/state") {
 				lastUiSeen = Date.now();
 				expireUiReceipts();
-				const snapshot: LocalUiState = { device: identity.device, connected, serverName, views: Object.fromEntries(views), transfers: [...transfers.values()].flatMap(job => job.status ? [job.status] : []), interactions: [...interactions.values()].map(item => item.request), panels: [...panels.values()], outcomes: [...outcomes.values()] };
+				const snapshot: LocalUiState = { device: identity.device, connected, serverName, ...(connected && serverInstance ? { serverInstance } : {}), views: Object.fromEntries(views), transfers: [...transfers.values()].flatMap(job => job.status ? [job.status] : []), interactions: [...interactions.values()].map(item => item.request), panels: [...panels.values()], outcomes: [...outcomes.values()] };
 				return Response.json(snapshot);
 			}
 			if (request.method === "GET" && route === "/v1/lifecycle" && options.lifecycle) {
