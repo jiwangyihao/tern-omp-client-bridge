@@ -753,6 +753,14 @@ shutdown interface. `Legacy client migration required` does not retry indefinite
 `Client owner update required` leaves externally managed clients with their owner.
 Plugin version and running-client version are separate readiness facts.
 
+Beta.9 keeps window state polling independent of HTTP callbacks. Fetch callbacks
+only deposit receipts; a pre-armed driver consumes them outside the fetch hook.
+State requests remain single-flight, expire after ten seconds, and retry after
+three seconds on failure. Late or superseded receipts cannot replace newer state.
+Panel publication and chrome refresh recover their expired ownership without
+replaying clipboard, file, paste, binding, or other user operations. Verified
+transfer failures remain visible; recovered connectivity does not erase them.
+
 For a legacy managed client, run the installed private package's CLI with its
 approved Bun runtime: `migrate-legacy-client --plugin-data PATH`. This is a read-only
 preview of the exact process and candidate package. Only after reviewing its warning,

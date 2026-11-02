@@ -8,6 +8,8 @@ function run(entry, loadModule)
 		local handlers, timers, requests, encoded = {}, {}, {}, {}
 		local deferred, inReceipt = {}, false
 		local inProcessReceipt = false
+		local inStateReceipt, receiptWork = false, 0
+		local timerDue, decodedTokens = {}, {}
 		local deferredDelays, callbackDelay = {}, nil
 		local original, other = 17592186044423, 17592186044424
 		local focused, remote, clock = original, true, 1
@@ -23,6 +25,10 @@ function run(entry, loadModule)
 		f.processes = {}
 		f.writes = {}
 		f.logs = {}
+		f.requestHistory = {}
+		local function nativeWork()
+			if inStateReceipt then receiptWork += 1 end
+		end
 		f.deviceEvents = {}
 		f.moduleLoads, f.reads, f.setupOpens = {}, {}, 0
 		f.surfaceChecks = 0
@@ -81,6 +87,7 @@ function run(entry, loadModule)
 			return true
 		end
 		local function encode(value)
+			nativeWork()
 			serial += 1
 			local token = "json:" .. tostring(serial)
 			encoded[token] = copy(value)
@@ -88,7 +95,7 @@ function run(entry, loadModule)
 		end
 		local function context()
 			local alive = true
-			local function live() assert(alive, "expired callback context was reused") end
+			local function live() nativeWork(); assert(alive, "expired callback context was reused") end
 			local cx = {
 				sessions = { current = function() live(); return { id = f.currentSession or 1, host = f.currentHost or 2 } end },
 				session = {
@@ -230,32 +237,43 @@ function run(entry, loadModule)
 			local args = table.pack(...)
 			args.n += 1
 			args[args.n] = cx
-			local result = fn(table.unpack(args, 1, args.n))
+			local result = table.pack(pcall(fn, table.unpack(args, 1, args.n)))
 			expire()
-			return result
+			if not result[1] then error(result[2], 0) end
+			return table.unpack(result, 2, result.n)
 		end
 		tern = {
 			plugin = { dir = "/isolated/plugin", data = "/isolated/plugin-data" },
 			runtime = { os = "macos" },
-			now = function() return clock end,
+			now = function() nativeWork(); return clock end,
 			log = { warn = function(prefix, value)
+				nativeWork()
 				if f.loggerFailure then error("native log unavailable") end
 				assert(prefix == "[omp-client-bridge:panel]")
 				table.insert(f.logs, copy(assert(encoded[value])))
 			end },
 			json = { encode = encode, decode = function(token)
+				nativeWork()
+				decodedTokens[token] = true
 				assert(not inProcessReceipt, "process callback parsed JSON before a fresh timer")
 				if token == "[]" then return {} end
 				local value = copy(assert(encoded[token], "unknown JSON token"))
-				if value.views then decodedState = value end
+				if value.views then
+					decodedState = value
+					if f.interruptAfterState then
+						f.interruptAfterState, f.interruptSleep = false, true
+					end
+				end
 				return value
 			end, null = null },
 			kv = { get = function(key)
+				nativeWork()
 				ioCount += 1
 				assert(key == "setup-hosts")
 				if f.mappingReadError then error("private storage failure") end
 				return copy(f.mapping)
 			end, set = function(key, value)
+				nativeWork()
 				ioCount += 1
 				assert(key == "setup-hosts")
 				if f.mappingWriteError then error("private storage failure") end
@@ -263,6 +281,7 @@ function run(entry, loadModule)
 				table.insert(f.writes, copy(value))
 			end },
 			fs = { read = function(path)
+				nativeWork()
 				ioCount += 1
 				assert(not inProcessReceipt, "process callback performed filesystem IO")
 				table.insert(f.reads, path)
@@ -294,38 +313,60 @@ function run(entry, loadModule)
 				return encode(f.endpoint or { url = "http://127.0.0.1:9999", token = "fixture-token" })
 			end },
 			fetch = function(url, options, callback)
+				nativeWork()
 				ioCount += 1
 				if f.fetchError then error("fixture native fetch start failure") end
 				assert(options.headers.Authorization == "Bearer fixture-token", "local UI authentication omitted")
-				table.insert(requests, { path = url:sub(#"http://127.0.0.1:9999" + 1), body = options.body and copy(encoded[options.body]), timeout = options.timeout_ms, callback = callback })
+				local request = { path = url:sub(#"http://127.0.0.1:9999" + 1), method = options.method, body = options.body and copy(encoded[options.body]), timeout = options.timeout_ms, callback = callback, at = clock }
+				table.insert(requests, request)
+				table.insert(f.requestHistory, request)
 			end,
 			process = { run = function(argv, options, callback)
+				nativeWork()
 				ioCount += 1
 				assert(not inProcessReceipt, "process callback launched another process")
 				if f.processStartError then error("private process failure") end
 				table.insert(f.processes, { argv = copy(argv), options = copy(options), callback = callback })
 			end },
 			timer = function(ms, callback)
+				nativeWork()
 				assert(not inProcessReceipt, "process callback scheduled native work")
 				deferredDelays[callback] = ms
+				timerDue[callback] = clock + ms
 				table.insert(ms > 0 and ms <= 16 and deferred or timers, callback)
 			end,
-			sleep = function(_ms)
+			sleep = function(ms)
+				nativeWork()
+				if f.interruptSleep then
+					f.interruptSleep = false
+					coroutine.yield("fixture callback interrupted at sleep")
+				end
 				return { next = function(_, callback)
-					table.insert(deferred, function(cx) callback(nil, nil, cx) end)
+					local job = function(cx) callback(nil, nil, cx) end
+					timerDue[job] = clock + ms
+					table.insert(deferred, job)
 				end }
 			end,
-			chrome = { refresh = function() assert(not inProcessReceipt, "process callback refreshed chrome") end, status = function(callback) handlers.status = callback end },
+			chrome = { refresh = function() nativeWork(); assert(not inProcessReceipt, "process callback refreshed chrome") end, status = function(callback) handlers.status = callback end },
 			command = function(command) handlers[command.id] = command.run; f.commands[command.id] = command end,
 			override = function() error("bridge must never override native paste or any native command") end,
 			route = { open = function(fn) handlers.drop = fn end, link = function(fn) handlers.link = fn end },
 			on = function(name, fn) handlers[name] = fn end,
 		}
+		local function nextCallback(queue, message)
+			local selected = 1
+			for index = 2, #queue do
+				if timerDue[queue[index]] < timerDue[queue[selected]] then selected = index end
+			end
+			local callback = assert(table.remove(queue, selected), message)
+			clock = math.max(clock, timerDue[callback])
+			timerDue[callback] = nil
+			return callback
+		end
 		function f.step()
-			local callback = assert(table.remove(deferred, 1), "deferred callback missing")
+			local callback = nextCallback(deferred, "deferred callback missing")
 			callbackDelay = deferredDelays[callback]
 			deferredDelays[callback] = nil
-			clock += callbackDelay or 0
 			invoke(callback)
 			callbackDelay = nil
 		end
@@ -354,29 +395,92 @@ function run(entry, loadModule)
 		end
 		function f.respond(request, body, status, holdDeferred)
 			local response = { status = status or 200, body = encode(body) }
-			invoke(function(cx) inReceipt = true; request.callback(response, cx); inReceipt = false end)
-			if not holdDeferred then f.flush() end
+			local before = receiptWork
+			local ok, failure = pcall(invoke, function(cx)
+				inReceipt, inStateReceipt = true, request.path == "/v1/state"
+				request.callback(response, cx)
+			end)
+			inReceipt, inStateReceipt = false, false
+			f.lastReceiptWork = receiptWork - before
+			if not ok then error(failure, 0) end
+			if not holdDeferred then
+				f.flush()
+				-- State receipts are deposited by native fetch, then consumed by the
+				-- already-armed driver. Do not make every HTTP callback a driver tick.
+				if request.path == "/v1/state" and not decodedTokens[response.body] then f.tick() end
+			end
+			return decodedTokens[response.body] == true
 		end
-		function f.poll()
+		function f.stateBody() return copy(ui) end
+		function f.startPoll()
 			local steps = 0
 			while not f.hasRequest("/v1/state") do
 				steps += 1
-				assert(steps <= 20, "poll did not reach state request")
-				local callback = assert(table.remove(timers, 1), "poll timer missing")
-				invoke(callback)
+				assert(steps <= 40, "poll did not reach state request")
+				invoke(nextCallback(timers, "poll timer missing"))
 				f.flush()
 			end
-			f.respond(f.take("/v1/state"), ui)
+			return f.take("/v1/state")
 		end
-		function f.tick()
-			local callback = assert(table.remove(timers, 1), "timer missing")
-			invoke(callback)
-			f.flush()
+		function f.poll()
+			-- A prior unanswered GET may have expired while a test advanced time.
+			-- Observe its rejection, then answer the replacement rather than treating
+			-- an ignored stale receipt as a successful state synchronization.
+			for _ = 1, 3 do if f.respond(f.startPoll(), ui) then return end end
+			error("poll did not consume a current state receipt")
+		end
+		function f.pollFor(ms)
+			-- Keep a healthy service responsive while exercising maintenance time,
+			-- rather than turning an elapsed-time jump into a missing GET receipt.
+			local deadline = clock + ms
+			while clock < deadline do
+				local before = clock
+				f.poll()
+				assert(clock > before, "healthy polling did not advance the driver clock")
+			end
+		end
+		function f.tick(holdDeferred)
+			invoke(nextCallback(timers, "timer missing"))
+			if not holdDeferred then f.flush() end
+		end
+		function f.dropDeferred()
+			for _, callback in deferred do timerDue[callback], deferredDelays[callback] = nil, nil end
+			deferred = {}
+		end
+		function f.runFor(ms)
+			local deadline, steps = clock + ms, 0
+			while true do
+				local due = math.huge
+				for _, callback in timers do due = math.min(due, timerDue[callback]) end
+				if due > deadline then break end
+				steps += 1; assert(steps <= 200, "timed driver did not make progress")
+				f.tick()
+			end
+			clock = math.max(clock, deadline)
+		end
+		function f.interruptAtSleep(job)
+			f.interruptAfterState = true
+			local thread = coroutine.create(job)
+			local ok, signal = coroutine.resume(thread)
+			inReceipt, inStateReceipt, callbackDelay = false, false, nil
+			assert(ok and signal == "fixture callback interrupted at sleep", "receipt never reached interruptible processing: " .. tostring(signal))
+			assert(coroutine.status(thread) == "suspended")
+			coroutine.close(thread)
+		end
+		function f.requestCount(path, kind)
+			local count = 0
+			for _, request in f.requestHistory do
+				if request.path == path and (not kind or request.body and request.body.kind == kind) then count += 1 end
+			end
+			return count
 		end
 		function f.untilState(predicate)
 			for _ = 1, 20 do
 				if predicate() then return end
-				if f.hasRequest("/v1/state") then f.poll() else f.tick() end
+				-- Observe each lifecycle turn, including rejected stale receipts;
+				-- waiting for a successful replacement GET can skip a process-start
+				-- predicate whose completion is controlled by the test itself.
+				if f.hasRequest("/v1/state") then f.respond(f.take("/v1/state"), ui) else f.tick() end
 			end
 			assert(predicate(), "lifecycle did not reach expected state")
 		end
@@ -622,7 +726,7 @@ function run(entry, loadModule)
 			end
 			return loadModule(name)
 		end
-		function f.reload() handlers, timers, deferred, deferredDelays = {}, {}, {}, {}; entry(requireModule) end
+		function f.reload() handlers, timers, deferred, deferredDelays, timerDue = {}, {}, {}, {}, {}; entry(requireModule) end
 		function f.latestSnapshot() f.flushPanels(); return f.snapshots[#f.snapshots].value end
 		function f.completeSetup()
 			f.fakeSetup = true
@@ -644,6 +748,193 @@ function run(entry, loadModule)
 		body(fixture())
 		passed += 1
 		print("PASS synthetic shipped-plugin behavior: " .. name)
+	end
+
+	case("native state fetch callback deposits a receipt without parsing IO or native work", function(f)
+		f.warm(); f.toggle()
+		local request = f.startPoll()
+		local before, status = f.ioCount(), f.status()[1].text
+		local body = f.stateBody(); body.connected = false
+		f.respond(request, body, 200, true)
+		assert(f.lastReceiptWork == 0 and f.ioCount() == before, "native fetch callback performed heavy state processing")
+		assert(f.status()[1].text == status, "native fetch callback mutated rendered state")
+		f.tick()
+		assert(f.status()[1].text == "Waiting for connection", "fresh driver context did not consume the receipt")
+		f.chromeIsPure()
+	end)
+
+	case("dropped chrome callback recovers from cached state without formatter IO", function(f)
+		f.warm()
+		local request = f.startPoll()
+		local body = f.stateBody(); body.connected = false
+		f.respond(request, body, 200, true)
+		f.tick(true)
+		f.dropDeferred()
+		f.runFor(1500)
+		assert(f.status()[1].text == "Waiting for connection", "dropped chrome callback wedged rendered status")
+		f.chromeIsPure()
+	end)
+
+	case("interrupted receipt processing cannot lose the next poll timer", function(f)
+		f.warm(); f.toggle()
+		local request = f.startPoll()
+		-- Model native callback cancellation, not a catchable Lua error: the
+		-- suspended coroutine is discarded at the real shipped tern.sleep seam.
+		-- Before durable scheduling this reaches exactly 'poll timer missing'.
+		f.interruptAtSleep(function() f.respond(request, f.stateBody()) end)
+		local count = f.requestCount("/v1/state")
+		f.poll()
+		assert(f.requestCount("/v1/state") > count, "interrupted processing stranded the state driver")
+		f.advance(5000); f.poll(); f.flushPanels()
+		assert(f.status()[1].text ~= "Needs attention" and f.latestSnapshot().connected)
+		assert(#f.creations == 1 and #f.floats == 1 and #f.native == 0)
+		f.chromeIsPure()
+	end)
+
+	case("missing state response stays single flight until its ten second deadline", function(f)
+		f.warm()
+		local missing = f.startPoll()
+		local count = f.requestCount("/v1/state")
+		assert(missing.method == "GET" and missing.timeout == 10000)
+		f.runFor(missing.at + 9999 - tern.now())
+		assert(f.requestCount("/v1/state") == count, "a live state request was duplicated")
+		f.runFor(1)
+		assert(f.status()[1].text == "Start / repair Bridge", "missing native response never expired")
+		f.runFor(2999)
+		assert(f.requestCount("/v1/state") == count, "failed state request bypassed reconnect pacing")
+		local replacement = f.startPoll()
+		assert(replacement ~= missing and replacement.at >= missing.at + 13000)
+		f.respond(replacement, f.stateBody())
+		assert(f.status()[1].text ~= "Start / repair Bridge", "current healthy state did not clear the verified transport fault")
+	end)
+
+	case("receipt deposited before expiry is rejected if consumption misses its deadline", function(f)
+		f.warm(); f.poll() -- Finish the optional recovery-authorization probe while still online.
+		local request = f.startPoll()
+		f.respond(request, f.stateBody(), 200, true)
+		f.advance(request.at + 10000 - tern.now()); f.tick()
+		assert(f.status()[1].text == "Start / repair Bridge", "expired queued receipt revived stale health: " .. f.status()[1].text)
+		f.poll()
+		assert(f.status()[1].text ~= "Start / repair Bridge")
+	end)
+
+	case("first state receipt wins and duplicate callbacks cannot replace its payload", function(f)
+		f.warm()
+		local request = f.startPoll()
+		local stale = f.stateBody(); stale.connected = false
+		f.respond(request, f.stateBody(), 200, true)
+		for _ = 1, 50 do f.respond(request, stale, 200, true); assert(f.lastReceiptWork == 0) end
+		f.tick()
+		assert(f.status()[1].text:find("Connected", 1, true), "duplicate native completion replaced the first receipt")
+	end)
+
+	case("expired and consumed state callbacks cannot overwrite a newer healthy generation", function(f)
+		f.warm()
+		local expired = f.startPoll()
+		f.runFor(expired.at + 10000 - tern.now())
+		local current = f.startPoll()
+		local stale = f.stateBody(); stale.connected = false
+		f.respond(expired, stale, 200, true)
+		f.respond(current, f.stateBody())
+		f.respond(expired, { error = "obsolete transport failure" }, 503, true)
+		f.respond(current, stale, 200, true)
+		f.tick()
+		assert(f.status()[1].text:find("Connected", 1, true), "old response overwrote new healthy state")
+		local count = f.requestCount("/v1/state")
+		f.runFor(1000)
+		assert(f.requestCount("/v1/state") == count, "old response released another generation's single-flight slot")
+	end)
+
+	case("healthy state does not hide a live panel publication fault before verified recovery", function(f)
+		f.warm(); f.toggle()
+		f.advance(5000); f.poll()
+		f.respond(f.take("/v1/panels/publish"), { error = "panel unavailable" }, 503)
+		assert(f.status()[1].text == "Needs attention")
+		f.poll()
+		assert(f.status()[1].text == "Needs attention", "healthy state erased an unverified panel fault")
+		f.untilState(function() return f.hasRequest("/v1/panels/publish") end)
+		local retry = f.take("/v1/panels/publish")
+		assert(retry.body.snapshot.connected and retry.body.snapshot.owner)
+		f.respond(retry, { ok = true })
+		f.flush()
+		assert(f.status()[1].text ~= "Needs attention", "successful panel receipt left stale attention")
+		f.advance(5000); f.poll(); f.flushPanels()
+		assert(f.latestSnapshot().connected and #f.creations == 1 and #f.floats == 1)
+	end)
+
+	case("missing panel publication expires and late success cannot clear its replacement failure", function(f)
+		f.warm(); f.toggle()
+		f.advance(5000); f.poll()
+		local expired = f.take("/v1/panels/publish")
+		f.advance(10000); f.poll()
+		f.untilState(function() return f.hasRequest("/v1/panels/publish") end)
+		local replacement = f.take("/v1/panels/publish")
+		assert(replacement ~= expired, "missing publication wedged the heartbeat")
+		f.respond(replacement, { error = "replacement publication failed" }, 503)
+		assert(f.status()[1].text == "Needs attention")
+		f.respond(expired, { ok = true })
+		assert(f.status()[1].text == "Needs attention", "expired success cleared a current panel fault")
+		f.untilState(function() return f.hasRequest("/v1/panels/publish") end)
+		f.flushPanels()
+		assert(f.status()[1].text ~= "Needs attention")
+		f.respond(expired, { error = "obsolete publication failure" }, 503)
+		assert(f.status()[1].text ~= "Needs attention", "expired failure poisoned recovered panel state")
+	end)
+
+	case("poll recovery preserves verified transfer failures while restoring panel heartbeat", function(f)
+		f.warm(); f.toggle()
+		f.setTransfers({ { id = "failed-upload", viewId = f.viewId, phase = "failed", names = { "one.txt" }, bytesSent = 0, totalBytes = 8 } })
+		f.flushPanels()
+		local missing = f.startPoll()
+		f.runFor(missing.at + 10000 - tern.now())
+		f.poll(); f.flushPanels()
+		-- Complete the renewed conversation proof, then wait for the fresh
+		-- publication after its reconnect backoff. The queued pre-timeout
+		-- heartbeat above has an obsolete connection token and cannot clear it.
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		f.untilState(function() return f.hasRequest("/v1/panels/publish") end)
+		f.flushPanels()
+		local found = false
+		for _, segment in f.status() do if segment.text == "1 failed" and segment.tone == "error" then found = true end end
+		assert(found, "recovery hid a real transfer failure")
+		assert(f.status()[1].text ~= "Needs attention" and f.latestSnapshot().connected, "verified recovery did not restore the panel: " .. f.status()[1].text)
+	end)
+
+	for _, operation in { "clipboard capture", "file capture", "paste", "upload", "bind" } do
+		case("state timeout recovery never replays an unanswered " .. operation .. " operation", function(f)
+			f.warm()
+			local path, kind, original
+			if operation == "clipboard capture" then
+				path, original = "/v1/captures/clipboard", f.clipboard()
+			elseif operation == "file capture" then
+				path, original = "/v1/captures", f.captureDrop()
+			elseif operation == "paste" then
+				f.respond(f.clipboard(), { kind = "text", text = "paste exactly once" })
+				f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+				path, kind, original = "/v1/intents", "paste", f.take("/v1/intents", f.viewId)
+			elseif operation == "upload" then
+				local validate = f.capture(f.captureDrop(), "upload-once")
+				f.resolve(validate, "session-A", "draft-A")
+				path, original = "/v1/transfers", f.take("/v1/transfers")
+			else
+				f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 7)
+				f.toggle(); f.link("bind/" .. f.choices().generation .. "/d1")
+				f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+				path, kind, original = "/v1/intents", "bind", f.take("/v1/intents", f.viewId)
+			end
+			assert(original.method == "POST" and (not kind or original.body.kind == kind))
+			local count = f.requestCount(path, kind)
+			assert(count == 1, "gesture did not issue exactly one original operation")
+			local missing = f.startPoll()
+			f.runFor(missing.at + 10000 - tern.now())
+			f.poll(); f.poll(); f.flushPanels()
+			assert(f.requestCount(path, kind) == count, "poll recovery replayed an unanswered POST")
+			f.respond(original, { error = "operation result unknown; inspect original draft" }, 503)
+			f.poll(); f.flushPanels()
+			assert(f.requestCount(path, kind) == count, "operation failure replayed a POST")
+			assert(#f.native == 0 and #f.sent == 0, "recovery fell back to native paste or pane input")
+			f.chromeIsPure()
+		end)
 	end
 
 	case("panel diagnostics explain admission without exposing private context", function(f)
@@ -763,7 +1054,7 @@ function run(entry, loadModule)
 		f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-resumed", stateDir = "/isolated", controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = true, ownership = "managed", connected = true, sessionReady = true, upgradeRequired = true }), timed_out = false })
 		f.poll(); f.poll()
 		assert(#f.processes == 1 and f.setupOpens == 0, "busy update duplicated maintenance or opened Setup")
-		f.advance(10001); f.poll()
+		f.pollFor(10001)
 		f.untilState(function() return #f.processes == 2 end)
 		f.finishResume(); f.poll()
 		assert(f.setupOpens == 0 and #f.sent == 0)
@@ -775,9 +1066,9 @@ function run(entry, loadModule)
 		f.untilState(function() return #f.processes == 1 end)
 		f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-resumed", stateDir = "/isolated", controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = true, ownership = "managed", connected = true, sessionReady = true, upgradeRequired = true, updateDeferred = "rollback", retryAfterMs = 60000 }), timed_out = false })
 		f.poll(); f.poll()
-		f.advance(10001); f.poll(); f.poll(); f.poll()
+		f.pollFor(10001); f.poll(); f.poll(); f.poll()
 		assert(#f.processes == 1, "rollback cooldown restarted maintenance before its deadline")
-		f.advance(50000); f.poll()
+		f.pollFor(50000)
 		f.untilState(function() return #f.processes == 2 end)
 		f.finishResume(); f.poll()
 		assert(f.setupOpens == 0 and #f.sent == 0)
@@ -789,7 +1080,7 @@ function run(entry, loadModule)
 			f.untilState(function() return #f.processes == 1 end)
 			f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-resumed", stateDir = "/isolated", controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = true, ownership = "managed", connected = true, sessionReady = true, upgradeRequired = true, updateDeferred = reason }), timed_out = false })
 			f.poll(); f.poll()
-			f.advance(120001); f.poll(); f.poll()
+			f.pollFor(120001); f.poll(); f.poll()
 			assert(#f.processes == 1, "unsupported update retried automatically")
 			assert(f.status()[1].text ~= "Needs attention", "healthy client was reported broken")
 			f.invoke("setup")
@@ -933,7 +1224,7 @@ function run(entry, loadModule)
 	case("verified install with absent config exposes actionable configuration error", function(f)
 		f.missingConnection = true
 		assert(f.completeSetup() == "awaiting")
-		f.tick()
+		f.untilState(function() return f.status()[1].text == "Bridge endpoint needs attention" end)
 		assert(f.status()[1].text == "Bridge endpoint needs attention")
 		f.missingConnection = false
 		f.poll()
@@ -953,7 +1244,7 @@ function run(entry, loadModule)
 	for _, fault in { "Permission denied (os error 13)", "invalid UTF-8 bytes" } do
 		case("endpoint read fault is actionable rather than reinstall: " .. fault, function(f)
 			f.endpointReadError = fault
-			f.tick(); f.tick()
+			f.untilState(function() return f.status()[1].text == "Bridge endpoint needs attention" end)
 			assert(f.status()[1].text == "Bridge endpoint needs attention")
 			f.toggle()
 			assert(#f.moduleLoads == 0 and #f.errors == 1 and f.errors[1]:find("permissions", 1, true))
@@ -968,7 +1259,7 @@ function run(entry, loadModule)
 		case("OS error 3 is missing metadata only on Windows: " .. platform, function(f)
 			tern.runtime.os = platform
 			f.endpointReadError = "Fixture filesystem failure (os error 3)"
-			f.tick(); f.tick()
+			f.untilState(function() return f.status()[1].text == (platform == "windows" and "Starting local Bridge" or "Bridge endpoint needs attention") end)
 			assert(f.status()[1].text == (platform == "windows" and "Starting local Bridge" or "Bridge endpoint needs attention"))
 			f.noRequest("/v1/state")
 			f.chromeIsPure()
@@ -977,7 +1268,7 @@ function run(entry, loadModule)
 
 	case("unsafe endpoint is never fetched and corrected metadata recovers", function(f)
 		f.endpoint = { url = "https://agent.example", token = "fixture-token" }
-		f.tick(); f.tick()
+		f.untilState(function() return f.status()[1].text == "Bridge endpoint needs attention" end)
 		f.noRequest("/v1/state")
 		assert(f.status()[1].text == "Bridge endpoint needs attention")
 		f.endpoint = nil
@@ -987,11 +1278,10 @@ function run(entry, loadModule)
 
 	case("failed local service request opens startup recovery instead of repeating an error", function(f)
 		f.fetchError = true
-		f.tick(); f.tick(); f.tick()
+		f.untilState(function() return f.status()[1].text == "Start / repair Bridge" end)
 		f.fakeSetup = true
 		f.invoke("toggle-bridge")
-		local turns = 0
-		while f.setupOpens == 0 do turns += 1; assert(turns < 20, "dead service has no recovery entry"); f.tick() end
+		f.untilState(function() return f.setupOpens > 0 end)
 		assert(#f.creations == 0 and #f.errors == 0)
 		f.noRequest("/v1/panels/open")
 		f.fetchError = false
@@ -2112,8 +2402,7 @@ function run(entry, loadModule)
 		f.invoke("focus", {})
 		local timedOut = f.take("/v1/intents")
 		local receipt = f.receipt(timedOut)
-		f.advance(10001)
-		f.poll()
+		f.pollFor(10001) -- Expire the handshake while the local state service stays healthy.
 		f.publish(timedOut, receipt, "session-A", "draft-A")
 		assert(f.drop().handled == true)
 		f.noRequest("/v1/captures")

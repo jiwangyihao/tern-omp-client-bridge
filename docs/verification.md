@@ -20,6 +20,13 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0-beta.9：轮询中断恢复
+
+- 旧版实际 Tern 隔离实例已复现 fetch 回调预算中断：记录 hook 暂停与恢复，但后续状态 GET 未继续。生产现场的客户端仍在线，维护记录为 ready；不能将此故障误判为客户端退出。
+- 状态 fetch 回调仅存放回执，独立驱动在处理回执前预约下一轮；十秒请求期限、三秒失败退避、连接代际与回执所有权限制迟到结果。面板发布和 chrome 刷新可恢复，用户操作不会自动重放。
+- 215 项执行 shipped window.luau 的 SDK 边界用例通过，包括 15 项新增回归；覆盖回调放弃、缺失/重复/迟到回执、心跳恢复、保留真实传输失败和副作用不重放。既有健康维护用例持续提供健康回执，不再通过跳过请求期限制造无关超时。
+- 本机生成的 Tern SDK 明确规定到期 timer/process/fetch 回调等待 hook 暂停结束。无界面 serve 实例未可靠交付新版连续窗口 timer，故不声称已在该实例证明暂停后的完整恢复；SDK 契约与合成边界证据不等于原生 GUI 验收。
+
 ## 2026-11-02：插件侧 Tern 原生工具展示修复
 
 - 用户明确禁止修改 OMP，并在接口实测后选择仅修复 Tern 语义展示、保持既有纯终端行为。Bridge 只接入宿主公开的 describeCall/describeResult 与语义合并规则，不伪造内置工具来源、不复制 ANSI renderer、不安装 Edit openArgStream。

@@ -1,6 +1,6 @@
 # 安装指南
 
-本文面向安装或升级到 `v0.5.0-beta.8` 的用户。首次安装先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Start / repair Bridge** 中授权初始化。已经初始化的安装在插件重载后自动维护本机客户端，不需要每次重新运行完整 Setup。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
+本文面向安装或升级到 `v0.5.0-beta.9` 的用户。首次安装先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Start / repair Bridge** 中授权初始化。已经初始化的安装在插件重载后自动维护本机客户端，不需要每次重新运行完整 Setup。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
 
 这是包含原生 UI 增强、原生权限、运行时引导、命名管道、上传发布及通用 SSH 设置修复的预发布版本。`v0.5.0-beta.1` 的 Windows CI 失败记录与旧附件保留不变；不要将旧附件视为已更新。macOS PiP 几何与焦点目前在隔离无头渲染器中验收，完整跨设备 GUI 行为仍需分别验收。[原生平台 CI](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/workflows/native-runtime.yml)、[验证记录](verification.md)与[兼容性说明](compatibility.md)区分发布版本、实际验证和未验收范围。
 
@@ -44,12 +44,12 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 
 ## 2. 下载并校验发行包
 
-打开 [`v0.5.0-beta.8` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.8)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
+打开 [`v0.5.0-beta.9` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.9)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
 
 | 建议使用环境 | 附件 |
 | --- | --- |
-| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.8.tar.gz` |
-| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.8.zip` |
+| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.9.tar.gz` |
+| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.9.zip` |
 
 两种压缩包包含相同的源码保留型包结构，没有捆绑 `node_modules`、凭据或原生可执行文件。本指南使用上述发行附件，不使用 GitHub 自动生成的 **Source code** 压缩包。校验和用于核对下载内容，不能替代对发行来源的信任。
 
@@ -58,7 +58,7 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 在一个新的下载目录中执行，避免覆盖已有的解压目录。
 
 ```sh
-version=v0.5.0-beta.8
+version=v0.5.0-beta.9
 package="tern-omp-client-bridge-$version"
 archive="$package.tar.gz"
 base="https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$version"
@@ -93,7 +93,7 @@ tern plugin install "$(pwd)/$package"
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$Version = 'v0.5.0-beta.8'
+$Version = 'v0.5.0-beta.9'
 $Package = "tern-omp-client-bridge-$Version"
 $Archive = "$Package.zip"
 $Base = "https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$Version"
@@ -115,11 +115,11 @@ tern plugin install $PackageRoot
 
 ### 确认包根目录与已有安装
 
-解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.8`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
+解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.9`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
 
 原生 `tern plugin install` 会复制插件并重载插件列表。从未初始化的安装仍需首次授权；已有有效授权或可验证旧安装的窗口会自动准备本机运行包、恢复或更新客户端，不会因此重装远端或重启共享 broker。
 
-- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.8" --force`。
+- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.9" --force`。
 - **已有 linked package** 时，`--force` 不会覆盖链接。若确定切换为发行包副本，先执行 `tern plugin unlink omp-client-bridge`，再安装解压目录；保留原链接指向的源码目录。不要直接删除 `.path` 文件或对未知目录递归删除。
 - 多 profile 或隔离配置必须与实际使用的 Tern daemon 一致。新 profile 需要单独完成正常登录与首次设置，不能复制其他 profile 的凭据。
 

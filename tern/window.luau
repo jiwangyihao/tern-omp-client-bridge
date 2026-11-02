@@ -17,7 +17,8 @@ local operations = {}
 local nextResolve = {}
 local resolving = {}
 local resolved = {}
-local pollBusy = false
+local pollRequest = nil
+local pollAfter = 0
 local action = "plugin.omp-client-bridge."
 local clipboardRequest = nil
 local filePickerOpen = false
@@ -62,8 +63,8 @@ local function diagnostic(event, fields, operation)
 	pcall(function() tern.log.warn("[omp-client-bridge:panel]", tern.json.encode(record)) end)
 end
 
--- Native await callbacks receive a fresh window context. Do not route HTTP
--- completion through a second timer queue: stalled receipts stop heartbeat renewal.
+-- Deferred UI work receives a fresh window context. State HTTP callbacks only
+-- deposit receipts; the independently armed polling driver consumes them.
 local function defer(job)
 	tern.sleep(0):next(function(_, err, cx)
 		if err then error(err) end
@@ -844,13 +845,23 @@ end
 local function publishPanel(cx)
 	if not cx or not panel then return end
 	if panel.creating then return end
+	local owned = panel
+	local publication = owned.publishing
+	local now = tern.now()
+	if publication and (publication.connection ~= connection or now >= publication.deadline) then
+		-- An interrupted HTTP callback must not own the heartbeat forever. Only
+		-- a later successful publication (or closing this panel) clears its fault.
+		owned.publishing, owned.publishAfter = nil, now + 3000
+		panelError = "Bridge panel connection unavailable"
+		refreshChrome()
+	end
 	for _, item in state and state.panels or {} do
 		if item.owner == windowId and item.panelId == panel.id and item.phase == "closed" then
 			panel, panelError = nil, nil; refreshChrome(); return
 		end
 	end
 	publishDeviceSelection(cx, panel)
-	if panel.publishing then return end
+	if owned.publishing or now < (owned.publishAfter or 0) then return end
 	local target = panel.target
 	local view = state and state.views[target.viewId]
 	local available = liveTarget(target)
@@ -887,15 +898,23 @@ local function publishPanel(cx)
 		end
 	end
 	if sameSnapshot(panel.snapshot, snapshot) and tern.now() < (panel.nextHeartbeat or 0) then return end
-	local owned = panel
-	owned.publishing = true
+	local publication = { connection = connection, deadline = tern.now() + 10000 }
+	owned.publishing = publication
 	api("POST", "/v1/panels/publish", { owner = windowId, panelId = owned.id,
-		destinationId = target.destinationId, snapshot = snapshot }, function(_, err, fresh)
-		owned.publishing = false
-		if panel ~= owned then return end
-		if err then panelError = "Bridge panel connection unavailable"; refreshChrome(); return end
-		owned.snapshot, owned.nextHeartbeat = snapshot, tern.now() + 5000
+		destinationId = target.destinationId, snapshot = snapshot }, function(_, err)
+		if panel ~= owned or owned.publishing ~= publication or connection ~= publication.connection then return end
+		local completedAt = tern.now()
+		if completedAt >= publication.deadline then return end
+		owned.publishing = nil
+		if err then
+			owned.publishAfter = completedAt + 3000
+			panelError = "Bridge panel connection unavailable"
+			refreshChrome()
+			return
+		end
+		owned.snapshot, owned.nextHeartbeat, owned.publishAfter = snapshot, completedAt + 5000, nil
 		panelError = nil
+		refreshChrome()
 	end)
 end
 
@@ -1109,27 +1128,7 @@ local function expirePending(cx)
 	end
 end
 
-local function poll(cx)
-	if pollBusy then return end
-	local advancedRecovery = advanceRecovery(cx)
-	if recovery.notifyFailure and cx then recovery.notifyFailure = nil; cx:toast("error", "OMP Client Bridge", recovery.message) end
-	if advancedRecovery and not connection then
-		expirePending(cx)
-		refreshChrome()
-		tern.timer(recovery.pending and 500 or 0, poll)
-		return
-	end
-	if not connection then
-		expirePending(cx)
-		local advanced = loadConnection()
-		if recovery.manualOrigin and not advanced then setupBridge(cx) end
-		refreshChrome()
-		tern.timer(advanced and 0 or 3000, poll)
-		return
-	end
-	pollBusy = true
-	api("GET", "/v1/state", nil, function(value, err, fresh)
-		pollBusy = false
+local function consumeState(value, err, fresh)
 		if err then
 			if not recovery.blocked and (recovery.retryAt or 0) == 0 then recovery.attempted = false end
 			serviceUnavailable = true
@@ -1193,13 +1192,76 @@ local function poll(cx)
 				end
 			end)
 		end
-		-- Expiry also runs while disconnected, so captures cannot wait forever.
-		expirePending(fresh)
-		updateTransferSummary(state, not err and state and state.connected == true)
-		defer(publishPanel)
-		refreshChrome()
-		tern.timer(err and 3000 or 500, poll)
+end
+
+local function requestState()
+	local request = { connection = connection, deadline = tern.now() + 10000 }
+	pollRequest = request
+	local started = pcall(tern.fetch, request.connection.url .. "/v1/state", {
+		method = "GET", headers = { Authorization = "Bearer " .. request.connection.token,
+			["Content-Type"] = "application/json" }, timeout_ms = 10000,
+	}, function(response)
+		-- No native calls, decoding or business callbacks in the fetch receipt.
+		if pollRequest == request and connection == request.connection and request.receipt == nil then
+			request.receipt = response or false
+		end
 	end)
+	if not started and pollRequest == request and request.receipt == nil then
+		request.receipt = { error = "Cannot start the local Bridge request; check endpoint metadata and retry" }
+	end
+end
+
+local function decodeState(response)
+	if type(response) ~= "table" then return nil, "Invalid local UI response" end
+	if response.error then return nil, response.error end
+	local ok, value = pcall(tern.json.decode, response.body)
+	if not ok or type(value) ~= "table" or type(response.status) ~= "number" then return nil, "Invalid local UI response" end
+	if response.status < 200 or response.status >= 300 then
+		return nil, type(value.error) == "string" and value.error or "Local UI request failed (" .. tostring(response.status) .. ")"
+	end
+	return value
+end
+
+local function poll(cx)
+	-- Arm the sole next turn before any decode, filesystem access, callback or
+	-- native UI work: even an abandoned callback cannot strand this driver.
+	tern.timer(500, poll)
+	local now = tern.now()
+	local request = pollRequest
+	if request and request.connection ~= connection then
+		pollRequest, request.receipt = nil, nil
+		request = nil
+	end
+	if request and (request.receipt ~= nil or now >= request.deadline) then
+		local receipt = request.receipt
+		-- Consume ownership before decoding or invoking callbacks. A duplicate,
+		-- expired or superseded receipt can never mutate a newer request's state.
+		pollRequest, request.receipt = nil, nil
+		pollAfter = now + 3000
+		local value, err
+		if now >= request.deadline then err = "Local Bridge state request timed out; retrying"
+		else value, err = decodeState(receipt) end
+		if not err then pollAfter = 0 end
+		consumeState(value, err, cx)
+		updateTransferSummary(state, not err and state and state.connected == true)
+	end
+	local advancedRecovery = advanceRecovery(cx)
+	if now >= pollAfter and not pollRequest then
+		if not connection then
+			if not advancedRecovery then
+				-- One metadata read per turn; failures wait three seconds.
+				pollAfter = now + 3000
+				local advanced = loadConnection()
+				if advanced then pollAfter = 0 end
+				if recovery.manualOrigin and not advanced then setupBridge(cx) end
+			end
+		else requestState() end
+	end
+	-- Housekeeping also runs during missing receipts and reconnect backoff.
+	if recovery.notifyFailure and cx then recovery.notifyFailure = nil; cx:toast("error", "OMP Client Bridge", recovery.message) end
+	expirePending(cx)
+	refreshChrome()
+	publishPanel(cx)
 end
 
 tern.command({ id = "setup", title = "Start / repair Bridge", icon = "plug", group = "OMP", run = setupBridge })
@@ -1367,12 +1429,17 @@ local function statusSegments(viewId)
 	return segments
 end
 
-local chromeQueued = false
+local chromeQueued = nil
 refreshChrome = function()
-	if chromeQueued then return end
-	chromeQueued = true
+	local now = tern.now()
+	if chromeQueued and now < chromeQueued.deadline then return end
+	local queued = { deadline = now + 1000 }
+	chromeQueued = queued
 	defer(function()
-		chromeQueued = false
+		if chromeQueued ~= queued then return end
+		-- Release before computing or refreshing; a dropped defer is replaced
+		-- after its lease by the independent polling driver.
+		chromeQueued = nil
 		defaultStatus = statusSegments(nil)
 		local cache = {}
 		for viewId, target in targets do if target.pane then cache[target.pane] = statusSegments(viewId) end end
