@@ -20,6 +20,14 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## 2026-11-02：关闭面板后的残留告警
+
+- 现场原生状态栏显示 `Needs attention`，但本机认证接口 `connected=true`、操作回执无错误，客户端仍为原 PID 81994。日志同时存在网络中断与原生 timer 超时；历史日志没有保存具体发布错误，不能断言唯一触发事件。
+- 在实际 shipped window 模块中复现：面板发布失败后关闭面板，`panelError` 未随面板所有权清除，健康轮询仍持续显示告警。修复将面板退出与其发布错误一起退役；仍存活面板的发布失败继续显示告警。
+- 新增显式关闭与 broker 关闭两条回归；修复前出现 `closed panel left a permanent attention status`，修复后 193 项路由用例通过。
+- 更新本机插件并重载后，实际原生状态栏为 `Connected · No session`，认证连接正常，客户端 PID 未变。未重启 broker、OMP 会话或整机；未更新公开 beta.4 附件。
+- 本轮 computer 检查受当前 OMP 进程中 18.14.0/18.14.2 原生模块版本不一致阻断，改用 Tern 自带只读 accessibility/状态接口验证；该工具问题不作为 Bridge 根因。
+
 ## 2026-11-01：Beta.4 本机客户端启动恢复
 
 - 根因：旧版脱离终端的客户端不会跨系统重启存活，插件只读取临时端点；历史 setup `ready` 不能证明服务在线。

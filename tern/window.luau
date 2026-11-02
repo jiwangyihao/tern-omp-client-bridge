@@ -777,7 +777,7 @@ end
 local function hidePanel(cx)
 	local owned = panel
 	if not owned then return end
-	panel = nil -- Revoke local routes before requesting the owned block's self-close.
+	panel, panelError = nil, nil -- Retire the owned panel's routes and publication fault together.
 	api("POST", "/v1/panels/close", { owner = windowId, panelId = owned.id }, function(_, err, fresh)
 		if err then report(fresh, err) end
 	end)
@@ -789,7 +789,7 @@ local function publishPanel(cx)
 	if panel.creating then return end
 	for _, item in state and state.panels or {} do
 		if item.owner == windowId and item.panelId == panel.id and item.phase == "closed" then
-			panel = nil; refreshChrome(); return
+			panel, panelError = nil, nil; refreshChrome(); return
 		end
 	end
 	publishDeviceSelection(cx, panel)
@@ -973,7 +973,7 @@ local function togglePanel(cx)
 			api("POST", "/v1/panels/close", { owner = windowId, panelId = owned.id }, function() end)
 			return
 		end
-		if err or not fresh then panel = nil; report(fresh, err or "Bridge window closed before the panel opened"); return end
+		if err or not fresh then panel, panelError = nil, nil; report(fresh, err or "Bridge window closed before the panel opened"); return end
 		local session, focused = fresh.sessions:current(), destination(fresh)
 		if session.id ~= owned.session or session.host ~= owned.host or not focused or focused.destinationId ~= target.destinationId then
 			diagnostic("panel.target_changed", { sessionMatch = session.id == owned.session, hostMatch = session.host == owned.host, destinationMatch = focused ~= nil and focused.destinationId == target.destinationId }, operation)

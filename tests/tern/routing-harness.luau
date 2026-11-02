@@ -1553,6 +1553,19 @@ function run(entry, loadModule)
 		assert(f.panelPane ~= old and #f.closes == 0)
 	end)
 
+	for _, close in { "toggle", "broker" } do
+		case("closed panel retires its publication failure: " .. close, function(f)
+			f.warm(); f.toggle()
+			f.advance(5000); f.poll()
+			f.respond(f.take("/v1/panels/publish"), { error = "Fixture publication unavailable" }, 503)
+			assert(f.status()[1].text == "Needs attention", "live panel failure was hidden")
+			if close == "toggle" then f.toggle() else f.closePanel() end
+			f.poll()
+			assert(f.status()[1].text ~= "Needs attention", "closed panel left a permanent attention status")
+			f.noRequest("/v1/captures/clipboard")
+		end)
+	end
+
 	case("panel snapshots are bounded public data and heartbeat never resizes", function(f)
 		f.warm()
 		f.toggle()
