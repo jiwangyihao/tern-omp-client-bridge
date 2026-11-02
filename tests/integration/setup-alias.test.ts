@@ -31,13 +31,13 @@ async function fixture() {
 	cleanup.push(() => client.close());
 	await client.waitForConnection(AbortSignal.timeout(10000));
 	const digest = (await inspectSetupPackage(packageRoot)).digest;
-	const plan = { schema: 1 as const, kind: "client-resume" as const, host: "original", remoteCommand: [process.execPath, path.join(packageRoot, "src", "cli.ts"), "relay", "--state-dir", serverDir].map(shellArgument).join(" "), stateDir, controlFile: path.join(stateDir, "client.json"), packageRoot, runtime: process.execPath, deviceId: identity.device.id, packageDigest: digest };
+	const plan = { schema: 1 as const, kind: "client-resume" as const, host: "original", remoteCommand: ["/usr/bin/bun", "/bridge/src/cli.ts", "relay", "--state-dir", "/fixture/broker"].map(shellArgument).join(" "), stateDir, controlFile: path.join(stateDir, "client.json"), packageRoot, runtime: process.execPath, deviceId: identity.device.id, packageDigest: digest };
 	await writePrivateJson(path.join(root, "config.json"), { controlFile: plan.controlFile });
 	await saveClientResumePlan(root, plan);
 	await writePrivateJson(path.join(stateDir, "client.managed.json"), { schema: 1, kind: "client", pid: process.pid, instance: crypto.randomUUID(), ownership: "managed", host: plan.host, packageRoot, runtime: process.execPath, packageDigest: digest });
 	const probe = async (host: string, remoteRoot: string, deviceId: string) => {
 		if (host !== "original" && host !== "alias") throw Error("Untrusted fixture route");
-		return readBrokerIdentity(remoteRoot, deviceId, packageRoot);
+		return readBrokerIdentity(remoteRoot === "/fixture/broker" ? serverDir : remoteRoot, deviceId, packageRoot);
 	};
 	const options = { pluginData: root, stateDir, host: "alias", remoteRoot: serverDir, log: path.join(root, "setup.log") };
 	return { root, serverDir, stateDir, broker, client, identity, plan, options, probe };
