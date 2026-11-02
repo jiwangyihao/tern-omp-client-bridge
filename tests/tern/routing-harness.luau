@@ -266,7 +266,18 @@ function run(entry, loadModule)
 				ioCount += 1
 				assert(not inProcessReceipt, "process callback performed filesystem IO")
 				table.insert(f.reads, path)
-				if path == "/isolated/plugin-data/setup-state.json" then return encode(assert(f.setupProgress, "no setup state")) end
+				if path == "/isolated/plugin-data/setup-state.json" then
+					if not f.setupProgress then error("ENOENT") end
+					return encode(f.setupProgress)
+				end
+				if path == "/isolated/plugin-data/client-resume-initialized.json" then
+					if not f.resumeInitialized then error("ENOENT") end
+					return encode({ schema = 1 })
+				end
+				if path == "/isolated/client.managed.json" then
+					if not f.legacyManaged then error("ENOENT") end
+					return encode(f.legacyManaged)
+				end
 				if path == "/isolated/plugin-data/client-resume.json" then
 					if f.resumeReadError then error(f.resumeReadError) end
 					if not f.resumePlan then error("ENOENT") end
@@ -363,7 +374,10 @@ function run(entry, loadModule)
 			f.flush()
 		end
 		function f.untilState(predicate)
-			for _ = 1, 20 do if predicate() then return end; f.tick() end
+			for _ = 1, 20 do
+				if predicate() then return end
+				if f.hasRequest("/v1/state") then f.poll() else f.tick() end
+			end
 			assert(predicate(), "lifecycle did not reach expected state")
 		end
 		function f.authorizeResume()
@@ -678,9 +692,9 @@ function run(entry, loadModule)
 		f.untilState(function() return #f.processes == 1 end)
 		local process = f.processes[1]
 		assert(#process.argv == 5 and process.argv[1] == "/approved/bun")
-		assert(process.argv[2] == "/approved/package with spaces/src/cli.ts" and process.argv[3] == "resume-client")
-		assert(process.argv[4] == "--plugin-data" and process.argv[5] == "/isolated/plugin-data")
-		assert(process.options.timeout_ms == 45000 and process.options.shell == nil)
+		assert(process.argv[2] == "/isolated/plugin/scripts/build.ts" and process.argv[3] == "maintain-client", "recovery must maintain the installed plugin rather than execute a retired package")
+		assert(process.argv[4] == "/isolated/plugin" and process.argv[5] == "/isolated/plugin-data")
+		assert(process.options.shell == nil)
 		assert(f.status()[1].text == "Starting local Bridge")
 		f.invoke("setup"); f.invoke("toggle-bridge"); f.tick()
 		assert(#f.processes == 1 and f.setupOpens == 0, "concurrent repair duplicated launch")
@@ -709,6 +723,66 @@ function run(entry, loadModule)
 		assert(f.setupOpens == 0, "new authorization was ignored in favor of provisioning")
 	end)
 
+	case("completed legacy installation enters local maintenance without another Setup", function(f)
+		f.missingEndpoint = true
+		f.setupProgress = { schema = 1, status = "awaiting_session", host = "agent", controlFile = "/isolated/client.json" }
+		f.legacyManaged = { schema = 1, kind = "client", ownership = "managed", host = "agent", runtime = "/approved/bun" }
+		f.untilState(function() return #f.processes == 1 end)
+		assert(f.processes[1].argv[3] == "maintain-client")
+		assert(f.setupOpens == 0 and #f.sent == 0, "legacy recovery repeated remote provisioning")
+		f.finishResume(); f.missingEndpoint = false; f.poll()
+		assert(#f.processes == 1 and f.setupOpens == 0)
+		f.chromeIsPure()
+	end)
+
+	case("removed recovery authorization is not recreated from legacy setup history", function(f)
+		f.missingEndpoint, f.resumeInitialized = true, true
+		f.setupProgress = { schema = 1, status = "ready", host = "agent", controlFile = "/isolated/client.json" }
+		f.legacyManaged = { schema = 1, kind = "client", ownership = "managed", host = "agent", runtime = "/approved/bun" }
+		f.untilState(function() return f.status()[1].text == "Set up Bridge" end)
+		f.advance(60001)
+		for _ = 1, 8 do f.tick() end
+		assert(#f.processes == 0 and f.setupOpens == 0 and #f.sent == 0, "revoked recovery silently launched a client")
+	end)
+
+	case("temporary maintenance failure retries without a manual repair click", function(f)
+		f.authorizeResume(); f.missingEndpoint = true
+		f.untilState(function() return #f.processes == 1 end)
+		f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-maintenance", status = "retry", code = "SETUP_COMMAND_FAILED" }), timed_out = false })
+		f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
+		assert(#f.processes == 1)
+		f.advance(60001)
+		f.untilState(function() return #f.processes == 2 end)
+		f.finishResume(); f.missingEndpoint = false; f.poll()
+		assert(f.setupOpens == 0 and #f.sent == 0)
+	end)
+
+	case("healthy client update remains observable and retries after a busy result", function(f)
+		f.authorizeResume(); f.warm()
+		f.untilState(function() return #f.processes == 1 end)
+		f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-resumed", stateDir = "/isolated", controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = true, ownership = "managed", connected = true, sessionReady = true, upgradeRequired = true }), timed_out = false })
+		f.poll(); f.poll()
+		assert(#f.processes == 1 and f.setupOpens == 0, "busy update duplicated maintenance or opened Setup")
+		f.advance(10001); f.poll()
+		f.untilState(function() return #f.processes == 2 end)
+		f.finishResume(); f.poll()
+		assert(f.setupOpens == 0 and #f.sent == 0)
+		f.chromeIsPure()
+	end)
+
+	case("rolled back update keeps the healthy client until the supplied retry deadline", function(f)
+		f.authorizeResume(); f.warm()
+		f.untilState(function() return #f.processes == 1 end)
+		f.finishResume({ status = 0, stdout = tern.json.encode({ kind = "client-resumed", stateDir = "/isolated", controlFile = "/isolated/client.json", deviceId = "device-fixture", pid = 123, reused = true, ownership = "managed", connected = true, sessionReady = true, upgradeRequired = true, updateDeferred = "rollback", retryAfterMs = 60000 }), timed_out = false })
+		f.poll(); f.poll()
+		f.advance(10001); f.poll(); f.poll(); f.poll()
+		assert(#f.processes == 1, "rollback cooldown restarted maintenance before its deadline")
+		f.advance(50000); f.poll()
+		f.untilState(function() return #f.processes == 2 end)
+		f.finishResume(); f.poll()
+		assert(f.setupOpens == 0 and #f.sent == 0)
+	end)
+
 	for _, fault in { "json", "schema", "kind", "runtime", "packageRoot", "stateDir", "controlFile", "config", "relation", "traversal", "extra", "digest", "permission" } do
 		case("invalid resume authorization fails closed: " .. fault, function(f)
 			f.authorizeResume(); f.missingEndpoint = true
@@ -730,13 +804,13 @@ function run(entry, loadModule)
 	end
 
 	for _, fault in { "failure", "timeout", "missing callback", "start", "invalid result" } do
-		case("resume failure is bounded and needs explicit retry: " .. fault, function(f)
+		case("failed recovery stays bounded and supports explicit retry: " .. fault, function(f)
 			f.authorizeResume(); f.missingEndpoint = true
 			f.processStartError = fault == "start"
 			if f.processStartError then f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
 			else
 				f.untilState(function() return #f.processes == 1 end)
-				if fault == "missing callback" then f.advance(45001)
+				if fault == "missing callback" then f.advance(f.processes[1].options.timeout_ms + 1)
 				else f.finishResume({ status = fault == "failure" and 1 or 0, timed_out = fault == "timeout", stdout = "invalid-json", stderr = "private-secret" }) end
 				f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
 			end
@@ -750,17 +824,18 @@ function run(entry, loadModule)
 		end)
 	end
 
-	case("healthy then stopped client never respawns without explicit repair", function(f)
-		f.warm(); f.authorizeResume()
+	case("authorized client loss recovers automatically after earlier healthy operation", function(f)
+		f.warm(); f.poll(); f.poll(); f.authorizeResume()
+		assert(#f.processes == 0)
 		f.fetchError, f.missingEndpoint = true, true
-		for _ = 1, 10 do f.tick() end
-		assert(#f.processes == 0 and #f.sent == 0, "intentional stop triggered a watchdog restart")
-		f.invoke("setup")
+		f.advance(60001)
 		f.untilState(function() return #f.processes == 1 end)
+		assert(f.setupOpens == 0 and #f.sent == 0, "automatic local recovery provisioned a remote host")
 		f.finishResume(); f.fetchError, f.missingEndpoint = false, false; f.poll()
-		f.fetchError = true
-		for _ = 1, 10 do f.tick() end
-		assert(#f.processes == 1 and #f.sent == 0, "later failure restarted or replayed automatically")
+		f.fetchError, f.missingEndpoint = true, true
+		f.advance(60001)
+		f.untilState(function() return #f.processes == 2 end)
+		assert(f.setupOpens == 0 and #f.sent == 0, "later client loss did not remain local recovery")
 	end)
 
 	case("cold Setup intent waits for authorized recovery instead of provisioning", function(f)
@@ -782,9 +857,6 @@ function run(entry, loadModule)
 		f.poll()
 		assert(f.status()[1].text == "Waiting for connection")
 		assert(#f.moduleLoads == 0 and #f.processes == 0 and f.setupOpens == 0)
-		f.fetchError, f.missingEndpoint = true, true
-		for _ = 1, 10 do f.tick() end
-		assert(#f.processes == 0, "healthy connecting client did not seal automatic recovery")
 	end)
 
 	case("invalid installed configuration never reads or launches resume authorization", function(f)
@@ -799,7 +871,7 @@ function run(entry, loadModule)
 		f.authorizeResume(); f.missingEndpoint = true
 		f.untilState(function() return #f.processes == 1 end)
 		local stale = f.processes[1].callback
-		f.advance(45001)
+		f.advance(f.processes[1].options.timeout_ms + 1)
 		f.untilState(function() return f.status()[1].text == "Bridge start failed" end)
 		f.invoke("setup")
 		f.untilState(function() return #f.processes == 2 end)
@@ -857,7 +929,7 @@ function run(entry, loadModule)
 		f.poll()
 		f.moduleError, f.fakeSetup = true, true
 		f.invoke("setup")
-		f.tick(); f.tick()
+		f.untilState(function() return #f.errors == 1 end)
 		assert(#f.errors == 1 and f.errors[1]:find("reload", 1, true))
 		f.moduleError = false
 		assert(f.completeSetup() == "ready")
@@ -961,7 +1033,6 @@ function run(entry, loadModule)
 		assert(#f.processes == 0 and f.setupOpens == 0 and #f.moduleLoads == 0)
 		assert(#f.errors == 0 and #f.creations == 0)
 		f.noRequest("/v1/panels/open")
-		for _, path in f.reads do assert(path ~= "/isolated/plugin-data/client-resume.json", "healthy client read recovery authorization") end
 	end)
 
 	case("ordinary Bridge relocates its view without moving an in-flight capture", function(f)
@@ -1738,44 +1809,52 @@ function run(entry, loadModule)
 		f.noRequest("/v1/transfers")
 	end)
 
+	local function transferSegment(f)
+		for _, segment in f.status() do
+			if segment.command == "plugin.omp-client-bridge.transfers" then return segment end
+		end
+		return nil
+	end
+
 	case("transfer status weights bytes and does not invent unknown progress", function(f)
 		f.warm()
 		f.setTransfers({
 			{ id = "small", phase = "uploading", bytesSent = 10, totalBytes = 10 },
 			{ id = "large", phase = "uploading", bytesSent = 15, totalBytes = 90 },
 		})
-		local progress = f.status()[2]
+		local progress = assert(transferSegment(f), "active transfer progress is missing")
 		assert(progress.text:find("25%", 1, true), "progress must weight bytes, not average file percentages")
 		assert(progress.command == "plugin.omp-client-bridge.transfers")
 		print("TRANSFER " .. progress.text)
 		f.setTransfers({ { id = "unknown", phase = "uploading", bytesSent = 40, totalBytes = 0 } })
-		assert(not f.status()[2].text:find("%", 1, true), "unknown totals produced a percentage")
+		assert(not assert(transferSegment(f)).text:find("%", 1, true), "unknown totals produced a percentage")
 		f.connected(false)
 		f.poll()
-		assert(f.status()[2].tone == "warn")
-		print("TRANSFER " .. f.status()[2].text)
+		assert(assert(transferSegment(f)).tone == "warn")
+		print("TRANSFER " .. assert(transferSegment(f)).text)
 		f.chromeIsPure()
 	end)
 
 	case("transfer completion is observed once and expires without replaying history", function(f)
 		f.warm()
 		f.setTransfers({ { id = "old", phase = "attached", bytesSent = 10, totalBytes = 10 } })
-		assert(#f.status() == 1, "historical completion was announced as new")
+		assert(transferSegment(f) == nil, "historical completion was announced as new")
 		f.setTransfers({ { id = "live", phase = "captured", bytesSent = 0, totalBytes = 10 } })
-		local preparing = f.status()[2].text
+		local preparing = assert(transferSegment(f)).text
 		print("TRANSFER " .. preparing)
 		f.setTransfers({ { id = "live", phase = "ready", bytesSent = 10, totalBytes = 10 } })
-		assert(f.status()[2].text ~= preparing and f.status()[2].tone ~= "ok")
-		print("TRANSFER " .. f.status()[2].text)
+		local ready = assert(transferSegment(f))
+		assert(ready.text ~= preparing and ready.tone ~= "ok")
+		print("TRANSFER " .. ready.text)
 		f.setTransfers({ { id = "live", phase = "attached", bytesSent = 10, totalBytes = 10 } })
-		assert(f.status()[2].tone == "ok")
-		print("TRANSFER " .. f.status()[2].text)
+		assert(assert(transferSegment(f)).tone == "ok")
+		print("TRANSFER " .. assert(transferSegment(f)).text)
 		f.advance(5001)
 		f.poll()
-		assert(#f.status() == 1, "completion persisted or was refreshed by an unchanged snapshot")
+		assert(transferSegment(f) == nil, "completion persisted or was refreshed by an unchanged snapshot")
 		f.setTransfers({ { id = "failed", phase = "failed", bytesSent = 5, totalBytes = 10 } })
-		assert(f.status()[2].tone == "error")
-		print("TRANSFER " .. f.status()[2].text)
+		assert(assert(transferSegment(f)).tone == "error")
+		print("TRANSFER " .. assert(transferSegment(f)).text)
 	end)
 
 	case("status stays compact and detailed transfers remain in native picker", function(f)

@@ -29,6 +29,7 @@ const UploadProgressSchema = z.object({ bytesSent: z.number().int().nonnegative(
 const UploadFinishSchema = z.object({ files: z.array(ImportedFileSchema).max(256) });
 const OkSchema = z.object({ ok: z.literal(true) });
 const IncomingCallSchema = z.object({ kind: z.literal("request"), id: IdentifierSchema, method: z.string(), body: z.unknown() });
+const ClientShutdownSchema = z.object({ instance: z.string().uuid(), packageDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const REQUEST_TIMEOUT = 15000;
 const CHUNK_BYTES = 256 * 1024;
 const MAX_HTTP_BYTES = 1024 * 1024;
@@ -40,6 +41,8 @@ export interface ClientServiceOptions {
 	cwd?: string;
 	port?: number;
 	connection: ClientConnection;
+	/** Only the owned managed lifecycle may provide authenticated idle shutdown. */
+	lifecycle?: { instance: string; packageDigest: string; onShutdown: () => void };
 	/** Local native boundary; never accepted from HTTP or remote execution parameters. */
 	readClipboardImage?: typeof readImageFromClipboard;
 	readClipboardText?: typeof readTextFromClipboard;
@@ -129,6 +132,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	let brokerGeneration = 0;
 	let resettingContexts: Promise<void> | undefined;
 	let closed = false;
+	let draining = false;
 	let connected = false;
 	let serverName = options.serverName;
 	let lastUiSeen = 0;
@@ -136,6 +140,12 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	let transport: ClientTransport | undefined;
 	let reconnect: NodeJS.Timeout | undefined;
 	let handshake: NodeJS.Timeout | undefined;
+
+	function maintenanceBusy(ownRequests = 0): boolean {
+		return tasks.size > ownRequests || ownedContexts.size > 0 || resettingContexts !== undefined
+			|| source.hasPendingCaptures() || capturesInUse.size > 0 || pendingIntents.size > 0 || interactions.size > 0
+			|| clipboardRequests.size > 0 || filePickerRequests.size > 0;
+	}
 
 	function waitForConnection(signal?: AbortSignal): Promise<void> {
 		if (closed) return Promise.reject(new BridgeError("CLIENT_CLOSED", "The client service is closed"));
@@ -382,6 +392,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 	}
 
 	async function execute(owner: RpcPeer, method: string, body: unknown, context: RpcContext): Promise<unknown> {
+		if (draining) throw new BridgeError("CLIENT_UPDATING", "The client is switching its managed runtime; this operation was not dispatched or replayed");
 		if (method === "context.close") {
 			await resettingContexts;
 			const input = ContextCloseSchema.parse(body);
@@ -430,7 +441,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				const delivery = deliveries.get(frame.id);
 				if (delivery) { deliveries.delete(frame.id); delivery.sent = true; delivery.flush?.(); }
 			}
-		}, (method, body, context) => execute(owner, method, body, context), (name, body) => {
+		}, (method, body, context) => track(execute(owner, method, body, context)), (name, body) => {
 			if (name !== "challenge") { onEvent(owner, name, body); return; }
 			if (authenticating || connected) throw new BridgeError("INVALID_CHALLENGE", "Unexpected repeated registration challenge");
 			authenticating = true;
@@ -509,8 +520,21 @@ export async function startClientService(options: ClientServiceOptions): Promise
 				const snapshot: LocalUiState = { device: identity.device, connected, serverName, views: Object.fromEntries(views), transfers: [...transfers.values()].flatMap(job => job.status ? [job.status] : []), interactions: [...interactions.values()].map(item => item.request), panels: [...panels.values()], outcomes: [...outcomes.values()] };
 				return Response.json(snapshot);
 			}
+			if (request.method === "GET" && route === "/v1/lifecycle" && options.lifecycle) {
+				return Response.json({ schema: 1, kind: "client-lifecycle", pid: process.pid, instance: options.lifecycle.instance, packageDigest: options.lifecycle.packageDigest, deviceId: identity.device.id, busy: maintenanceBusy(), draining });
+			}
 			if (request.method !== "POST") return Response.json({ error: "Unknown local UI endpoint" }, { status: 404 });
 			const body = await jsonBody(request);
+			if (draining) throw new BridgeError("CLIENT_UPDATING", "The client is switching its managed runtime; no new operation was admitted");
+			if (route === "/v1/lifecycle/shutdown" && options.lifecycle) {
+				const expected = ClientShutdownSchema.parse(body);
+				if (expected.instance !== options.lifecycle.instance || expected.packageDigest !== options.lifecycle.packageDigest) return Response.json({ error: "The managed client instance changed", code: "SERVICE_CONFLICT" }, { status: 409 });
+				// This request is tracked too; all other operations and retained contexts must be gone.
+				if (maintenanceBusy(1)) return Response.json({ error: "Client operations or execution contexts still require this runtime", code: "CLIENT_UPDATE_BUSY" }, { status: 409 });
+				draining = true;
+				queueMicrotask(() => options.lifecycle!.onShutdown());
+				return Response.json({ accepted: true, instance: options.lifecycle.instance });
+			}
 			if (route === "/v1/intents") {
 				const input = UiIntentSchema.parse(body);
 				if (input.kind === "attach") throw new BridgeError("TRANSFER_REQUIRED", "Attachment intents are created only after verified human uploads");
@@ -636,7 +660,7 @@ export async function startClientService(options: ClientServiceOptions): Promise
 			for (const waiter of [...connectionWaiters]) waiter.reject(new BridgeError("CLIENT_CLOSED", "The client service closed before a connection became ready"));
 			for (const job of capturesInUse.values()) job.controller.abort(new BridgeError("CLIENT_CLOSED", "The client service closed"));
 			peer?.close();
-			const results = await Promise.allSettled([server.stop(true), transport?.close(), runtime.close(), ...tasks]);
+			const results = await Promise.allSettled([server.stop(!draining), transport?.close(), runtime.close(), ...tasks]);
 			await source.close();
 			// Another service may have replaced this file. Never remove its control metadata.
 			try { if ((await readEndpoint(controlFile)).token === token) await rm(controlFile, { force: true }); } catch (error) { if (!(error instanceof BridgeError && error.code === "BRIDGE_UNAVAILABLE")) throw error; }

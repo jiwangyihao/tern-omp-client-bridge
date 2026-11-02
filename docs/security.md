@@ -42,15 +42,20 @@ and background services. It does not install OMP or Tern themselves, use sudo,
 modify SSH trust, restart active conversations, or change session bindings.
 Registration alone does not bind a session or authorize agent operations.
 
-Consented setup also records a private `client-resume.json` approval for future
-Tern starts to resume the same local client. Recovery checks the existing identity,
-installed configuration, runtime and approved package digest; it does not provision
-a new identity, install remote components, restart conversations or change bindings.
-After observing a healthy local client, that loaded plugin instance does not
-automatically restart it following a later stop. Explicit Start / repair may retry.
-Delete the recovery approval to revoke future automatic starts; this does not stop
-an already running service. Older installations without an approval require one
-explicit setup migration rather than treating historical readiness as consent.
+明确的 Setup 保存私有 `client-resume.json`，授权恢复同一身份、主机及状态目录。
+beta.5 也可迁移有完整安装记录、已校验旧包及有效身份的旧安装；仅在已保存的
+SSH 主机上读取既有插件和 broker 元数据，不重新安装远端或改变 SSH 信任。
+缺失、冲突、损坏或已撤销的授权不会被自动补齐，身份缺失时不生成替代密钥。
+
+自动更新将连接授权与执行包分开：已有授权文件保持不变，新包必须属于本机
+私有安装目录并通过摘要校验。启动器和分离子进程核对同一授权快照，配置或
+授权在准入后改变即拒绝启动。原授权引用的包仍须保留，不能当作无用缓存删除。
+
+窗口运行期间可自动恢复退出的客户端；更新只通过认证且实例匹配的空闲停机
+接口进行，等待执行上下文、调用及快照释放。失败回退不停止其他活进程、不重启
+共享 broker 或 OMP、不改变绑定，也不重放有副作用操作。
+删除 `client-resume.json` 撤销未来自动启动，保留 `client-resume-initialized.json`
+作为已初始化标记，防止旧安装迁移重新创建授权。删除授权不会停止当前服务。
 
 Setup logs and service credentials remain private. Public progress excludes raw
 subprocess output and bearer/private-key material. Services are checked through

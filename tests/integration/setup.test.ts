@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { afterEach, expect, test } from "bun:test";
-import { cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -158,6 +158,22 @@ test("existing real signed client is reused without duplicate registration or ch
 	} finally { api.close(); await client.close(); await broker.close(); }
 }, 60000);
 
+test("client maintenance reuses an authenticated reconnecting client without a duplicate launch", async () => {
+	const root = await fixture();
+	const stateDir = path.join(root, "client");
+	const unavailable = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("not ready", { status: 503 }) });
+	const identity = await loadClientIdentity(stateDir);
+	const before = await readFile(path.join(stateDir, "identity.json"), "utf8");
+	const client = await startClientService({ stateDir, identity, serverName: "fixture-host", connection: { kind: "loopback", endpoint: { url: `http://127.0.0.1:${unavailable.port}`, token: "synthetic-unavailable-broker" } } });
+	try {
+		const maintained = await ensureManagedService({ kind: "client", stateDir, packageRoot, host: "fixture-host", remoteCommand: "must not launch a second client", expectedDeviceId: identity.device.id, clientMaintenance: "update" });
+		expect(maintained).toMatchObject({ pid: process.pid, reused: true, ownership: "existing", connected: false, sessionReady: false, upgradeRequired: true, deviceId: identity.device.id });
+		expect((await readEndpoint(maintained.controlFile)).token).toBe(client.endpoint.token);
+		expect(await readFile(path.join(stateDir, "identity.json"), "utf8")).toBe(before);
+		expect((await serviceHealth("client", stateDir)).connected).toBe(false);
+	} finally { await client.close(); await unavailable.stop(true); }
+}, 15000);
+
 test("manual broker restart replaces only the dead observational record after authenticated reuse", async () => {
 	const root = await fixture();
 	const previous = Bun.spawn([process.execPath, cli, "server", "--state-dir", root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
@@ -264,6 +280,51 @@ exec sh -c "$command"
 	}
 	return { data, remoteRoot, agentDir, ternDir, release, ternExecutable, env, run };
 }
+
+test.skipIf(process.platform === "win32")("failed automatic client update restores the prior package without rewriting approval", async () => {
+	// Detached OS processes perform real SSH/WebSocket registration; a fake clock cannot advance it.
+	const root = await fixture();
+	const f = await localSshFixture(root);
+	const setupRun = await f.run();
+	expect(setupRun.code, setupRun.stderr).toBe(0);
+	const installed = SetupResultSchema.parse(JSON.parse(setupRun.stdout));
+	const approval = await readFile(path.join(f.data, "client-resume.json"), "utf8");
+	const identity = await readFile(path.join(installed.client.stateDir, "identity.json"), "utf8");
+	const broker = await readFile(path.join(f.remoteRoot, "server.managed.json"), "utf8");
+	const stage = path.join(root, "candidate source");
+	for (const entry of await packageFiles(packageRoot)) {
+		const destination = path.join(stage, entry);
+		await mkdir(path.dirname(destination), { recursive: true });
+		await cp(path.join(packageRoot, entry), destination);
+	}
+	const entry = path.join(stage, "src", "client.ts");
+	await writeFile(entry, (await readFile(entry, "utf8")) + '\nif (process.argv[2] === "managed-service") throw new Error("Synthetic candidate refuses detached startup");\n');
+	const snapshot = await inspectSetupPackage(stage);
+	const candidate = path.join(f.data, "installation", "packages", snapshot.digest);
+	await mkdir(path.dirname(candidate), { recursive: true });
+	await rename(stage, candidate);
+	await symlink(path.join(packageRoot, "node_modules"), path.join(candidate, "node_modules"), "dir");
+	await writePrivateJson(path.join(candidate, ".bridge-installation.json"), { schema: 1, source: snapshot.digest, runtime: `${process.platform}-${process.arch}` });
+	async function maintain() {
+		const child = Bun.spawn([process.execPath, path.join(candidate, "src", "cli.ts"), "resume-client", "--plugin-data", f.data], { env: f.env, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 60000 });
+		const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+		expect(code, stderr).toBe(0);
+		return z.object({ kind: z.literal("client-resumed"), pid: z.number(), packageRoot: z.string(), upgradeRequired: z.boolean() }).parse(JSON.parse(stdout));
+	}
+	const restored = await maintain();
+	expect(restored.packageRoot).toBe(path.resolve(packageRoot));
+	expect(restored.upgradeRequired).toBe(true);
+	expect(restored.pid).not.toBe(installed.client.pid);
+	const deadline = Date.now() + 10000;
+	while (!(await serviceHealth("client", installed.client.stateDir)).connected && Date.now() < deadline) await Bun.sleep(20);
+	expect((await serviceHealth("client", installed.client.stateDir)).connected).toBe(true);
+	const retained = await maintain();
+	expect(retained.pid).toBe(restored.pid);
+	expect(retained.upgradeRequired).toBe(true);
+	expect(await readFile(path.join(f.data, "client-resume.json"), "utf8")).toBe(approval);
+	expect(await readFile(path.join(installed.client.stateDir, "identity.json"), "utf8")).toBe(identity);
+	expect(await readFile(path.join(f.remoteRoot, "server.managed.json"), "utf8")).toBe(broker);
+}, 180000);
 
 test.skipIf(process.platform === "win32")("first and repeat plugin setup stage real code, preserve identity/config and await an actual OMP session", async () => {
 	const fixtureState = await localSshFixture(await fixture());
@@ -422,12 +483,16 @@ test.skipIf(process.platform === "win32")("consented recovery after clean client
 		expect(new Set(resumed.map(result => result.pid)).size).toBe(1);
 		expect(resumed.filter(result => !result.reused)).toHaveLength(1);
 		expect(resumed[0]!.pid).not.toBe(ownership.pid);
-		expect(resumed[0]).toMatchObject({ deviceId: installed.client.deviceId, connected: true, sessionReady: false, ownership: "managed" });
+		expect(resumed[0]).toMatchObject({ deviceId: installed.client.deviceId, sessionReady: false, ownership: "managed" });
 		endpoint = await readEndpoint(installed.controlFile);
 		expect(endpoint.token).not.toBeUndefined();
 		const reused = await resume();
 		expect(reused.code, reused.stderr).toBe(0);
 		expect(JSON.parse(reused.stdout)).toMatchObject({ kind: "client-resumed", reused: true, pid: resumed[0]!.pid, deviceId: installed.client.deviceId });
+		// The resumed process registers asynchronously over real IPC, outside this test runner's clock.
+		const registrationDeadline = Date.now() + 10000;
+		while (!(await serviceHealth("client", stateDir)).connected && Date.now() < registrationDeadline) await Bun.sleep(20);
+		expect((await serviceHealth("client", stateDir)).connected).toBe(true);
 		const restored = await api.state(sessionId);
 		expect(restored.serverInstance).toBe(before.serverInstance);
 		expect(restored.binding).toEqual(before.binding);

@@ -31,6 +31,11 @@ export class HumanTransferSource {
 		this.#root = join(options.stateDir, "captures", randomUUID());
 	}
 
+	/** Captured handles remain live until their owned snapshots have been released. */
+	hasPendingCaptures(): boolean {
+		return this.#pending.size > 0 || this.#captures.size > 0;
+	}
+
 	capture(input: { kind: "files"; paths: string[] }, signal?: AbortSignal): Promise<CaptureResult> {
 		if (this.#closed) return Promise.reject(new BridgeError("SOURCE_CLOSED", "Transfer source is closed"));
 		const pending = this.#capture(input, signal);

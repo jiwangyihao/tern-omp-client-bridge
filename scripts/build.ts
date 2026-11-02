@@ -47,14 +47,53 @@ async function atomicJson(file: string, value: unknown): Promise<void> {
 }
 
 async function optionalJson(file: string): Promise<unknown> {
-	try { return JSON.parse(await readFile(file, "utf8")); }
-	catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined; throw error; }
+	try {
+		const info = await lstat(file);
+		if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) throw new Error("Metadata must be a bounded regular file");
+		return JSON.parse(await readFile(file, "utf8"));
+	} catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined; throw error; }
 }
 
 async function fingerprint(directory: string, files: string[]): Promise<string> {
 	const hash = createHash("sha256");
-	for (const file of files) hash.update(file).update("\0").update(await readFile(path.join(directory, file))).update("\0");
+	let size = 0;
+	for (const file of files) {
+		const absolute = path.join(directory, file);
+		const info = await lstat(absolute);
+		if (!info.isFile() || info.isSymbolicLink() || (size += info.size) > 32 * 1024 * 1024) throw new Error("Package payload must be link-free and bounded to 32 MiB");
+		hash.update(file).update("\0").update(await readFile(absolute)).update("\0");
+	}
 	return hash.digest("hex");
+}
+
+function isMetadata(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** No dependency downloads for a fresh installation or a removed recovery approval. */
+async function maintenanceEligibility(data: string): Promise<"eligible" | "setup-required" | "disabled"> {
+	const config = await optionalJson(path.join(data, "config.json"));
+	if (config === undefined) return "setup-required";
+	if (!isMetadata(config) || typeof config.controlFile !== "string" || !path.isAbsolute(config.controlFile) || path.basename(config.controlFile) !== "client.json") throw new Error("Invalid client control metadata");
+	const plan = await optionalJson(path.join(data, "client-resume.json"));
+	if (plan === undefined) {
+		if (await optionalJson(path.join(data, "client-resume-initialized.json")) !== undefined) return "disabled";
+		const progress = await optionalJson(path.join(data, "setup-state.json"));
+		const current = await optionalJson(path.join(data, "installation", "current.json"));
+		if (progress === undefined || current === undefined) return "setup-required";
+		if (!isMetadata(progress) || progress.schema !== 1 || !["ready", "awaiting_session"].includes(String(progress.status)) || progress.controlFile !== config.controlFile || typeof progress.host !== "string" || !progress.host || progress.host.length > 255 || progress.host.startsWith("-") || /[\s\x00-\x1f\x7f]/.test(progress.host)) throw new Error("Incomplete previous setup authorization");
+		if (!isMetadata(current) || current.schema !== 1 || typeof current.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(current.fingerprint) || current.packageRoot !== path.join(data, "installation", "packages", current.fingerprint)) throw new Error("Invalid previous installation package");
+		const packageRoot = String(current.packageRoot);
+		const metadata = await optionalJson(path.join(packageRoot, "package.json"));
+		if (!isMetadata(metadata) || typeof metadata.version !== "string") throw new Error("Invalid previous package metadata");
+		if (Bun.semver.order(metadata.version, "0.5.0-beta.4") >= 0) return "disabled";
+		const marker = await optionalJson(path.join(packageRoot, ".bridge-installation.json"));
+		if (!isMetadata(marker) || marker.schema !== 1 || marker.source !== current.fingerprint || marker.runtime !== `${process.platform}-${process.arch}` || await fingerprint(packageRoot, await packageFiles(packageRoot)) !== current.fingerprint) throw new Error("Previous package integrity check failed");
+	} else if (!isMetadata(plan) || plan.schema !== 1 || plan.kind !== "client-resume" || plan.controlFile !== config.controlFile) throw new Error("Invalid recovery authorization");
+	const identity = await optionalJson(path.join(path.dirname(config.controlFile), "identity.json"));
+	if (!isMetadata(identity) || !isMetadata(identity.device) || typeof identity.device.id !== "string" || !/^client_[a-f0-9]{32}$/.test(identity.device.id)) throw new Error("Existing client identity is required");
+	if (isMetadata(plan) && identity.device.id !== plan.deviceId) throw new Error("Recovery identity does not match its approval");
+	return "eligible";
 }
 
 class BootstrapLockError extends Error {
@@ -100,7 +139,8 @@ export async function acquireBootstrapLock(installation: string, recover: boolea
 	return () => rm(ownerPath, { force: true });
 }
 
-async function bootstrap(source: string, data: string, host: string, recover: boolean): Promise<void> {
+async function bootstrap(source: string, data: string, host: string | undefined, recover: boolean): Promise<void> {
+	const maintenance = host === undefined;
 	let message = "Cannot prepare private package storage. Check plugin data permissions and retry.";
 	let stageName = "package";
 	const installation = path.join(data, "installation");
@@ -108,8 +148,13 @@ async function bootstrap(source: string, data: string, host: string, recover: bo
 	const dependencyStage = path.join(installation, `.dependencies-${crypto.randomUUID()}`);
 	let releaseLock: (() => Promise<void>) | undefined;
 	let backendStarted = false;
-	const progress = (status: "installing" | "failed") => atomicJson(path.join(data, "setup-state.json"), { schema: 1, status, stage: stageName, message, updatedAt: Date.now() });
+	const progress = (status: "installing" | "failed") => atomicJson(path.join(data, maintenance ? "client-maintenance.json" : "setup-state.json"), { schema: 1, status, stage: stageName, message, updatedAt: Date.now() });
 	try {
+		if (maintenance) {
+			const eligibility = await maintenanceEligibility(data);
+			if (eligibility !== "eligible") { console.log(JSON.stringify({ kind: "client-maintenance", status: eligibility })); return; }
+			if (await optionalJson(path.join(source, ".bridge-install-journal.json")) !== undefined) { console.log(JSON.stringify({ kind: "client-maintenance", status: "retry", code: "INSTALL_IN_PROGRESS" })); return; }
+		}
 		await realDirectory(data);
 		await realDirectory(installation);
 		message = "Cannot acquire package setup ownership. Retry setup or confirm native recovery if requested.";
@@ -177,6 +222,30 @@ async function bootstrap(source: string, data: string, host: string, recover: bo
 			await atomicJson(path.join(temporary, ".bridge-installation.json"), marker);
 			await rename(temporary, managed);
 		}
+		if (maintenance) {
+			stageName = "client";
+			message = "Local client maintenance failed. Existing identity and remote services were preserved; inspect the private maintenance log.";
+			await progress("installing");
+			const child = Bun.spawn([process.execPath, path.join(managed, "src", "cli.ts"), "resume-client", "--plugin-data", data], { cwd: managed, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 120000 });
+			const [code, output, diagnostics] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+			if (output.length > 65536 || diagnostics.length > 65536) throw new Error("Oversized maintenance receipt");
+			if (code !== 0) {
+				const log = path.join(data, "client-maintenance.log");
+				const info = await lstat(log).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return undefined; });
+				if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error("Unsafe maintenance diagnostics path");
+				await writeFile(log, diagnostics, { mode: 0o600 });
+				await progress("failed");
+				const failure = diagnostics.match(/^([A-Z_]+):/)?.[1] ?? "CLIENT_MAINTENANCE_FAILED";
+				const retry = ["SETUP_BUSY", "SETUP_COMMAND_FAILED", "SERVICE_NOT_READY", "SERVICE_START_FAILED", "CLIENT_UPDATE_PENDING", "CLIENT_MAINTENANCE_FAILED"].includes(failure);
+				console.log(JSON.stringify({ kind: "client-maintenance", status: failure === "CLIENT_RESUME_SETUP_REQUIRED" ? "disabled" : retry ? "retry" : "blocked", code: failure }));
+				return;
+			}
+			const receipt: unknown = JSON.parse(output);
+			if (!isMetadata(receipt) || receipt.kind !== "client-resumed" || typeof receipt.connected !== "boolean" || typeof receipt.upgradeRequired !== "boolean") throw new Error("Invalid client maintenance receipt");
+			await atomicJson(path.join(installation, "current.json"), { schema: 1, packageRoot: managed, fingerprint: sourceHash });
+			console.log(output.trim());
+			return;
+		}
 		// Never overwrite or delete old releases: live clients can still lazily import from them.
 		await atomicJson(path.join(installation, "current.json"), { schema: 1, packageRoot: managed, fingerprint: sourceHash });
 		stageName = "setup";
@@ -187,6 +256,12 @@ async function bootstrap(source: string, data: string, host: string, recover: bo
 		if (await child.exited !== 0) throw new Error("Backend setup failed");
 	} catch (error) {
 		if (error instanceof BootstrapLockError) { message = error.message; stageName = error.recoveryRequired ? "lock_recovery_required" : "lock_busy"; }
+		if (maintenance) {
+			await progress("failed").catch(() => undefined);
+			const retry = error instanceof BootstrapLockError ? !error.recoveryRequired : stageName === "dependencies";
+			console.log(JSON.stringify({ kind: "client-maintenance", status: retry ? "retry" : "blocked", code: error instanceof BootstrapLockError ? "SETUP_BUSY" : "CLIENT_PACKAGE_PREPARATION_FAILED" }));
+			return;
+		}
 		let reported = false;
 		if (backendStarted) {
 			const state = await optionalJson(path.join(data, "setup-state.json")).catch(() => undefined);
@@ -221,6 +296,7 @@ async function build(): Promise<void> {
 
 if (import.meta.main) {
 	if (process.argv[2] === "bootstrap" && (process.argv.length === 6 || (process.argv.length === 7 && process.argv[6] === "--recover-lock"))) await bootstrap(path.resolve(process.argv[3]!), path.resolve(process.argv[4]!), process.argv[5]!, process.argv[6] === "--recover-lock");
+	else if (process.argv[2] === "maintain-client" && process.argv.length === 5) await bootstrap(path.resolve(process.argv[3]!), path.resolve(process.argv[4]!), undefined, false);
 	else if (process.argv.length === 2) await build();
 	else { console.error("Invalid package preparation arguments"); process.exitCode = 1; }
 }
