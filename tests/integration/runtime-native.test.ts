@@ -3,6 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { inspectRuntimeEnvironment, OmpRuntime, type OmpRuntimeOptions } from "../../src/runtime/index.ts";
 import { BridgeError, type DeviceDescriptor, type ExecuteRequest, type ToolName, type ToolParameters, type ToolResult } from "../../src/protocol.ts";
 import type { InteractionDecision } from "../../src/api.ts";
@@ -64,6 +65,84 @@ test("real JS kernels survive context switching, isolate owners, and reset only 
 	await runtime.disposeContext("b");
 	expect(await cell(runtime, "display(next())", "a")).toContain("43");
 }, 90_000);
+
+test("dead native contexts reject undispatched mutations until explicitly disposed", async () => {
+	const { runtime, cwd } = await fixture();
+	await cell(runtime, "globalThis.retainedCounter = 40", "lost");
+	await cell(runtime, "globalThis.retainedCounter = 900", "survivor");
+	// Discover only this fixture's Eval process ancestry, never enumerate workers
+	// by name. The SDK normally uses a child process; its thread fallback reports
+	// the native worker itself. Validate the candidate's parent and entry point
+	// before allowing any signal, so a changed SDK topology fails closed.
+	const identity = await cell(runtime, 'import fixtureProcess from "node:process"; console.log("fixture-identity:" + fixtureProcess.pid + ":" + fixtureProcess.ppid)', "lost");
+	const match = identity.match(/fixture-identity:(\d+):(\d+)/);
+	if (!match) throw new Error("Fixture Eval did not report its process ancestry");
+	const evalPid = Number(match[1]);
+	const evalParentPid = Number(match[2]);
+	const workerPid = evalParentPid === process.pid ? evalPid : evalParentPid;
+	expect(Number.isSafeInteger(workerPid)).toBe(true);
+	expect(workerPid).toBeGreaterThan(1);
+	expect(workerPid).not.toBe(process.pid);
+	const query = platform === "win32"
+		? ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${workerPid}'; if ($null -eq $p) { exit 1 }; Write-Output $p.ParentProcessId; Write-Output $p.CommandLine`]
+		: ["ps", "-p", String(workerPid), "-o", "ppid=", "-o", "command="];
+	const processInfo = Bun.spawn(query, { stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true });
+	const [description, diagnostic, exitCode] = await Promise.all([
+		new Response(processInfo.stdout).text(), new Response(processInfo.stderr).text(), processInfo.exited,
+	]);
+	if (exitCode !== 0) throw new Error(`Cannot validate fixture worker ancestry: ${diagnostic}`);
+	const ownedProcess = description.trim().match(/^(\d+)\s+([\s\S]+)$/);
+	if (!ownedProcess) throw new Error("Fixture worker process metadata is missing");
+	expect(Number(ownedProcess[1])).toBe(process.pid);
+	const workerEntry = fileURLToPath(new URL("../../src/runtime/worker.ts", import.meta.url));
+	expect(ownedProcess[2]!.replaceAll("\\", "/")).toContain(workerEntry.replaceAll("\\", "/"));
+
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<Response>();
+	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+		entered.resolve();
+		return release.promise;
+	} });
+	try {
+		// The HTTP request is an observable dispatch handshake. Keep its response
+		// gated so worker death, not a timing guess, settles the in-flight call.
+		const pending = runtime.execute(request("read", { path: server.url.toString() }, "lost")).then(
+			result => ({ result }),
+			(error: unknown) => ({ error }),
+		);
+		await Promise.race([entered.promise, pending.then(outcome => {
+			throw new Error(`Native read settled before reaching its fixture gate: ${"error" in outcome ? String(outcome.error) : text(outcome.result)}`);
+		})]);
+		process.kill(workerPid, "SIGKILL");
+		const outcome = await pending;
+		if (!("error" in outcome)) throw new Error("In-flight read unexpectedly completed after worker loss");
+		expect(outcome.error).toBeInstanceOf(BridgeError);
+		if (!(outcome.error instanceof BridgeError)) throw outcome.error;
+		// Dispatched work keeps its original outcome-unknown error, rather than
+		// being mislabeled as a request that was never dispatched.
+		expect(outcome.error.code).toBe("runtime_exited");
+
+		const target = join(cwd, "undispatched-mutation.txt");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await expect(runtime.execute(request("write", { path: target, content: "must not execute" }, "lost"))).rejects.toMatchObject({ code: "runtime_context_lost" });
+			expect(await Bun.file(target).exists()).toBe(false);
+		}
+		await expect(runtime.execute(request("eval", { language: "js", code: 'console.log("must not reset")', reset: true }, "lost"))).rejects.toMatchObject({ code: "runtime_context_lost" });
+		expect(await cell(runtime, 'console.log("survivor:" + ++retainedCounter)', "survivor")).toContain("survivor:901");
+
+		await runtime.disposeContext("lost");
+		expect(await cell(runtime, 'console.log("fresh:" + typeof retainedCounter)', "lost")).toContain("fresh:undefined");
+		// Recovery does not replay any previously rejected mutation.
+		expect(await Bun.file(target).exists()).toBe(false);
+		const written = await runtime.execute(request("write", { path: target, content: "explicit fresh invocation" }, "lost"));
+		expect(written.isError).not.toBe(true);
+		expect(await readFile(target, "utf8")).toBe("explicit fresh invocation");
+		expect(await cell(runtime, 'console.log("survivor:" + ++retainedCounter)', "survivor")).toContain("survivor:902");
+	} finally {
+		release.resolve(new Response("fixture cleanup"));
+		await server.stop(true);
+	}
+}, 120_000);
 
 test("real Python kernels retain variables and functions independently of JS and reset", async () => {
 	const { runtime } = await fixture();

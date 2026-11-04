@@ -761,6 +761,17 @@ Panel publication and chrome refresh recover their expired ownership without
 replaying clipboard, file, paste, binding, or other user operations. Verified
 transfer failures remain visible; recovered connectivity does not erase them.
 
+Beta.10 hides native worker consoles on Windows so closing an incidental terminal
+window cannot terminate the worker. A failed worker is not silently replaced:
+subsequent calls fail with `runtime_context_lost` before dispatch, while the
+original interrupted calls retain their original failure and uncertain outcome.
+Client `online` and maintenance `ready` do not prove that every execution context
+is healthy. Recover through the owning session's context lifecycle after checking
+earlier operations and background work; a replacement context has no retained
+kernels or handles from the failed worker. Do not restart a shared client merely
+to repair one context. Normal session shutdown closes all contexts owned by that
+session, not only its main context; account for its subagents before exiting.
+
 For a legacy managed client, run the installed private package's CLI with its
 approved Bun runtime: `migrate-legacy-client --plugin-data PATH`. This is a read-only
 preview of the exact process and candidate package. Only after reviewing its warning,

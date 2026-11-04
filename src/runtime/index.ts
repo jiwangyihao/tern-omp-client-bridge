@@ -57,7 +57,7 @@ class RuntimeProcess {
 		env.XDG_DATA_HOME = join(dir, "xdg-data");
 		env.XDG_CACHE_HOME = join(dir, "xdg-cache");
 		const subprocess = Bun.spawn([process.execPath, fileURLToPath(new URL("./worker.ts", import.meta.url))], {
-			cwd: options.cwd ?? homedir(), env, stdin: "ignore", stdout: "ignore", stderr: "pipe",
+			cwd: options.cwd ?? homedir(), env, stdin: "ignore", stdout: "ignore", stderr: "pipe", windowsHide: true,
 			ipc: (message, child) => {
 				const parsed = WorkerOutputSchema.safeParse(message);
 				if (parsed.success) this.#receive(parsed.data);
@@ -191,15 +191,21 @@ class RuntimeProcess {
 		}
 	}
 
+	#assertContextAvailable(): void {
+		if (this.#failure) throw new BridgeError("runtime_context_lost", `This invocation was not dispatched or replayed: the native execution context is unavailable. Recover through the owning session's context lifecycle; retained kernels and handles cannot be assumed valid. Earlier in-flight or background operations may still have unknown outcomes. Previous failure: ${this.#failure.message}`);
+	}
+
 	async execute(request: ExecuteRequest, options: ExecutionOptions = {}): Promise<ToolResult> {
 		options.signal?.throwIfAborted();
+		this.#assertContextAvailable();
 		const cancelledBeforeStart = Promise.withResolvers<never>();
 		const abortBeforeStart = () => cancelledBeforeStart.reject(options.signal?.reason ?? new Error("Native request cancelled before dispatch"));
 		options.signal?.addEventListener("abort", abortBeforeStart, { once: true });
 		try { await Promise.race([this.#ready.promise, cancelledBeforeStart.promise]); }
+		catch (error) { this.#assertContextAvailable(); throw error; }
 		finally { options.signal?.removeEventListener("abort", abortBeforeStart); }
 		options.signal?.throwIfAborted();
-		if (this.#failure) throw this.#failure;
+		this.#assertContextAvailable();
 		if (this.#closing) throw new BridgeError("context_closed", "Native context is closing");
 		const id = request.target.requestId;
 		if (this.#pending.has(id) || this.#updates.has(id) || this.#backgroundResults.has(id)) throw new BridgeError("duplicate_request", "Request already dispatched to native context");

@@ -20,6 +20,13 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0-beta.10：Windows worker 控制台与失败上下文
+
+- rina 的隔离取证复现了可见 worker 控制台关闭后产生退出码 129、空 stderr，以及后续调用重复返回缓存错误的链路；生产关闭动作的操作者与精确时间未被直接观测。
+- worker 启动使用 windowsHide，避免 Windows 分离客户端为工具执行暴露可关闭的控制台。Windows 原生回归通过分离父进程、可见正对照和 Win32 控制台可见性检查验证行为，不以源码字符串或 spawn 参数断言替代。
+- 已失败上下文的新调用在派发前返回 runtime_context_lost；已经派发的调用保留原始失败，不自动重建、重放或静默丢失持久状态。恢复使用所有者生命周期，不能用客户端 online 或维护 ready 推断 worker 健康。
+- 本机定向回归已观察到修改前失败、修改后通过（24 次断言），覆盖在途退出、后续写入未派发、Eval reset 不越过失败边界、其他上下文保留状态与显式释放后的全新执行；类型检查通过。平台 CI 与实际安装状态以对应发行记录为准。
+
 ## v0.5.0-beta.9：轮询中断恢复
 
 - 旧版实际 Tern 隔离实例已复现 fetch 回调预算中断：记录 hook 暂停与恢复，但后续状态 GET 未继续。生产现场的客户端仍在线，维护记录为 ready；不能将此故障误判为客户端退出。
