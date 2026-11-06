@@ -772,6 +772,23 @@ kernels or handles from the failed worker. Do not restart a shared client merely
 to repair one context. Normal session shutdown closes all contexts owned by that
 session, not only its main context; account for its subagents before exiting.
 
+Binding snapshots are committed by the host at `before_agent_start`, not appended
+to each request's temporary context. Unchanged snapshots retain their historical
+position; genuine changes append a new owned snapshot without rewriting old
+messages. Deduplication consults the selected committed branch and respects reset
+and compaction boundaries. Live broker state still controls tool routing.
+After compaction or a mid-loop binding change, the model snapshot is refreshed
+at the next prepared user turn; immediate restoration in an automatic tool-only
+continuation is not guaranteed by the current public host API. Provider prefix,
+signed-thinking and input-transformation checks remain unchanged.
+
+Window polling owns one cancellable timer and repairs its scheduling on native
+timer budget pause/resume events. Valid endpoint probes are independent of
+optional maintenance authorization; verified health clears stale setup-required
+presentation but never grants startup permission. Native callback delivery is
+still required: a suspended or idle native window may need rendering to resume
+delivery. The plugin does not bypass native budgets or replay user operations.
+
 For a legacy managed client, run the installed private package's CLI with its
 approved Bun runtime: `migrate-legacy-client --plugin-data PATH`. This is a read-only
 preview of the exact process and candidate package. Only after reviewing its warning,

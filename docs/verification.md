@@ -20,6 +20,15 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0-beta.11：稳定绑定历史与窗口轮询恢复
+
+- 现场认证端点 connected=true，而真实 Tern 状态栏显示 Waiting for connection；未先重载生产插件。绑定扩展的逐请求 context 尾注入与持久消息重复存在，已改为宿主 before_agent_start 暂存/提交及当前有效历史去重，不改写旧快照。
+- 用户明确接受 Bridge 范围：压缩或工具循环中的绑定变化在下一次用户回合准备时补齐模型快照；实时工具路由仍使用当前 broker 状态。不保证自动压缩后的工具循环立即补齐，不修改 provider 的续接/签名/输入转换检查。
+- 真实 Tern 0.9.12 隔离窗口复现预约下一轮前的 timer 预算中断。基线暂停恢复后失去驱动；候选使用单一有所有权的可取消 timer 和 budget 事件恢复。另修复可选维护发现阻塞健康端点探测，以及健康回执未清除 absent 状态导致的错误 Setup 展示。
+- 222 项 shipped Luau 边界回归通过；8 项绑定历史/真实 ExtensionRunner 生命周期测试通过，共125次断言。原生隔离窗口在中断后经正常渲染/时间推进、不重载插件，恢复 Connected · No session，GET 持续约500ms一轮。
+- 原生空闲窗口在预算暂停后自主唤醒尚未得到证明；timer、sleep 和单次 chrome refresh 均不能据此宣称无条件恢复。已证明的是宿主恢复回调交付后插件不再永久丢失轮询；不能绕过宿主暂停或伪造连接健康。
+- 真实 AgentSession 离线探针已验证绑定历史、回复重放、最终 wire 前缀及请求配置保持一致；原始续接断言仍被外部 Recode 0.10.12 的 context_changed 拒绝，诊断定位为工具对象内部 runner.settings.valueCache 变化。用户明确要求仅消除本插件造成的阻碍；未修改 provider，也不宣称完整 provider 续接通过。探针保留严格断言与版本/摘要记录，不能将此结果报告为通过。
+
 ## v0.5.0-beta.10：Windows worker 控制台与失败上下文
 
 - rina 的隔离取证复现了可见 worker 控制台关闭后产生退出码 129、空 stderr，以及后续调用重复返回缓存错误的链路；生产关闭动作的操作者与精确时间未被直接观测。

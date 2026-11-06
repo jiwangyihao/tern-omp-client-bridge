@@ -8,6 +8,7 @@ import { AuthStorage, ModelRegistry, SessionManager, Settings, SqliteAuthCredent
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionActions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { convertToLlm, normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { BrokerApi, ServerState } from "../../src/api.ts";
 import { startBroker } from "../../src/broker.ts";
@@ -81,7 +82,25 @@ test("broker restart resets native visible/model binding and retired callbacks c
 				});
 			} finally { if (notify) statusWaiters.delete(notify); }
 		}
-		expect((await runner.emitContext([])).at(-1)).toMatchObject({ role: "custom", content: expected });
+		const before = manager.buildSessionContext().messages;
+		const prepared = await runner.emitBeforeAgentStart("synthetic binding prompt", undefined, []);
+		const retry = await runner.emitBeforeAgentStart("synthetic retry after cancelled preparation", undefined, []);
+		expect(retry).toEqual(prepared);
+		expect(manager.buildSessionContext().messages).toEqual(before);
+		for (const payload of prepared?.messages ?? []) {
+			const message = normalizeCustomMessagePayload(payload);
+			expect(message).toMatchObject({ customType: "client-bridge-binding", content: expected, attribution: "agent" });
+			// The real SessionManager commits this accepted preparation; the earlier
+			// discarded view is deliberately not recorded as successful delivery.
+			manager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details, message.attribution);
+		}
+		const committed = manager.buildSessionContext().messages;
+		expect(committed.at(-1)).toMatchObject({ role: "custom", content: expected });
+		expect((await runner.emitBeforeAgentStart("unchanged synthetic prompt", undefined, []))?.messages ?? []).toEqual([]);
+		const modelView = await runner.emitContext(committed);
+		expect(modelView).toEqual(committed);
+		expect(convertToLlm(modelView).at(-1)?.role).toBe("developer");
+		expect(queued).toEqual([]);
 	}
 	async function startViewer() {
 		client = await startClientService({ stateDir: clientDir, cwd: root, identity, serverName: "Lifecycle fixture", connection: { kind: "loopback", endpoint: server.endpoint } });

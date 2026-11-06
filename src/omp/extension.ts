@@ -11,6 +11,7 @@ import { nativePresentations } from "./native-presentation.ts";
 import { BackgroundDelivery } from "./background.ts";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { NativeAttachmentEditor } from "./native-attachment-editor.ts";
+import { bindingMessage } from "./binding-history.ts";
 
 const TOOL_NAMES: Record<ToolName, true> = { eval: true, bash: true, read: true, write: true, edit: true, grep: true, glob: true };
 
@@ -74,14 +75,11 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 				retiredInstances.add(lastState.serverInstance);
 			}
 		}
-		const oldText = lastState && bindingDescription(lastState);
 		lastState = state;
+		// Watch delivery updates live routing/UI state, not request-local model history.
+		// The next prepared user turn snapshots it through the host's commit boundary.
 		const text = bindingDescription(state);
 		activeContext?.ui.setStatus("client-bridge", text);
-		if (text !== oldText) {
-			// Queue model context only. Never start a turn or replace the native editor.
-			api.sendMessage({ customType: "client-bridge-binding", content: text, display: false }, { deliverAs: "nextTurn", triggerTurn: false });
-		}
 	}
 
 	function registerOverrides(): void {
@@ -190,9 +188,14 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 		if (event.source === "interactive" && ctx.mode === "tui" && ctx.hasUI && ctx.agent.kind === "main"
 			&& ctx.sessionManager.getSessionId() === draft?.identity.sessionId) draft.submitted();
 	});
-	api.on("context", event => {
-		if (!lastState) return;
-		return { messages: [...event.messages, { role: "custom", customType: "client-bridge-binding", content: bindingDescription(lastState), display: false, timestamp: Date.now() }] };
+	api.on("before_agent_start", (_event, ctx) => {
+		if (!lastState || closed || ctx.sessionManager.getSessionId() !== activeContext?.sessionManager.getSessionId()) return;
+		if (executionIdentity(ctx).sessionId !== lastState.binding.sessionId) return;
+		// This hook returns a staged custom message. The host persists it with the
+		// accepted prompt; failed/cancelled preparation never advances our dedup state.
+		// Do not inject into `context`: it is a per-request copy, not durable history.
+		const message = bindingMessage(ctx.sessionManager, lastState, bindingDescription(lastState));
+		return message ? { message } : undefined;
 	});
 	api.on("session_shutdown", async () => {
 		closed = true;

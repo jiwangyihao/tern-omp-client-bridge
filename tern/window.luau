@@ -310,7 +310,10 @@ local function loadConnection()
 	elseif type(value.token) ~= "string" or value.token == "" then
 		connectionStatus, connectionMessage = "error", "Missing local UI token; check this device's Bridge endpoint metadata"
 	else
-		if serviceUnavailable and queueRecovery(installedConfig) then return true end
+		-- Optional maintenance must not gate a verified local endpoint probe.
+		-- Sparse native turns can otherwise restart discovery after every retry
+		-- deadline without ever issuing the GET that establishes current health.
+		if serviceUnavailable then queueRecovery(installedConfig) end
 		connection = { url = value.url:gsub("/$", ""), token = value.token }
 		connectionStatus, connectionMessage = "ready", nil
 		setupRequired = false
@@ -1141,7 +1144,9 @@ local function consumeState(value, err, fresh)
 			state = value
 			serviceUnavailable = false
 			statusError = nil
-			if recovery.phase == "waiting" then recovery.phase, recovery.message = nil, nil end
+			-- A healthy receipt proves Setup is unnecessary even when automatic
+			-- maintenance is unauthorized; it does not grant maintenance authority.
+			if recovery.phase == "waiting" or recovery.phase == "absent" then recovery.phase, recovery.message = nil, nil end
 			setupRequired, endpointMissing = false, false
 			-- Inspect the installed package once, then retry pending updates only at their deadline.
 			queueRecovery(installedConfig)
@@ -1222,10 +1227,12 @@ local function decodeState(response)
 	return value
 end
 
+local pollTimer = nil
+local schedulePoll
 local function poll(cx)
-	-- Arm the sole next turn before any decode, filesystem access, callback or
-	-- native UI work: even an abandoned callback cannot strand this driver.
-	tern.timer(500, poll)
+	-- A one-shot has already been consumed when its callback starts. Pre-arm
+	-- before work, but budget resume must also repair an abort before this call.
+	schedulePoll(500)
 	local now = tern.now()
 	local request = pollRequest
 	if request and request.connection ~= connection then
@@ -1263,6 +1270,34 @@ local function poll(cx)
 	refreshChrome()
 	publishPanel(cx)
 end
+
+schedulePoll = function(ms)
+	local previous = pollTimer
+	local scheduled = {}
+	-- Invalidate first: a cancelled callback already selected for native
+	-- delivery must not create a second driver or touch the request lease.
+	pollTimer = scheduled
+	if previous and previous.handle then previous.handle:cancel() end
+	scheduled.handle = tern.timer(ms, function(cx)
+		if pollTimer ~= scheduled then return end
+		pollTimer = nil
+		poll(cx)
+	end)
+end
+
+tern.on("budget", function(ev)
+	-- Tern retains pending callbacks during a pause, not the aborted call.
+	-- Leave a wake at pause expiry even if the interrupted call never pre-armed:
+	-- an idle native owner may not notice resumption until something wakes it.
+	-- This only schedules the timer; the native pause still gates its execution.
+	-- Replacement also rejects a retained/late timer without clearing requests,
+	-- errors, or replaying user operations under another hook.
+	if ev.hook ~= "timer" then return end
+	if ev.state == "paused" then
+		local delay = ev.paused_ms
+		if type(delay) == "number" and delay > 0 and delay < math.huge then schedulePoll(delay) end
+	elseif ev.state == "resumed" then schedulePoll(0) end
+end)
 
 tern.command({ id = "setup", title = "Start / repair Bridge", icon = "plug", group = "OMP", run = setupBridge })
 tern.command({ id = "toggle-bridge", title = "Toggle Bridge", icon = "panel-right", group = "OMP", run = function(cx)
@@ -1471,4 +1506,4 @@ tern.on("pane_closed", function(ev, cx)
 	if panel then publishPanel(cx) end
 end)
 diagnostic("loaded")
-tern.timer(0, poll)
+schedulePoll(0)

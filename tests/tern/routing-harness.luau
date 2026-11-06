@@ -331,9 +331,23 @@ function run(entry, loadModule)
 			timer = function(ms, callback)
 				nativeWork()
 				assert(not inProcessReceipt, "process callback scheduled native work")
+				if f.interruptTimer then
+					f.interruptTimer = false
+					coroutine.yield("fixture callback interrupted before timer registration")
+				end
 				deferredDelays[callback] = ms
 				timerDue[callback] = clock + ms
 				table.insert(ms > 0 and ms <= 16 and deferred or timers, callback)
+				return { cancel = function()
+					-- Cancellation may race native delivery; tests can explicitly deliver
+					-- a captured cancelled callback to exercise owner rejection too.
+					for _, queue in { timers, deferred } do
+						for index, pending in queue do
+							if pending == callback then table.remove(queue, index); break end
+						end
+					end
+					timerDue[callback], deferredDelays[callback] = nil, nil
+				end }
 			end,
 			sleep = function(ms)
 				nativeWork()
@@ -466,6 +480,24 @@ function run(entry, loadModule)
 			assert(ok and signal == "fixture callback interrupted at sleep", "receipt never reached interruptible processing: " .. tostring(signal))
 			assert(coroutine.status(thread) == "suspended")
 			coroutine.close(thread)
+		end
+		function f.interruptBeforeTimer()
+			f.interruptTimer = true
+			local thread = coroutine.create(function() f.tick() end)
+			local ok, signal = coroutine.resume(thread)
+			assert(ok and signal == "fixture callback interrupted before timer registration", "timer registration was not interrupted: " .. tostring(signal))
+			assert(coroutine.status(thread) == "suspended")
+			coroutine.close(thread)
+		end
+		function f.losePollTimer()
+			return nextCallback(timers, "poll timer missing before native delivery")
+		end
+		function f.currentPollTimer() return assert(timers[1], "poll timer missing") end
+		function f.deliverTimer(callback) invoke(callback); f.flush() end
+		function f.timerCount() return #timers end
+		function f.budget(state, hook)
+			-- An SDK event, not a synthetic promise that native pause delivery works.
+			if handlers.budget then invoke(handlers.budget, { hook = hook or "timer", state = state, ms = state == "paused" and 50 or nil, paused_ms = state == "paused" and 5000 or nil }) end
 		end
 		function f.requestCount(path, kind)
 			local count = 0
@@ -791,6 +823,87 @@ function run(entry, loadModule)
 		f.chromeIsPure()
 	end)
 
+	case("timer pause arms an idle-owner wake after interruption before the prearm call", function(f)
+		local request = f.startPoll()
+		local disconnected = f.stateBody(); disconnected.connected = false
+		f.respond(request, disconnected)
+		assert(f.status()[1].text == "Waiting for connection")
+		local nextRequest = f.startPoll()
+		f.respond(nextRequest, f.stateBody(), 200, true)
+		f.interruptBeforeTimer()
+		assert(f.timerCount() == 0, "fixture did not remove the consumed one-shot driver")
+		local before = f.ioCount()
+		f.budget("paused")
+		assert(f.timerCount() == 1, "pause left no native timer to wake the idle window owner")
+		f.runFor(4999)
+		assert(f.ioCount() == before and f.status()[1].text == "Waiting for connection", "pause recovery ran polling before the native pause expired")
+		-- No unsolicited resume event: the native owner needs a due timer before
+		-- it can notice the pause's end. This seam establishes the wake, not native delivery.
+		f.runFor(1)
+		assert(f.timerCount() == 1, "wake did not preserve the single polling driver")
+		assert(f.status()[1].text:find("Connected", 1, true), "resumed driver never replaced Waiting for connection")
+		f.chromeIsPure()
+	end)
+
+	case("timer budget resume replaces a retained successor without multiplying polling", function(f)
+		f.warm()
+		local request = f.startPoll()
+		local count = f.requestCount("/v1/state")
+		local stale = f.currentPollTimer()
+		for _ = 1, 50 do f.budget("paused") end
+		assert(f.timerCount() == 1, "repeated pause events accumulated wake timers")
+		f.advance(5000)
+		for _ = 1, 50 do f.budget("resumed") end
+		assert(f.timerCount() == 1, "repeated resume events accumulated driver timers")
+		local before = f.ioCount()
+		f.deliverTimer(stale)
+		assert(f.timerCount() == 1 and f.ioCount() == before, "superseded native timer executed polling work")
+		f.tick()
+		assert(f.requestCount("/v1/state") == count, "resume duplicated the still-live GET")
+		f.respond(request, f.stateBody())
+		assert(f.status()[1].text:find("Connected", 1, true))
+		assert(f.timerCount() == 1, "healthy driver did not remain single-owned")
+	end)
+
+	case("timer resume rejects receipts that expired during native pause", function(f)
+		f.warm(); f.poll() -- Finish optional recovery discovery while still online.
+		local expired = f.startPoll()
+		f.respond(expired, f.stateBody(), 200, true)
+		f.losePollTimer()
+		f.budget("paused")
+		f.advance(10000)
+		f.budget("resumed"); f.tick()
+		assert(f.status()[1].text == "Start / repair Bridge", "resume adopted an expired health receipt")
+		local replacement = f.startPoll()
+		assert(replacement.at >= expired.at + 13000, "resume bypassed state failure backoff")
+		f.respond(replacement, f.stateBody())
+		local stale = f.stateBody(); stale.connected = false
+		f.respond(expired, stale, 200, true)
+		f.tick()
+		assert(f.status()[1].text:find("Connected", 1, true), "late pre-pause receipt poisoned recovered state")
+	end)
+
+	case("unrelated hook resume does not replace the polling timer or erase faults", function(f)
+		f.warm(); f.poll() -- Finish optional recovery discovery before the real fault.
+		local request = f.startPoll()
+		f.respond(request, { error = "real endpoint failure" }, 503)
+		local before = f.ioCount()
+		for _, hook in { "fetch", "process", "await", "status", "focus" } do f.budget("resumed", hook) end
+		assert(f.timerCount() == 1 and f.ioCount() == before)
+		assert(f.status()[1].text == "Start / repair Bridge", "hook resume invented a healthy connection")
+	end)
+
+	case("invalid native pause durations cannot replace the owned timer with a guessed delay", function(f)
+		f.warm()
+		local timer, before = f.currentPollTimer(), f.ioCount()
+		for _, duration in { 0, -1, math.huge, -math.huge, 0 / 0, "5000", false } do
+			f.dispatch("budget", { hook = "timer", state = "paused", paused_ms = duration })
+			assert(f.currentPollTimer() == timer and f.timerCount() == 1, "invalid pause duration replaced the driver")
+		end
+		f.dispatch("budget", { hook = "timer", state = "paused" })
+		assert(f.currentPollTimer() == timer and f.timerCount() == 1 and f.ioCount() == before, "missing pause duration invented a wake or executed polling")
+	end)
+
 	case("missing state response stays single flight until its ten second deadline", function(f)
 		f.warm()
 		local missing = f.startPoll()
@@ -806,6 +919,26 @@ function run(entry, loadModule)
 		assert(replacement ~= missing and replacement.at >= missing.at + 13000)
 		f.respond(replacement, f.stateBody())
 		assert(f.status()[1].text ~= "Start / repair Bridge", "current healthy state did not clear the verified transport fault")
+	end)
+
+	case("sparse native turns cannot starve healthy endpoint probes behind unauthorized recovery", function(f)
+		f.warm(); f.poll()
+		local expired = f.startPoll()
+		f.advance(31000); f.tick()
+		assert(f.status()[1].text == "Start / repair Bridge", "expired state was not rejected")
+		-- Each native turn arrives after the recovery retry window. Discovery
+		-- must not keep restarting instead of probing the still-valid endpoint.
+		for _ = 1, 12 do
+			if f.hasRequest("/v1/state") then break end
+			f.advance(31000); f.tick()
+		end
+		assert(f.hasRequest("/v1/state"), "optional recovery discovery starved the authenticated state GET")
+		local current = f.take("/v1/state")
+		assert(current ~= expired and current.method == "GET")
+		f.respond(current, f.stateBody())
+		assert(f.status()[1].text:find("Connected", 1, true), "fresh health could not recover after sparse native turns")
+		assert(#f.processes == 0 and f.setupOpens == 0 and #f.sent == 0, "health probing manufactured maintenance authorization")
+		f.chromeIsPure()
 	end)
 
 	case("receipt deposited before expiry is rejected if consumption misses its deadline", function(f)
@@ -927,9 +1060,12 @@ function run(entry, loadModule)
 			assert(count == 1, "gesture did not issue exactly one original operation")
 			local missing = f.startPoll()
 			f.runFor(missing.at + 10000 - tern.now())
+			-- Repairing native timer ownership must not repeat any pending gesture.
+			f.budget("paused"); f.budget("resumed")
 			f.poll(); f.poll(); f.flushPanels()
 			assert(f.requestCount(path, kind) == count, "poll recovery replayed an unanswered POST")
 			f.respond(original, { error = "operation result unknown; inspect original draft" }, 503)
+			f.budget("paused"); f.budget("resumed")
 			f.poll(); f.flushPanels()
 			assert(f.requestCount(path, kind) == count, "operation failure replayed a POST")
 			assert(#f.native == 0 and #f.sent == 0, "recovery fell back to native paste or pane input")
@@ -1004,6 +1140,18 @@ function run(entry, loadModule)
 		f.invoke("setup")
 		f.untilState(function() return f.setupOpens == 1 end)
 		assert(#f.processes == 0)
+	end)
+
+	case("a verified returning endpoint clears absent recovery without authorizing maintenance", function(f)
+		f.missingEndpoint = true
+		f.untilState(function() return f.status()[1].text == "Set up Bridge" end)
+		f.missingEndpoint = false
+		local request = f.startPoll()
+		assert(not f.status()[1].text:find("Connected", 1, true), "endpoint metadata fabricated healthy state")
+		f.respond(request, f.stateBody())
+		assert(f.status()[1].text:find("Connected", 1, true), "absent recovery authorization hid verified endpoint health")
+		assert(#f.processes == 0 and f.setupOpens == 0 and #f.sent == 0, "returning endpoint implicitly authorized maintenance")
+		f.chromeIsPure()
 	end)
 
 	case("explicit repair discovers newly installed recovery authorization", function(f)
