@@ -336,7 +336,8 @@ try {
 	await runner.emit({ type: "session_start" });
 	assert(watchers.has(manager.getSessionId()), "Shipped Bridge did not activate its watch");
 	await session.sendCustomMessage({ customType: "client-bridge-binding", content: bindingDescription(stateFor(manager.getSessionId())), display: false }, { triggerTurn: false });
-	const legacyPrefix = structuredClone(manager.getBranch());
+	// Compare durable JSON fields, not host-only symbol bookkeeping added later.
+	const legacyPrefix = manager.getBranch().map(entry => JSON.stringify(entry));
 
 	session.agent.streamFn = (_model, context) => {
 		streamDispatches++;
@@ -454,7 +455,7 @@ try {
 	await prompt("Synthetic user turn \uE001; use the offline fixture twice.", 3, "create");
 	assert.equal(executedTools, 2);
 	assert.equal(ownedBindings().length, 1);
-	assert.deepEqual(manager.getBranch().slice(0, legacyPrefix.length), legacyPrefix, "Legacy snapshot was rewritten");
+	assert.deepEqual(manager.getBranch().slice(0, legacyPrefix.length).map(entry => JSON.stringify(entry)), legacyPrefix, "Legacy snapshot was rewritten");
 	if (!values.diagnostic) assert.deepEqual(captures.slice(0, 3).map(item => item.decision), ["create", "continue", "continue"]);
 	else {
 		assert.equal(captures[0]!.decision, "create");
@@ -531,14 +532,14 @@ try {
 		devices: [{ id: "synthetic-device", name: "Synthetic device", platform: "linux", arch: "synthetic", online: true }] };
 	states.set(manager.getSessionId(), changed);
 	watchers.get(manager.getSessionId())!(changed);
-	const beforeChanged = structuredClone(manager.getBranch());
+	const beforeChanged = manager.getBranch().map(entry => JSON.stringify(entry));
 	assert.equal(ownedBindings().length, 1, "Watch delivery must not append model history");
 	preparation = "throw";
 	await prompt("Synthetic next prepared user turn after a genuine binding change and a contained handler error", 1, "create");
 	preparation = "accept";
 	assert.equal(containedHandlerErrors, 2);
 	assert.equal(ownedBindings().length, 2);
-	assert.deepEqual(manager.getBranch().slice(0, beforeChanged.length), beforeChanged);
+	assert.deepEqual(manager.getBranch().slice(0, beforeChanged.length).map(entry => JSON.stringify(entry)), beforeChanged);
 	cases.push({ name: "real-binding-change-appends-and-rebuilds", decision: "create" });
 	cases.push({ name: "contained-handler-error-does-not-rollback-accepted-host-history",
 		detail: "The actual host dispatches and commits the binding once despite a later handler throwing." });
