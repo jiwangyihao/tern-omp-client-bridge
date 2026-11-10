@@ -789,6 +789,17 @@ presentation but never grants startup permission. Native callback delivery is
 still required: a suspended or idle native window may need rendering to resume
 delivery. The plugin does not bypass native budgets or replay user operations.
 
+Beta.12 previews client media from the bytes a read returned. A media-capable
+Tern host opens `media` previews by path on the agent host, where a client file
+is absent or is a different file; for client-owned results the Bridge turns that
+path preview off, and the adapter no longer forwards the device's bare
+`mediaPath`. The preview is the image the model received, which the native read
+may have downscaled, not the original file. Client media for which a read returns
+no image block has no inline media viewer. Agent-host reads keep the native
+viewer. Results persisted by earlier versions render from their stored bytes once
+a session loads the updated extension; the adapter half needs the broker to run
+the new package.
+
 For a legacy managed client, run the installed private package's CLI with its
 approved Bun runtime: `migrate-legacy-client --plugin-data PATH`. This is a read-only
 preview of the exact process and candidate package. Only after reviewing its warning,

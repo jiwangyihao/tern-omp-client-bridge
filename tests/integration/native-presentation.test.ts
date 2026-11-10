@@ -8,6 +8,7 @@ import { wrapRegisteredTool } from "@oh-my-pi/pi-coding-agent/extensibility/exte
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { ToolExecutionComponent, stopSharedSpinnerTicker, type ToolResultFrame } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import { getNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
 import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
@@ -56,6 +57,10 @@ const oldText = "export const value = 1;\n";
 const newText = "export const value = 2;\n";
 const diff = "@@ -1 +1 @@\n-export const value = 1;\n+export const value = 2;";
 const text = (value: string): ToolResultFrame["content"] => [{ type: "text", text: value }];
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const imageRead = (details: Record<string, unknown>): ToolResultFrame => ({
+	content: [...text("Read image file [image/png]"), { type: "image", data: png, mimeType: "image/png" }], details,
+});
 const editResult: ToolResultFrame = {
 	content: text("Updated fixture.ts"),
 	details: { path: "fixture.ts", diff, firstChangedLine: 1, oldText, newText },
@@ -71,6 +76,7 @@ const scenarios: Scenario[] = [
 	{ name: "Bash cancelled background job", tool: "bash", args: { command: "fixture-command", async: true }, partial: true, cancelled: true, result: { content: text("retained job output"), details: { async: { type: "bash", jobId: "fixture-job", state: "cancelled" } } } },
 	{ name: "Read ranged source", tool: "read", args: { path: "fixture.ts:2-37" }, result: { content: text(lines), details: { kind: "file", resolvedPath: "/fixture/fixture.ts", totalLines: 40, displayContent: { text: lines, startLine: 2 } } } },
 	{ name: "Read historical text without details", tool: "read", args: { path: "fixture.ts" }, result: { content: text("export const value = 2;") } },
+	{ name: "Read agent-host media file", tool: "read", args: { path: "/fixture/shot.png" }, result: imageRead({ mediaPath: "/fixture/shot.png", meta: { source: { type: "path", value: "/fixture/shot.png" } } }) },
 	{ name: "Write source preview", tool: "write", args: { path: "fixture.ts", content: lines }, result: { content: text("Wrote fixture.ts") } },
 	{ name: "Write streaming source", tool: "write", args: { path: "fixture.ts", content: lines } },
 	{ name: "Grep grouped matches", tool: "grep", args: { pattern: "value", path: "src" }, result: { content: text("src/fixture.ts:1:export const value = 2;"), details: { matchCount: 1, fileCount: 1, files: ["src/fixture.ts"], scopePath: "src", cwd: "/fixture", displayContent: "src/fixture.ts\n*1│export const value = 2;" } } },
@@ -272,5 +278,37 @@ describe("registered Bridge Tern presentation and unchanged ANSI", () => {
 			expect(registrations).toEqual([]);
 			expect(hooks).toEqual([]);
 		});
+	}
+});
+
+// A media-capable host opens `media` paths on the agent host. A client file is
+// absent there, or is a different file: only the returned bytes are the preview.
+describe("client-owned media reads preview the returned bytes", () => {
+	const clientPath = "/home/client/shots/setup-005.png";
+	const target = { requestId: "fixture-request", sessionId: "fixture-session", contextId: "fixture-context", bindingRevision: 1, device: { id: "fixture-client", name: "Fixture client", platform: "linux", arch: "x64" } };
+	// The exact shape brokers up to beta.11 returned and sessions persisted: a
+	// client-attributed source beside a bare path only the client can open.
+	const scenario: Scenario = {
+		name: "Read client media file", tool: "read", args: { path: `client://${clientPath}` },
+		result: imageRead({ mediaPath: clientPath, meta: { source: { type: "path", value: `client://${clientPath}` } }, clientBridge: { target } }),
+	};
+	function nodes(root: NativeNode): NativeNode[] {
+		return [root, ...(root.c ?? []).flatMap(child => "k" in child ? nodes(child) : [])];
+	}
+	for (const historical of [false, true]) {
+		for (const toolKind of [true, false]) {
+			test(`${historical ? "historical hydration" : "live result"}, ${toolKind ? "data-first" : "fallback card"}`, async () => {
+				const tool = await registered(scenario);
+				const value = new ToolExecutionComponent("read", structuredClone(scenario.args), { useBuiltInRenderer: false, showImages: true }, tool, ui, "/fixture", "fixture-call");
+				components.push(value);
+				feed(value, scenario, historical);
+				const described = nodes(semantic(value, 100, toolKind));
+				expect(described.filter(node => node.k === "media")).toEqual([]);
+				const images = described.filter(node => node.k === "image");
+				expect(images).toHaveLength(1);
+				const blob = getNativeBlob(String(Reflect.get(images[0]!.p ?? {}, "blob")));
+				expect(Buffer.from(blob?.bytes ?? []).toString("base64")).toBe(png);
+			});
+		}
 	}
 });

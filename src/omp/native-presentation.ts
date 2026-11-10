@@ -34,7 +34,14 @@ export function nativePresentations(api: Pick<ExtensionAPI, "pi">, editMode?: ()
 		// though this bridge does not install the resource-bearing openArgStream.
 		return { ...options, renderContext: { ...options.renderContext, editMode: mode } };
 	}
-
+	// `media` lets a renderer name a file the host opens by path, on the agent
+	// host. Paths of a client-owned result exist only on its device, so only the
+	// returned bytes are a correct preview. Deciding here also repairs results
+	// persisted, or still produced by an older broker, with a bare client path.
+	function resultOptions(name: ToolName, details: unknown, options: RenderResultContextOptions): RenderResultContextOptions {
+		const base = name === "edit" ? editOptions(options) : options;
+		return base.media && typeof details === "object" && details !== null && "clientBridge" in details ? { ...base, media: false } : base;
+	}
 
 	const presentations = {} as Record<ToolName, NativePresentation>;
 	for (const name of TOOL_NAMES) {
@@ -45,9 +52,7 @@ export function nativePresentations(api: Pick<ExtensionAPI, "pi">, editMode?: ()
 			describeCall: name === "edit"
 				? (args, options) => renderer.describeCall!(args, editOptions(options))
 				: renderer.describeCall!.bind(renderer),
-			describeResult: name === "edit"
-				? (result, options, args) => renderer.describeResult!(result, editOptions(options), args)
-				: renderer.describeResult!.bind(renderer),
+			describeResult: (result, options, args) => renderer.describeResult!(result, resultOptions(name, result.details, options), args),
 			mergeCallAndResult: renderer.mergeCallAndResult,
 		};
 	}

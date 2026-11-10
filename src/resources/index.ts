@@ -228,6 +228,10 @@ export class ClientResources {
 			if (record(value.service) && typeof value.service.name === "string") mapped.service = { ...value.service, name: this.#handle(target, `proc://${value.service.name}`, links).slice(7) };
 			if (tool === "read" || tool === "write" || tool === "edit" || tool === "grep" || tool === "glob") {
 				for (const key of ["path", "sourcePath", "move", "cwd", "searchPath", "scopePath"] as const) if (typeof value[key] === "string") mapped[key] = fileUri(value[key]);
+				// mediaPath asks a media-capable host to open this path on its own
+				// filesystem, where a client file is absent or a different file. The
+				// returned bytes are the preview; meta.source keeps the client location.
+				delete mapped.mediaPath;
 				for (const key of ["files", "missingPaths"] as const) if (Array.isArray(value[key])) mapped[key] = value[key].map(item => typeof item === "string" ? fileUri(item) : item);
 				if (Array.isArray(value.fileMatches)) mapped.fileMatches = value.fileMatches.map(item => record(item) && typeof item.path === "string" ? { ...item, path: fileUri(item.path) } : item);
 				if (Array.isArray(value.perFileResults)) mapped.perFileResults = value.perFileResults.map(mapDetails);

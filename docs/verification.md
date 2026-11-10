@@ -20,6 +20,15 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0-beta.12：客户端媒体读取预览
+
+- 现象：`read client:///…/setup-005.png` 在 Tern 中显示 `Not found /home/…/setup-005.png`。适配层把 `meta.source` 转成 `client:///…`，却原样保留设备上的裸 `mediaPath`；支持 `media` 的宿主按该路径在 agent 主机上打开文件，优先于结果中已返回的图片字节。若 agent 主机恰有同名文件，会显示另一份文件。
+- 修复两处：适配层不再转发客户端结果的 `mediaPath`；展示层对带 `clientBridge` 归属的结果关闭按路径的媒体预览，使原生 renderer 使用返回的图片字节。后者也覆盖旧版本已持久化、或仍由旧 broker 产生的结果。agent 主机上的读取保持原生媒体查看器。
+- 回归：修改前 5 项失败（适配层 1 项；真实 ToolExecutionComponent 的实时/历史 × data-first/fallback 4 项），修改后通过；预览节点的 blob 字节与返回图片逐字节一致。279 项相关单元与集成用例 264 通过、15 项平台跳过。真实 native read 经适配层与展示层：返回 1 个图片块，生成 1 个 `image` 节点、0 个 `media` 节点。
+- 实际渲染面：隔离的 Tern 0.9.14 headless 原生渲染器（pi-tui 18.10.4）。同一份带裸路径的客户端结果，原生 hooks 显示 `Not found /home/client/shots/setup-005.png`，修复后的 hooks 显示该 PNG；agent 主机文件仍在带缩放控件的媒体查看器中按路径显示。
+- 实际宿主：wawa-dev 上安装的 OMP 18.18.6 以隔离 rpc 进程加载候选展示模块，未建立会话、未发起模型请求。原生 renderer 对客户端结果给出 `media` 节点及裸路径；候选给出 `image` 节点，blob 标识等于返回字节的 SHA-256；agent 主机结果两者一致。
+- 边界：预览显示的是模型收到的图片，native read 可能已缩放，不是原始文件。未返回图片块的客户端媒体不再有内联媒体查看器，本版未为其提供跨设备传输。未在用户正在运行的会话中验收：已运行的会话在重新加载扩展前仍使用旧展示代码。
+
 ## v0.5.0-beta.11：稳定绑定历史与窗口轮询恢复
 
 - 现场认证端点 connected=true，而真实 Tern 状态栏显示 Waiting for connection；未先重载生产插件。绑定扩展的逐请求 context 尾注入与持久消息重复存在，已改为宿主 before_agent_start 暂存/提交及当前有效历史去重，不改写旧快照。

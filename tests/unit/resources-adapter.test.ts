@@ -121,6 +121,15 @@ test("ordinary read body and native image data are preserved exactly", async () 
 	expect(read.content[0]).toEqual({ type: "text", text: `[/project/a.ts#ABCD]\n${body}` });
 });
 
+test("client media reads keep the returned image and never name a path for the host to open", async () => {
+	const image = { type: "image" as const, data: "AAECA//+", mimeType: "image/png" };
+	const { resources } = fixture([{ content: [{ type: "text", text: "Read image file [image/png]" }, image], details: { mediaPath: "/project/shot.png", meta: { source: { type: "path", value: "/project/shot.png" } } } }]);
+	const result = await resources.execute({ target: target(), tool: "read", params: { path: "client:///project/shot.png" } });
+	expect(result.content[1]).toEqual(image);
+	expect(result.details).toMatchObject({ meta: { source: { type: "path", value: "client:///project/shot.png" } } });
+	expect(result.details).not.toHaveProperty("mediaPath");
+});
+
 test("nested grep headers resolve against target cwd, not agent cwd, without rewriting match text", async () => {
 	const { resources, calls } = fixture([{ content: [{ type: "text", text: '# src/\n## a.ts#ABCD\n*1:artifact://1\n## nested/\n### a.ts#ABCD\n 2:client:///literal' }], details: { cwd: "C:\\项目", searchPath: "C:\\项目\\src", files: ["src/a.ts", "src/nested/a.ts"] } }, { content: [{ type: "text", text: "edited" }] }]);
 	const result = await resources.execute({ target: target("windows", "win32"), tool: "grep", params: { path: "client:///C:/项目/src", pattern: "literal" } });
