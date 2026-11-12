@@ -26,6 +26,8 @@ function run(entry, loadModule)
 		f.writes = {}
 		f.logs = {}
 		f.requestHistory = {}
+		-- Existing cases exercise the opt-in floating panel; widget cases clear it.
+		f.legacyPanel, f.widgets, f.sheets = true, {}, {}
 		local function nativeWork()
 			if inStateReceipt then receiptWork += 1 end
 		end
@@ -229,6 +231,10 @@ function run(entry, loadModule)
 					live()
 					return { next = function(_, callback) table.insert(f.prompts, { options = options, callback = callback }) end }
 				end,
+				settings = { get = function(_, key)
+					live(); assert(key == "widgets", "unexpected preference read")
+					return copy(f.widgetBar)
+				end },
 			}
 			return cx, function() alive = false end
 		end
@@ -266,14 +272,25 @@ function run(entry, loadModule)
 				end
 				return value
 			end, null = null },
+			-- The panel preference is local UI configuration, not Bridge work: it is
+			-- kept out of ioCount, which guards Bridge HTTP, process and file IO.
 			kv = { get = function(key)
 				nativeWork()
+				if key == "legacy-panel" then
+					if f.legacyReadError then error("private storage failure") end
+					return f.legacyPanel
+				end
 				ioCount += 1
 				assert(key == "setup-hosts")
 				if f.mappingReadError then error("private storage failure") end
 				return copy(f.mapping)
 			end, set = function(key, value)
 				nativeWork()
+				if key == "legacy-panel" then
+					if f.legacyWriteError then error("private storage failure") end
+					f.legacyPanel = value
+					return
+				end
 				ioCount += 1
 				assert(key == "setup-hosts")
 				if f.mappingWriteError then error("private storage failure") end
@@ -361,7 +378,9 @@ function run(entry, loadModule)
 					table.insert(deferred, job)
 				end }
 			end,
-			chrome = { refresh = function() nativeWork(); assert(not inProcessReceipt, "process callback refreshed chrome") end, status = function(callback) handlers.status = callback end },
+			chrome = { refresh = function() nativeWork(); assert(not inProcessReceipt, "process callback refreshed chrome") end, status = function(callback) handlers.status = callback end,
+				widget = function(id, spec) f.widgets[id] = spec end },
+			css = function(name, source) nativeWork(); f.sheets[name] = source end,
 			command = function(command) handlers[command.id] = command.run; f.commands[command.id] = command end,
 			override = function() error("bridge must never override native paste or any native command") end,
 			route = { open = function(fn) handlers.drop = fn end, link = function(fn) handlers.link = fn end },
@@ -2748,6 +2767,102 @@ function run(entry, loadModule)
 		assert(f.choices().generation ~= generation and f.choices().options[2].disabled)
 		generation = f.choices().generation
 		f.poll(); f.flushPanels(); assert(f.choices().generation == generation and #f.binds() == 0)
+	end)
+
+	case("Bridge widget shows a compact label and a fixed-order detail card without IO", function(f)
+		f.legacyPanel = nil
+		f.warm()
+		local widget = assert(f.widgets.bridge, "Bridge widget was not offered")
+		assert(widget.name == "OMP Bridge" and widget.styles[1] == "text")
+		local before = f.ioCount()
+		local view = widget.render({ pane = f.original })
+		assert(f.ioCount() == before, "widget render performed IO")
+		assert(view.text == "Unbound" and view.icon == "plug" and view.command == f.status()[1].command and view.value == nil,
+			"compact label: " .. tostring(view.text) .. " / " .. tostring(view.icon))
+		local rows = string.split(view.title, "\n")
+		assert(rows[1] == "Unbound: Agent device" and rows[2] == "Remote OMP · fixture" and rows[#rows] == "Click for Bridge actions",
+			"card rows: " .. view.title)
+		local idle = string.split(widget.render(nil).title, "\n")
+		assert(idle[1] == "No remote OMP" and idle[2] == "Focus a remote OMP pane to use Bridge", "unfocused card lacks guidance")
+		assert(f.sheets.card and f.sheets.card:find('content: "Online"', 1, true), "card badge missing")
+		f.setTransfers({ { id = "up", viewId = f.viewId, phase = "uploading", names = { "a.bin" }, bytesSent = 1, totalBytes = 4 } })
+		view = widget.render({ pane = f.original })
+		assert(view.text == "25%" and view.value == 0.25 and view.icon == "arrow-up", "upload progress missing from widget")
+		assert(string.split(view.title, "\n")[3] == "Transfers: Uploading 25%", "Transfers is not the first detail row")
+		assert(f.sheets.card:find("nth-child(3)::after", 1, true), "progress meter targets another row")
+		assert(f.sheets.card:find("var(--accent) 25.0%", 1, true), "card progress meter missing")
+		local segments = f.status()
+		assert(segments and segments[#segments].text:find("Uploading 25%", 1, true), "unplaced widget removed Plugin segments")
+		f.binding("client-A", { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 1)
+		f.setTransfers({})
+		view = widget.render({ pane = f.original })
+		assert(view.text == "Desk Mac" and view.icon == "monitor" and string.split(view.title, "\n")[1] == "Desk Mac: Agent device")
+		assert(not f.sheets.card:find("--accent", 1, true), "finished upload left the progress meter")
+		f.widgetBar = { { id = "cpu" }, { id = "omp-client-bridge/bridge" } }
+		f.poll()
+		assert(f.status() == nil, "placed widget still duplicated in Plugin segments")
+		assert(widget.render({ pane = f.original }).text == "Desk Mac")
+	end)
+
+	case("default Toggle Bridge opens the Bridge menu, never a panel, and acts on its pinned OMP", function(f)
+		f.legacyPanel = nil
+		f.warm()
+		f.invoke("toggle-bridge")
+		assert(#f.creations == 0 and #f.picks == 1, "default entry opened the floating panel")
+		f.noRequest("/v1/panels/open")
+		local runs = {}
+		for _, item in f.picks[1].options.items do runs[item.run] = true end
+		for _, run in { "paste", "upload", "devices", "transfers", "setup", "legacy" } do assert(runs[run], "menu lacks " .. run) end
+		f.focus(f.other)
+		f.choose("run", "paste")
+		f.respond(f.take("/v1/captures/clipboard"), { kind = "text", text = "menu paste" })
+		local resolve = f.take("/v1/intents", f.viewId)
+		assert(resolve.body.destinationId == "destination-A", "menu paste retargeted the newly focused pane")
+		assert(#f.creations == 0 and #f.native == 0)
+	end)
+
+	case("menu device chooser binds only an explicitly chosen online device after fresh validation", function(f)
+		f.legacyPanel = nil
+		f.warm()
+		local devices = {
+			{ id = "client-A", name = "Desk Mac", online = true, platform = "darwin" },
+			{ id = "client-B", name = "Old Mac", online = false, platform = "darwin" },
+		}
+		f.binding(nil, devices, 7)
+		f.invoke("devices")
+		assert(#f.creations == 0 and #f.picks == 1, "device command opened the floating panel")
+		local items = f.picks[1].options.items
+		assert(items[1].key == "none" and items[1].current and items[2].key == "d1" and not items[2].offline and items[3].offline)
+		for _, item in items do assert(item.label ~= "client-A" and item.detail ~= "client-A", "device identity reached the chooser") end
+		f.choose("key", "d2")
+		assert(#f.binds() == 0 and #f.errors == 0, "offline device was bound")
+		f.invoke("devices"); f.binding(nil, devices, 8); f.choose("key", "d1")
+		assert(#f.binds() == 0 and #f.errors == 1, "stale chooser bound against a changed revision")
+		f.poll(); f.invoke("devices"); f.choose("key", "d1")
+		assert(#f.binds() == 0, "chooser skipped fresh conversation validation")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-B")
+		assert(#f.binds() == 0 and #f.errors == 2, "changed draft was bound")
+		f.poll(); f.invoke("devices"); f.choose("key", "d1")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-B")
+		local bind = f.take("/v1/intents", f.viewId)
+		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 8 and bind.body.draftToken == "draft-B")
+	end)
+
+	case("legacy panel setting re-enables the floating panel and disabling retires it", function(f)
+		f.legacyPanel = nil
+		f.warm()
+		f.invoke("toggle-bridge"); f.choose("run", "legacy")
+		assert(f.legacyPanel == true and #f.creations == 0)
+		f.toggle()
+		assert(#f.creations == 1 and #f.picks == 0, "enabled setting did not open the floating panel")
+		f.invoke("legacy-panel"); f.flushPanels()
+		assert(f.legacyPanel == nil and #f.closes == 1, "disabling kept the floating panel")
+		f.invoke("toggle-bridge")
+		assert(#f.creations == 1 and #f.picks == 1, "disabled setting reopened the floating panel")
+		f.choose(nil)
+		f.legacyReadError = true
+		f.invoke("legacy-panel")
+		assert(f.legacyPanel == nil and #f.errors == 1, "unreadable setting was overwritten")
 	end)
 
 	print("PASS: " .. tostring(passed) .. " synthetic SDK-boundary cases executing shipped window.luau; native Tern/clipboard/editor acceptance remains separate")

@@ -39,6 +39,9 @@ local setupInfo = nil
 local refreshChrome
 local statusByPane = {}
 local defaultStatus = { { text = "Checking Bridge", icon = "plug", tone = "muted", command = action .. "setup" } }
+-- Opt-in setting in plugin storage (shared by every window): the floating panel
+-- instead of the default widget-bar entry and native chooser.
+local LEGACY_PANEL_KEY = "legacy-panel"
 
 -- Action diagnostics use warning level because native info/debug logs are filtered
 -- by default. Never serialize user text, paths, URLs, IDs or exception messages.
@@ -799,6 +802,27 @@ local function publishDeviceSelection(cx, owned)
 	if ok then owned.selectionSentAt = tern.now() end
 end
 
+-- One bind gate for every surface: the fresh conversation, draft and binding
+-- revision must still match the choices the human saw; `valid` re-checks the
+-- surface that offered them.
+local function bindDevice(selection, key, valid, accepted, finished)
+	validateConversation(selection.target, function(view, err, fresh)
+		finished()
+		if err then report(fresh, err); return end
+		if not valid(fresh) or view.draftToken ~= selection.target.draftToken or view.state.binding.revision ~= selection.revision then
+			report(fresh, "Original conversation, draft, binding or device choices changed; nothing was bound")
+			return
+		end
+		accepted()
+		api("POST", "/v1/intents", { kind = "bind", viewId = selection.target.viewId,
+			sessionId = selection.target.sessionId, draftToken = selection.target.draftToken,
+			clientId = selection.clients[key], expectedRevision = selection.revision }, function(receipt, failure, live)
+			if failure then report(live, failure); return end
+			operations[receipt.id] = { viewId = selection.target.viewId, deadline = tern.now() + 65000 }
+		end)
+	end)
+end
+
 local function applyDevice(cx, generation, key)
 	local owned = panel
 	local selection = owned.selection
@@ -817,21 +841,7 @@ local function applyDevice(cx, generation, key)
 	if owned.applying then return end
 	if not valid(cx) then report(cx, "Device choices changed or expired; select a current online device and apply again"); return end
 	owned.applying = true
-	validateConversation(selection.target, function(view, err, fresh)
-		owned.applying = false
-		if err then report(fresh, err); return end
-		if not valid(fresh) or view.draftToken ~= selection.target.draftToken or view.state.binding.revision ~= selection.revision then
-			report(fresh, "Original conversation, draft, binding or device choices changed; nothing was bound")
-			return
-		end
-		owned.appliedGeneration = generation
-		api("POST", "/v1/intents", { kind = "bind", viewId = selection.target.viewId,
-			sessionId = selection.target.sessionId, draftToken = selection.target.draftToken,
-			clientId = selection.clients[key], expectedRevision = selection.revision }, function(receipt, failure, live)
-			if failure then report(live, failure); return end
-			operations[receipt.id] = { viewId = selection.target.viewId, deadline = tern.now() + 65000 }
-		end)
-	end)
+	bindDevice(selection, key, valid, function() owned.appliedGeneration = generation end, function() owned.applying = false end)
 end
 
 
@@ -1103,11 +1113,12 @@ local function updateTransferSummary(value, online)
 		transferDoneCount = (now < transferDoneUntil and transferDoneCount or 0) + completed
 		transferDoneUntil = now + 5000
 	end
-	local summary = { failed = failed, icon = "upload", tone = "accent" }
+	local summary = { failed = failed, icon = "arrow-up", tone = "accent" }
 	if active > 0 then
 		if not online then summary.text, summary.tone = "Status unavailable", "warn"
 		elseif uploading > 0 then
-			summary.text = "Uploading" .. (known and total > 0 and (" " .. tostring(math.floor(sent / total * 100)) .. "%") or "")
+			if known and total > 0 then summary.progress = sent / total end
+			summary.text = "Uploading" .. (summary.progress and (" " .. tostring(math.floor(summary.progress * 100)) .. "%") or "")
 		elseif ready > 0 then summary.text = "Handing to OMP"
 		else summary.text = "Preparing" end
 		if active > 1 then summary.text ..= " · " .. tostring(active) .. " transfers" end
@@ -1299,6 +1310,95 @@ tern.on("budget", function(ev)
 	elseif ev.state == "resumed" then schedulePoll(0) end
 end)
 
+-- Tern 0.9.18 widget bar: the Bridge widget and this native chooser are the
+-- default surface. The floating panel stays available as the legacy setting.
+local function legacyPanelEnabled(cx)
+	local ok, value = pcall(tern.kv.get, LEGACY_PANEL_KEY)
+	if ok then return value == true end
+	cx:toast("error", "OMP Client Bridge", "Cannot read the Bridge panel setting; using the Bridge menu")
+	return nil
+end
+
+local function setLegacyPanel(cx, enabled)
+	if not pcall(tern.kv.set, LEGACY_PANEL_KEY, enabled or nil) then
+		cx:toast("error", "OMP Client Bridge", "Cannot save the Bridge panel setting; nothing changed")
+		return
+	end
+	if not enabled and panel then hidePanel(cx) end
+	cx:toast("info", "OMP Client Bridge", enabled and "Legacy floating panel enabled; Toggle Bridge opens it"
+		or "Legacy floating panel disabled; Toggle Bridge opens the Bridge menu")
+end
+
+-- The human chooses in this window's native picker; the fresh resolve must still
+-- match the exact choices shown before anything is bound.
+local deviceBinding = false
+local function chooseDevice(cx, target)
+	local selection = deviceSelection({ target = target })
+	if not selection.available then
+		cx:toast("info", "OMP Client Bridge", "Agent device choices are not ready for this OMP; retry once Bridge resolves it")
+		if connection and not resolving[target.viewId] then
+			resolve(target, function(_, err, fresh) if err then report(fresh, err) end end)
+		end
+		return
+	end
+	local items = {}
+	for _, option in selection.options do
+		table.insert(items, { label = option.label, detail = option.detail, icon = option.key == "none" and "link" or "monitor",
+			current = option.key == selection.current, key = option.key, offline = option.disabled })
+	end
+	cx:pick({ items = items, icon = "monitor", action = "use", placeholder = "Agent device for " .. publicText(target.title, "this OMP") }):next(function(item, err, fresh)
+		if err then report(fresh, err); return end
+		if not item or not fresh or item.key == selection.current or deviceBinding then return end
+		if item.offline then fresh:toast("info", "OMP Client Bridge", "That device is offline; nothing was bound"); return end
+		local function valid(live)
+			return live ~= nil and selection.clients[item.key] ~= nil and destination(live, target) ~= nil
+				and sameSnapshot(selection, deviceSelection({ target = target }))
+		end
+		if not valid(fresh) then report(fresh, "Device choices changed while the chooser was open; nothing was bound"); return end
+		deviceBinding = true
+		bindDevice(selection, item.key, valid, function() end, function() deviceBinding = false end)
+	end)
+end
+
+local function openBridgeMenu(cx)
+	local target, reason = destination(cx)
+	local view = target and state and state.views[target.viewId]
+	local items, here, transfersHere = {}, "This OMP", 0
+	if target then
+		local agent = view and deviceName(view, view.state.binding.clientId) or "Resolving"
+		table.insert(items, { label = "Paste to remote", icon = "clipboard", group = here, run = "paste" })
+		table.insert(items, { label = "Upload file…", icon = "file-plus", group = here, run = "upload" })
+		table.insert(items, { label = "Agent device…", detail = publicText(agent), icon = "monitor", group = here, run = "devices" })
+	end
+	for _, item in state and state.transfers or {} do
+		if not target or item.viewId == target.viewId then transfersHere += 1 end
+	end
+	local approvals = state and #state.interactions or 0
+	table.insert(items, { label = "Human transfers…", detail = transfersHere > 0 and tostring(transfersHere) or "None", icon = "arrow-up", group = "Bridge", run = "transfers" })
+	if approvals > 0 then
+		table.insert(items, { label = "Pending client approvals…", detail = tostring(approvals) .. " pending", icon = "shield", group = "Bridge", run = "approvals" })
+	end
+	table.insert(items, { label = "Start / repair Bridge", icon = "plug", group = "Bridge", run = "setup" })
+	table.insert(items, { label = "Legacy floating panel", detail = "Off · select to enable", icon = "panel-right", group = "Settings", run = "legacy" })
+	cx:pick({ items = items, icon = "plug", action = "run",
+		placeholder = target and ("Bridge · " .. publicText(target.title, "Remote OMP")) or reason or "Bridge · focus a remote OMP for transfers" }):next(function(item, err, fresh)
+		if err then report(fresh, err); return end
+		if not item or not fresh then return end
+		if item.run == "setup" then setupBridge(fresh)
+		elseif item.run == "approvals" then interactions(fresh)
+		elseif item.run == "transfers" then transfers(fresh, target)
+		elseif item.run == "legacy" then setLegacyPanel(fresh, true)
+		else
+			-- Act on the destination pinned when the menu opened, as panel links do.
+			local current = target and destination(fresh, target)
+			if not current then report(fresh, "Original remote OMP pane is no longer available"); return end
+			if item.run == "paste" then pasteRemote(fresh, current)
+			elseif item.run == "upload" then uploadRemote(fresh, current)
+			else chooseDevice(fresh, current) end
+		end
+	end)
+end
+
 tern.command({ id = "setup", title = "Start / repair Bridge", icon = "plug", group = "OMP", run = setupBridge })
 tern.command({ id = "toggle-bridge", title = "Toggle Bridge", icon = "panel-right", group = "OMP", run = function(cx)
 	diagnosticSerial += 1
@@ -1308,7 +1408,9 @@ tern.command({ id = "toggle-bridge", title = "Toggle Bridge", icon = "panel-righ
 	else
 		if not connection and connectionStatus == "error" then cx:toast("error", "OMP Client Bridge", connectionMessage); return end
 		if setupController then setupController.hide(cx) end
-		togglePanel(cx)
+		if legacyPanelEnabled(cx) then togglePanel(cx)
+		elseif panel then hidePanel(cx) -- Retire a panel left open before the setting changed.
+		else openBridgeMenu(cx) end
 	end
 end })
 local function handlePanelLink(req, cx)
@@ -1343,7 +1445,8 @@ tern.route.link(function(req, cx)
 	return setupController and setupController.route(req, cx) or nil
 end)
 tern.command({ id = "devices", title = "Select agent device", group = "OMP", run = function(cx)
-	if panel then
+	local legacy = legacyPanelEnabled(cx)
+	if legacy and panel then
 		local owned = panel
 		defer(function(fresh)
 			if panel ~= owned or not fresh or owned.creating then return end
@@ -1364,8 +1467,15 @@ tern.command({ id = "devices", title = "Select agent device", group = "OMP", run
 		cx:toast("error", "OMP Client Bridge", connectionMessage)
 	else
 		if setupController then setupController.hide(cx) end
-		togglePanel(cx)
+		if legacy then togglePanel(cx); return end
+		local target = destination(cx)
+		if target then chooseDevice(cx, target)
+		else cx:toast("info", "OMP Client Bridge", "Focus a remote OMP pane to choose its agent device") end
 	end
+end })
+tern.command({ id = "legacy-panel", title = "Toggle legacy Bridge panel", icon = "panel-right", group = "OMP", run = function(cx)
+	local enabled = legacyPanelEnabled(cx)
+	if enabled ~= nil then setLegacyPanel(cx, not enabled) end
 end })
 tern.command({ id = "transfers", title = "Human transfers", group = "OMP", run = transfers })
 tern.command({ id = "approvals", title = "Pending client approvals", group = "OMP", run = interactions })
@@ -1397,46 +1507,50 @@ tern.route.open(function(req, cx)
 	return { handled = true }
 end)
 
+-- Returns the status segments and a compact label for the widget bar.
 local function statusSegments(viewId)
 	if setupChecking then
-		return { { text = setupInfo and setupInfo.stage or "Checking SSH", icon = "clock", tone = "accent", command = action .. "setup" } }
+		return { { text = setupInfo and setupInfo.stage or "Checking SSH", icon = "clock", tone = "accent", command = action .. "setup" } }, "Checking"
 	end
 	if setupBusy then
-		return { { text = "Setting up · " .. publicText(setupInfo and setupInfo.stage, "Starting"), icon = "clock", tone = "accent", command = action .. "setup" } }
+		return { { text = "Setting up · " .. publicText(setupInfo and setupInfo.stage, "Starting"), icon = "clock", tone = "accent", command = action .. "setup" } }, "Setting up"
 	end
 	if recovery.phase == "starting" and (not connection or serviceUnavailable) then
-		return { { text = "Starting local Bridge", icon = "clock", tone = "accent", command = action .. "setup" } }
+		return { { text = "Starting local Bridge", icon = "clock", tone = "accent", command = action .. "setup" } }, "Starting"
 	end
 	if recovery.phase == "failed" and (not connection or serviceUnavailable) then
-		return { { text = "Bridge start failed", icon = "warn", tone = "error", command = action .. "setup" } }
+		return { { text = "Bridge start failed", icon = "warn", tone = "error", command = action .. "setup" } }, "Start failed"
 	end
 	if setupRequired or recovery.phase == "absent" then
-		return { { text = "Set up Bridge", icon = "plug", tone = "warn", command = action .. "setup" } }
+		return { { text = "Set up Bridge", icon = "plug", tone = "warn", command = action .. "setup" } }, "Set up"
 	end
 	if not connection then
 		local fault = connectionStatus == "error"
-		return { { text = serviceUnavailable and "Start / repair Bridge" or (fault and "Bridge endpoint needs attention" or "Waiting for local Bridge"), icon = "plug", tone = fault and "error" or "warn", command = action .. (serviceUnavailable and "setup" or "toggle-bridge") } }
+		return { { text = serviceUnavailable and "Start / repair Bridge" or (fault and "Bridge endpoint needs attention" or "Waiting for local Bridge"), icon = "plug", tone = fault and "error" or "warn", command = action .. (serviceUnavailable and "setup" or "toggle-bridge") } },
+			serviceUnavailable and "Repair" or (fault and "Attention" or "Waiting")
 	end
 	if serviceUnavailable then
-		return { { text = "Start / repair Bridge", icon = "plug", tone = "warn", command = action .. "setup" } }
+		return { { text = "Start / repair Bridge", icon = "plug", tone = "warn", command = action .. "setup" } }, "Repair"
 	end
 	local failed, approvals = transferSummary.failed, state and #state.interactions or 0
 	local unavailable = statusError ~= nil or panelError ~= nil
 	local connected = state and state.connected == true
 	local view = state and state.views[viewId]
 	if setupInfo and setupInfo.status == "awaiting_session" and not view and not unavailable and recovery.phase == nil then
-		local label = setupInfo.stage == "awaiting-host-plugin" and "Reload host plugin"
-			or setupInfo.stage == "awaiting-service-upgrade" and "Service update required"
-			or "Open remote OMP · load extension"
-		return { { text = label, icon = "terminal", tone = "warn", command = action .. "toggle-bridge" } }
+		local label, short = "Open remote OMP · load extension", "Load extension"
+		if setupInfo.stage == "awaiting-host-plugin" then label, short = "Reload host plugin", "Reload host"
+		elseif setupInfo.stage == "awaiting-service-upgrade" then label, short = "Service update required", "Update" end
+		return { { text = label, icon = "terminal", tone = "warn", command = action .. "toggle-bridge" } }, short
 	end
-	local text, icon, tone = "Waiting for connection", "clock", "warn"
+	local text, icon, tone, short = "Waiting for connection", "clock", "warn", "Waiting"
 	if connected then
-		text, tone = viewId and targets[viewId] and "Connected · Resolving" or "Connected · No session", "muted"
+		local resolving = viewId and targets[viewId]
+		text, icon, tone = resolving and "Connected · Resolving" or "Connected · No session", "plug", "muted"
+		short = resolving and "Resolving" or "Connected"
 		if view then
 			local bound = view.state.binding.clientId
 			if bound == nil or bound == tern.json.null then
-				text = "Connected · Unbound"
+				text, short = "Connected · Unbound", "Unbound"
 			else
 				local device = nil
 				for _, candidate in view.state.devices do
@@ -1445,12 +1559,15 @@ local function statusSegments(viewId)
 				local name = publicText(device and device.name, "Unavailable device")
 				local cut = utf8.offset(name, 25)
 				if cut then name = name:sub(1, cut - 1) .. "…" end
-				text = (device and device.online and "Connected · " or "Device offline · ") .. name
-				icon, tone = "monitor", device and device.online and "muted" or "warn"
+				local online = device and device.online
+				text = (online and "Connected · " or "Device offline · ") .. name
+				icon, tone = "monitor", online and "muted" or "warn"
+				cut = utf8.offset(name, 17)
+				short = online and (cut and name:sub(1, cut - 1) .. "…" or name) or "Offline"
 			end
 		end
 	end
-	if unavailable then text, icon, tone = "Needs attention", "warn", "error" end
+	if unavailable then text, icon, tone, short = "Needs attention", "warn", "error", "Attention" end
 	local segments = {
 		{ text = text, icon = icon, tone = tone == "muted" and panel and "accent" or tone,
 			command = action .. (connected and "toggle-bridge" or "setup") },
@@ -1461,7 +1578,133 @@ local function statusSegments(viewId)
 	if transferSummary.text then table.insert(segments, { text = transferSummary.text, icon = transferSummary.icon, tone = transferSummary.tone, command = action .. "transfers" }) end
 	if failed > 0 then table.insert(segments, { text = tostring(failed) .. " failed", icon = "warn", tone = "error", command = action .. "transfers" }) end
 	if approvals > 0 then table.insert(segments, { text = tostring(approvals) .. " pending", icon = "shield", tone = "warn", command = action .. "approvals" }) end
-	return segments
+	return segments, short
+end
+
+-- The widget reads only values cached here, so its render stays a pure lookup.
+-- Its hover card is Tern's plugin card: one row per `title` line, `Key: value`
+-- in two columns, anything else across the row. Each card model carries the
+-- row marks its sheet styles; the sheet follows the focused pane's model, the
+-- only card Tern can show.
+local widgetId = "bridge"
+local widgetByPane, cardByPane, widgetPlaced = {}, {}, false
+local toneRank = { error = 4, warn = 3, accent = 2, ok = 1, muted = 0 }
+local function plain(text, fallback) return (publicText(text, fallback):gsub(": ", " — ")) end
+local function cardLive() return connection ~= nil and not serviceUnavailable and state ~= nil end
+-- Hero (device or state, with a caption), one context line, optional details
+-- (Transfers first), and a click hint last.
+local function cardModel(viewId, segments)
+	local primary = segments[1]
+	local headline = plain(primary.text:match("^(.-) · ") or primary.text)
+	local headTone = primary.tone == "error" and "bad" or (primary.tone == "warn" and "warn" or nil)
+	if not cardLive() then
+		local detail = (setupBusy or setupChecking) and setupInfo and setupInfo.message or recovery.message or connectionMessage
+		return { lines = { headline, plain(detail, "Bridge is not running on this device"), "Click to set up or repair Bridge" },
+			tone = headTone, marks = {} }
+	end
+	local target = viewId and targets[viewId]
+	local view = viewId and state.views[viewId]
+	local hero, context, tone = "No remote OMP", "Focus a remote OMP pane to use Bridge", nil
+	if target then
+		local folder = type(target.cwd) == "string" and target.cwd:match("([^/\\]+)[/\\]*$")
+		context = plain(publicText(target.title, "Remote OMP") .. (folder and (" · " .. publicText(folder)) or ""))
+		hero = "Resolving…"
+		if view then
+			local bound = view.state.binding.clientId
+			if bound == nil or bound == tern.json.null then hero = "Unbound: Agent device"
+			else
+				local online = false
+				for _, device in view.state.devices do if device.id == bound then online = device.online == true end end
+				local caption = not online and "Offline" or (state.device and bound == state.device.id and "This device") or "Agent device"
+				hero = plain(deviceName(view, bound)) .. ": " .. caption
+				if not online then tone = "warn" end
+			end
+		end
+	end
+	-- Link and setup states outrank the device; an error replaces the context.
+	if not (primary.text:find("^Connected") or primary.text:find("^Device offline")) then hero, tone = headline, headTone end
+	local marks = {}
+	if statusError or panelError then context, tone, marks.problem = plain(statusError or panelError), "bad", true end
+	local lines = { hero, context }
+	if transferSummary.text then table.insert(lines, "Transfers: " .. transferSummary.text); marks.transfers = #lines end
+	if transferSummary.failed > 0 then table.insert(lines, "Failed transfers: " .. tostring(transferSummary.failed)) end
+	if #state.interactions > 0 then table.insert(lines, "Pending approvals: " .. tostring(#state.interactions)) end
+	for index = 2, #segments do
+		if segments[index].command == action .. "setup" then table.insert(lines, "Update: " .. segments[index].text) end
+	end
+	if #lines > 2 then marks.section = 3 end
+	table.insert(lines, "Click for Bridge actions")
+	return { lines = lines, tone = tone, marks = marks }
+end
+local function widgetView(viewId, segments, short)
+	local primary = segments[1]
+	local tone = primary.tone
+	for _, segment in segments do
+		if (toneRank[segment.tone] or 0) > (toneRank[tone] or 0) then tone = segment.tone end
+	end
+	local card = cardModel(viewId, segments)
+	local progress = cardLive() and transferSummary.text and transferSummary.progress or nil
+	return { text = progress and (tostring(math.floor(progress * 100)) .. "%") or short,
+		icon = progress and "arrow-up" or primary.icon, tone = tone,
+		title = table.concat(card.lines, "\n"), command = primary.command, value = progress }, card
+end
+local defaultWidget, defaultCard = widgetView(nil, statusSegments(nil))
+
+-- Card sheet in the TURN Relay plugin's card language: status pill, large hero
+-- with a caption, ruled detail section and a flush footer. Only fixed words and
+-- numbers enter it; every user or remote string stays in the card's own text.
+local cardRoot = ".kit-popover.wgc[data-widget='omp-client-bridge/" .. widgetId .. "']"
+local cardSheet = nil
+local function updateCardStyle(card)
+	if type(tern.css) ~= "function" then return end
+	local function row(index) return cardRoot .. " .wgc-row:nth-child(" .. index .. ")" end
+	local label, pill = "Offline", "--warn"
+	if setupRequired or setupBusy or setupChecking then label = "Setup"
+	elseif cardLive() and state.connected == true then
+		if statusError or panelError then label, pill = "Attention", "--bad" else label, pill = "Online", "--ok" end
+	end
+	local heroColor = card.tone == "bad" and "var(--bad)" or (card.tone == "warn" and "var(--warn)" or "var(--t1)")
+	local css = {
+		cardRoot .. " .wgc-sec { border-top: 0; padding-top: 0; }",
+		cardRoot .. " .wgc-head::after { content: \"" .. label .. "\"; flex: none; height: 20px; line-height: 20px;"
+			.. " padding: 0 8px 0 17px; margin-right: -2px; border-radius: 999px; font-size: 11.5px; color: var(--t2);"
+			.. " background: radial-gradient(circle at 9px 50%, var(" .. pill .. ") 0 3px, transparent 3.5px), rgb(from var("
+			.. pill .. ") r g b / 12%); }",
+		cardRoot .. " .wgc-v { max-width: 70%; overflow: hidden; text-overflow: ellipsis; }",
+		row(1) .. " { min-height: 34px; line-height: 30px; align-items: baseline; }",
+		row(1) .. " .wgc-k { flex: 0 1 auto; font: 600 22px/30px var(--sans); letter-spacing: -0.01em; color: " .. heroColor .. "; }",
+		row(1) .. " .wgc-v { margin-left: auto; font: 11.5px var(--mono); color: var(--t3); }",
+		row(2) .. " { min-height: 0; line-height: 16px; }",
+		row(2) .. " .wgc-k { white-space: normal; font-size: 12px; color: " .. (card.marks.problem and "var(--bad)" or "var(--t3)") .. "; }",
+		cardRoot .. " .wgc-row:last-child { margin: 8px -12px -8px; padding: 7px 12px 8px; min-height: 18px; line-height: 18px;"
+			.. " border-top: 1px solid var(--l1); }",
+		cardRoot .. " .wgc-row:last-child .wgc-k { font: 11.5px var(--sans); color: var(--t3); }",
+	}
+	if card.marks.section then
+		table.insert(css, row(card.marks.section) .. " { margin: 8px -12px 2px; padding: 8px 12px 0; border-top: 1px solid var(--l1); }")
+		table.insert(css, row(card.marks.section) .. " .wgc-k { font-weight: 550; color: var(--t2); }")
+		table.insert(css, row(card.marks.section) .. " .wgc-v { font: 11.5px var(--sans); color: var(--t3); }")
+	end
+	local progress = card.marks.transfers and transferSummary.progress
+	if progress then
+		local percent = string.format("%.1f%%", progress * 100)
+		local inset = card.marks.transfers == card.marks.section and "12px" or "0"
+		table.insert(css, row(card.marks.transfers) .. " { position: relative; padding-bottom: 12px; }")
+		table.insert(css, row(card.marks.transfers) .. "::after { content: \"\"; position: absolute; left: " .. inset .. "; right: "
+			.. inset .. "; bottom: 3px; height: 4px; border-radius: 999px; background: linear-gradient(to right, var(--accent) "
+			.. percent .. ", var(--l2) " .. percent .. "); }")
+	end
+	local sheet = table.concat(css, "\n")
+	if sheet ~= cardSheet and pcall(tern.css, "card", sheet) then cardSheet = sheet end
+end
+-- Once the user places the Bridge widget, Plugin segments stop repeating it.
+local function widgetPlacedIn(cx)
+	local ok, widgets = pcall(function() return cx.settings:get("widgets") end)
+	if not ok or type(widgets) ~= "table" then return false end
+	for _, entry in widgets do
+		if type(entry) == "table" and entry.id == "omp-client-bridge/" .. widgetId then return true end
+	end
+	return false
 end
 
 local chromeQueued = nil
@@ -1470,25 +1713,55 @@ refreshChrome = function()
 	if chromeQueued and now < chromeQueued.deadline then return end
 	local queued = { deadline = now + 1000 }
 	chromeQueued = queued
-	defer(function()
+	defer(function(cx)
 		if chromeQueued ~= queued then return end
 		-- Release before computing or refreshing; a dropped defer is replaced
 		-- after its lease by the independent polling driver.
 		chromeQueued = nil
-		defaultStatus = statusSegments(nil)
-		local cache = {}
-		for viewId, target in targets do if target.pane then cache[target.pane] = statusSegments(viewId) end end
-		statusByPane = cache
+		local defaultShort
+		defaultStatus, defaultShort = statusSegments(nil)
+		defaultWidget, defaultCard = widgetView(nil, defaultStatus, defaultShort)
+		local cache, widgets, cards = {}, {}, {}
+		for viewId, target in targets do
+			if target.pane then
+				local segments, short = statusSegments(viewId)
+				local view, card = widgetView(viewId, segments, short)
+				cache[target.pane], widgets[target.pane], cards[target.pane] = segments, view, card
+			end
+		end
+		statusByPane, widgetByPane, cardByPane = cache, widgets, cards
+		if cx then
+			widgetPlaced = widgetPlacedIn(cx)
+			-- Tern shows one card, the focused pane's: style exactly that model.
+			local ok, focused = pcall(function() return cx.session:focused() end)
+			local pane = ok and focused and (panel and focused == panel.pane and panel.target.pane or focused)
+			updateCardStyle(pane and cardByPane[pane] or defaultCard)
+		end
 		tern.chrome.refresh()
 	end)
 end
 tern.chrome.status(function(info)
 	-- Only cached lookups under Tern's 4 ms formatter budget.
+	if widgetPlaced then return nil end
 	local pane = panel and info.pane == panel.pane and panel.target.pane or info.pane
 	return statusByPane[pane] or defaultStatus
 end)
+if type(tern.chrome.widget) == "function" then
+	tern.chrome.widget(widgetId, {
+		name = "OMP Bridge",
+		description = "Connection, agent device and transfers for the focused remote OMP; click for Bridge actions",
+		icon = "plug",
+		styles = { "text", "ring" },
+		render = function(info)
+			-- The same cached lookup as the status formatter; nil info is no focused pane.
+			local pane = info and (panel and info.pane == panel.pane and panel.target.pane or info.pane)
+			return pane and widgetByPane[pane] or defaultWidget
+		end,
+	})
+end
 
 tern.on("focus", function(_, cx)
+	refreshChrome() -- The card sheet follows the newly focused pane's model.
 	local target = destination(cx)
 	-- Merely focusing our display must not invalidate an already-confirmed draft
 	-- immediately before its click arrives. Expiry still triggers normal refresh.

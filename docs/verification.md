@@ -20,6 +20,16 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0-beta.13：Tern 0.9.18 widget 与 Bridge 菜单
+
+- 背景：Tern 0.9.18（SDK 2026-11-12）把状态栏改为 widget 栏，并新增 `tern.chrome.widget`（文本/环形等样式、`title` 悬停卡片、单一 `command`）。Bridge 改为提供 **OMP Bridge** widget，默认入口从临时悬浮面板改为原生 Bridge 菜单；悬浮面板保留为插件存储中的可选设置（菜单 Settings 或 **Toggle legacy Bridge panel**）。
+- 卡片结构在本机 Tern 0.9.18 用 `tern ctl` 实测：`title` 每行对应一行，`键: 值` 分成两列，卡片元素带 `data-widget`；鼠标可以移进卡片，但卡片内点击不向插件派发事件，只有点击 widget 本身执行 `command`。因此卡片只读，操作留在菜单。实测期间用户未操作电脑，未点击任何操作项。
+- 卡片样式由 `tern.css` 按聚焦面板的卡片模型生成，只写入固定词汇和数字。用临时预览包（伪造 42% 上传与 1 个失败）在两个远端 OMP 面板上截图核对状态徽章、设备主值、会话行、传输进度条与页脚；预览包已由正式构建替换。
+- Edit widgets 列出 OMP Bridge；放入 widget 栏后，Plugin segments 不再重复显示 Bridge 状态；点击 widget 打开 Bridge 菜单，按 Escape 关闭。
+- 设备选择改用本机原生选择器：离线设备不会绑定；选择后重新解析，会话、草稿、绑定版本或所见选项任一变化即不绑定。
+- 226 项 shipped Luau 边界回归通过，新增 widget 卡片、Bridge 菜单、设备选择与旧面板开关 4 项。`upload` 不是 Tern 图标名，旧状态段的上传图标一直不显示，现改用 Tern 自带的 `arrow-up`。
+- 边界：卡片依赖 Tern 内部类名，改名时退回普通两列文字，功能不受影响；卡片不能放按钮。正式包在切换聚焦后的样式刷新与 `arrow-up` 图标未在实机复核；真实上传进度与设备绑定未在实机执行。
+
 ## v0.5.0-beta.12：客户端媒体读取预览
 
 - 现象：`read client:///…/setup-005.png` 在 Tern 中显示 `Not found /home/…/setup-005.png`。适配层把 `meta.source` 转成 `client:///…`，却原样保留设备上的裸 `mediaPath`；支持 `media` 的宿主按该路径在 agent 主机上打开文件，优先于结果中已返回的图片字节。若 agent 主机恰有同名文件，会显示另一份文件。

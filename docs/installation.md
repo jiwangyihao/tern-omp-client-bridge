@@ -1,6 +1,6 @@
 # 安装指南
 
-本文面向安装或升级到 `v0.5.0-beta.12` 的用户。首次安装先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Start / repair Bridge** 中授权初始化。已经初始化的安装在插件重载后自动维护本机客户端，不需要每次重新运行完整 Setup。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
+本文面向安装或升级到 `v0.5.0-beta.13` 的用户。首次安装先下载并校验发行包，通过 Tern 原生安装器安装本机插件，再在 **OMP → Start / repair Bridge** 中授权初始化。已经初始化的安装在插件重载后自动维护本机客户端，不需要每次重新运行完整 Setup。此路径不需要全局安装 Bun，也不依赖已发布的 npm 全局包。
 
 这是包含原生 UI 增强、原生权限、运行时引导、命名管道、上传发布及通用 SSH 设置修复的预发布版本。`v0.5.0-beta.1` 的 Windows CI 失败记录与旧附件保留不变；不要将旧附件视为已更新。macOS PiP 几何与焦点目前在隔离无头渲染器中验收，完整跨设备 GUI 行为仍需分别验收。[原生平台 CI](https://github.com/jiwangyihao/tern-omp-client-bridge/actions/workflows/native-runtime.yml)、[验证记录](verification.md)与[兼容性说明](compatibility.md)区分发布版本、实际验证和未验收范围。
 
@@ -44,12 +44,12 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 
 ## 2. 下载并校验发行包
 
-打开 [`v0.5.0-beta.12` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.12)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
+打开 [`v0.5.0-beta.13` 发行页](https://github.com/jiwangyihao/tern-omp-client-bridge/releases/tag/v0.5.0-beta.13)，在 **Assets** 中选择对应附件，并下载同页的 `SHA256SUMS`。
 
 | 建议使用环境 | 附件 |
 | --- | --- |
-| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.12.tar.gz` |
-| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.12.zip` |
+| macOS / Linux | `tern-omp-client-bridge-v0.5.0-beta.13.tar.gz` |
+| Windows PowerShell | `tern-omp-client-bridge-v0.5.0-beta.13.zip` |
 
 两种压缩包包含相同的源码保留型包结构，没有捆绑 `node_modules`、凭据或原生可执行文件。本指南使用上述发行附件，不使用 GitHub 自动生成的 **Source code** 压缩包。校验和用于核对下载内容，不能替代对发行来源的信任。
 
@@ -58,7 +58,7 @@ ssh -T -o BatchMode=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes bridge-a
 在一个新的下载目录中执行，避免覆盖已有的解压目录。
 
 ```sh
-version=v0.5.0-beta.12
+version=v0.5.0-beta.13
 package="tern-omp-client-bridge-$version"
 archive="$package.tar.gz"
 base="https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$version"
@@ -93,7 +93,7 @@ tern plugin install "$(pwd)/$package"
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$Version = 'v0.5.0-beta.12'
+$Version = 'v0.5.0-beta.13'
 $Package = "tern-omp-client-bridge-$Version"
 $Archive = "$Package.zip"
 $Base = "https://github.com/jiwangyihao/tern-omp-client-bridge/releases/download/$Version"
@@ -115,17 +115,17 @@ tern plugin install $PackageRoot
 
 ### 确认包根目录与已有安装
 
-解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.12`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
+解压后应只有一个顶层目录 `tern-omp-client-bridge-v0.5.0-beta.13`。传给 `tern plugin install` 的必须是这个目录的绝对路径，根目录内应有 `plugin.toml`、`package.json`、`bun.lock`、`tsconfig.json`、`README.md`、`LICENSE`，以及 `src/`、`scripts/`、`tern/`、`docs/`。不要只安装其中的 `tern/`，也不要向安装器传入压缩文件路径。
 
 原生 `tern plugin install` 会复制插件并重载插件列表。从未初始化的安装仍需首次授权；已有有效授权或可验证旧安装的窗口会自动准备本机运行包、恢复或更新客户端，不会因此重装远端或重启共享 broker。
 
-- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.12" --force`。
+- **已有安装副本**时，先确认 `tern plugin dir` 和 `tern plugin list` 指向预期 profile，再给原安装命令追加 `--force`。例如 `tern plugin install "/absolute/path/to/tern-omp-client-bridge-v0.5.0-beta.13" --force`。
 - **已有 linked package** 时，`--force` 不会覆盖链接。若确定切换为发行包副本，先执行 `tern plugin unlink omp-client-bridge`，再安装解压目录；保留原链接指向的源码目录。不要直接删除 `.path` 文件或对未知目录递归删除。
 - 多 profile 或隔离配置必须与实际使用的 Tern daemon 一致。新 profile 需要单独完成正常登录与首次设置，不能复制其他 profile 的凭据。
 
 首次安装继续下一节；已有安装先观察自动维护及连接结果，不要因为短暂的准备、重连或等待安全切换而重复初始化。
 
-入口为 **OMP → Start / repair Bridge**。正常离线和暂时启动失败会自动重试；需要人工检查的授权、身份或配置冲突保留明确错误。该入口可用于显式修复，但不会静默改选主机、绑定设备或重启 OMP。恢复连接后，Toggle Bridge 回到普通面板。
+入口为 **OMP → Start / repair Bridge**。正常离线和暂时启动失败会自动重试；需要人工检查的授权、身份或配置冲突保留明确错误。该入口可用于显式修复，但不会静默改选主机、绑定设备或重启 OMP。恢复连接后，Toggle Bridge 回到 Bridge 菜单（启用旧悬浮面板时回到面板）。
 
 ## 3. 在侧栏授权初始化
 
@@ -135,7 +135,7 @@ tern plugin install $PackageRoot
 4. 核对安装目的地与变更范围后，点击侧栏中的 **Install**，单独授权私有运行时、依赖、两端集成与后台服务。身份文件保留；初始化不会修改全局 shell profile、SSH 信任、Tern 快捷键或现有会话绑定。
 5. 查看同一侧栏中的进度或失败原因。关闭侧栏不会取消已经授权的后台安装；重新打开可继续查看。安装目标在选择时已固定，切换标签页不会将安装转移到其他主机。
 6. 安装完成后，在**同一目标主机**新建一个 OMP 会话，使其通过原生扩展加载器加载 Bridge。聚焦该会话并打开 **OMP → Toggle Bridge**，完成真实会话握手。不要为了安装自动重启或关闭正在使用的旧会话。
-7. 确认设备在线后，使用 **OMP: Select agent client** 或 Bridge 的设备状态区域，为该会话显式选择设备。新会话默认为 **Unbound**；**This device** 表示当前查看者，不一定是 Agent 已选的执行设备。
+7. 确认设备在线后，使用 **OMP: Select agent device** 或 Bridge 菜单的 **Agent device…**，为该会话显式选择设备。新会话默认为 **Unbound**；**This device** 表示当前查看者，不一定是 Agent 已选的执行设备。Tern 0.9.18 起可通过命令面板 **Edit widgets…** 把 **OMP Bridge** widget 放入 widget 栏。
 
 绑定决定 Agent 的客户端工具执行目标，授权仍受客户端原生 Agent 策略和操作系统权限限制，**绑定不构成沙箱**。仅使用人工传输时可以保持未绑定。原生文本和图片粘贴保持不变，**Paste to remote** 与 **Upload file** 是单独的人工操作入口。详见[使用说明](usage.md#choose-the-shared-execution-target)与[安全边界](security.md)。
 
@@ -146,9 +146,9 @@ tern plugin install $PackageRoot
 | 插件安装 | 在实际使用的 Tern daemon 中，`tern plugin list` 能识别 `omp-client-bridge`，且没有相关加载问题。daemon 未运行时，该命令可能只列出磁盘目录。 | Bridge 服务已启动或远端会话可用。 |
 | 客户端连接 | 侧栏确认签名注册，设备状态在线。 | `Awaiting OMP session` 仍未达到完整就绪；手工命令的 `client-ready` 也只表示本地 UI endpoint 可用。 |
 | 会话与主机就绪 | 新 OMP 会话完成真实视图握手，主机插件确认就绪，侧栏不再要求 **Reload host plugin** 或 **Service update required**，并报告 Bridge 就绪。 | 已授权 Agent 使用客户端，或浏览器/桌面已获权限。 |
-| 实际 UI 与绑定 | Bridge 面板实际出现在预期会话中；需要 Agent 客户端能力时，绑定显示自己选择的在线设备。 | 所有平台的 PiP 几何、焦点、剪贴板和桌面行为均已验收。 |
+| 实际 UI 与绑定 | Bridge 菜单（或已启用的旧悬浮面板）实际指向预期会话；需要 Agent 客户端能力时，绑定显示自己选择的在线设备。 | 所有平台的 PiP 几何、焦点、剪贴板和桌面行为均已验收。 |
 
-本指南的安装完成标准是前三层均满足，并能在目标会话观察到 Bridge 面板；Agent 客户端操作还需要第四层的显式绑定及对应原生授权。HTTP 响应成功、文件已复制或服务进程存在，都不能替代这些观察。
+本指南的安装完成标准是前三层均满足，并能在目标会话打开指向它的 Bridge 菜单；Agent 客户端操作还需要第四层的显式绑定及对应原生授权。HTTP 响应成功、文件已复制或服务进程存在，都不能替代这些观察。
 
 ## 5. 高级维护 executable 与隔离目标
 

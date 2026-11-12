@@ -61,7 +61,8 @@ already accepted the attachment, confirmed handoff remains authoritative and
 late cleanup errors do not relabel it as a failed or cancelled upload. Cancellation
 does not undo an attachment already handed to OMP.
 
-The running Bridge panel floats over the selected OMP at its top-right corner,
+When the opt-in [legacy floating panel](#legacy-floating-panel) is enabled, the
+running Bridge panel floats over the selected OMP at its top-right corner,
 initially focused for interaction. One-time glance/focus initialization uses the
 native `layout.float` API, constraining its initial cells by the native frame,
 and preserves later user sizing.
@@ -416,16 +417,22 @@ file into an issue or chat. Run one client service per chosen client state root.
 
 ## Choose the shared execution target
 
-Focus the live remote OMP conversation in Tern and use **OMP: Select agent client**
-or the bridge's device status segment. This focuses the Bridge panel's inline
-**Agent device** field, not a global picker. Select a device, then explicitly
-click **Use device** to apply a changed choice. Opening the field or navigating
-options never changes the binding. New sessions are **Unbound**; **This device**
-identifies the current viewer, not necessarily the agent target.
+Focus the live remote OMP conversation in Tern and use **OMP: Select agent device**,
+or **Agent device…** in the Bridge menu. This opens a native chooser on this device
+listing **Unbound** and the session's devices, with the current choice checked and
+offline devices marked. Choosing an online device applies it only after a fresh
+resolve still matches the conversation, draft, binding revision and the exact
+choices shown; otherwise nothing is bound. Dismissing the chooser or choosing the
+current entry changes nothing. With the [legacy floating panel](#legacy-floating-panel)
+enabled, the command instead focuses the panel's inline **Agent device** field,
+where a changed choice applies only through an explicit **Use device** click.
+New sessions are **Unbound**; **This device** identifies the current viewer, not
+necessarily the agent target.
 
 The selection belongs to the OMP session, not its pane, SSH username, or latest
 viewer. All viewers see ordered changes with the actor and old/new targets.
-Stale choices are rejected; use the refreshed inline field before applying again.
+Stale choices are rejected; reopen the chooser (or the refreshed inline field)
+before applying again.
 Focus changes and reconnects do not auto-select. An offline selected device stays
 selected and fails client operations rather than falling back to the agent host.
 
@@ -515,11 +522,23 @@ Native text and image paste remain unchanged: no Paste override, asynchronous
 text classification, native-command replay, or additional native-paste gate.
 Path-shaped plain text does not instruct the bridge to upload a file.
 
-Click the right-aligned connection/device summary in the window status line, or choose **Toggle Bridge**
-from the native command palette, to open the native Bridge Block as a top-right PiP.
-The panel shows its originating OMP target and source device, agent selection,
-transfers and approvals. **Paste to remote** directly captures clipboard text or
-an image; **Upload file** directly opens the system file chooser. Both also have
+Tern 0.9.18 and later offer the **OMP Bridge** widget to the widget bar: add it
+with palette **Edit widgets…**. The bar shows a short label: the bound device's
+name, `Unbound`, `Connected`, or a setup/connection state such as `Set up` or
+`Waiting`; while uploading it shows the percentage, filling the ring when you
+pick the ring style. Hovering it opens a read-only card: a link pill (`Online`,
+`Offline`, `Setup` or `Attention`), the agent device in large type captioned
+`Agent device`, `This device` or `Offline` (or `Unbound`, or the setup/connection
+state), the focused OMP session and folder, then only what needs attention:
+**Transfers** with an upload meter, failed transfers, pending approvals and
+client updates. The card has no buttons: Tern delivers no clicks from a
+plugin card, so actions live in the menu below. Clicking the widget, its
+status segment, or **Toggle Bridge** in the native command palette opens the
+Bridge menu for the focused remote OMP: **Paste to remote**, **Upload file…**,
+**Agent device…**, **Human transfers…**, pending approvals, **Start / repair
+Bridge**, and the legacy panel setting. Actions keep the OMP target that was
+focused when the menu opened. **Paste to remote** directly captures clipboard text
+or an image; **Upload file** directly opens the system file chooser. Both also have
 standalone palette commands; neither opens an intermediate source menu.
 
 **Assign your own shortcut:** the registered action is
@@ -583,12 +602,23 @@ not mean the prompt was submitted or an image preview finished decoding.
 Historical completions do not reappear on reload. Failures and approvals retain
 their labeled counts. Progress is aggregated while polling, outside the chrome
 formatter's 4 ms budget.
-The main control still toggles the owned panel; counts open their respective
-detail views. Unbound does not prevent human paste/upload. Uploads continue
-independently when the panel closes.
-If the status line is hidden, use **Toggle Bridge** rather than enabling it automatically.
+The main control opens the Bridge menu (or toggles the legacy floating panel when
+enabled); counts open their respective detail views. Unbound does not prevent
+human paste/upload. Uploads continue independently of any menu or panel.
+Once the **OMP Bridge** widget is placed in the widget bar, these segments leave
+Tern's **Plugin segments** widget so the summary is not shown twice. If neither is
+shown, use **Toggle Bridge** rather than changing the widget bar automatically.
 
-The panel is a real plugin Block, not Canvas or an editor replacement. It is
+### Legacy floating panel
+
+The earlier floating Bridge panel is off by default. Re-enable it with **Legacy
+floating panel** in the Bridge menu's **Settings** group, or toggle it with
+**OMP → Toggle legacy Bridge panel**. The setting lives in the plugin's data
+storage, so every window follows it; disabling it closes an open panel. While it
+is enabled, **Toggle Bridge** and the status control open the panel described
+below instead of the menu.
+
+The legacy panel is a real plugin Block, not Canvas or an editor replacement. It is
 created in a background temporary tab without showing that tab or taking focus,
 then floated by exact pane ID over the saved originating OMP owner, still without
 taking focus. Tern removes the empty temporary tab; the original tiled tree is
