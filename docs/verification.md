@@ -20,6 +20,11 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.0：正式版
+
+- 以 `v0.5.0-beta.13` 的代码发布正式版，只改版本号和文档里的预发布措辞，没有功能改动；发布前平台 CI 通过，发行包在本机用 `tern plugin install` 安装后插件状态为 ready。
+- 正式版不扩大验收范围：完整 Windows GUI、三台物理客户端共同使用、跨设备桌面控制、完整粘贴与拖放、真实 Android 设备操作，以及 beta.13 记录的卡片与上传实机项仍待分别验收。
+
 ## v0.5.0-beta.13：Tern 0.9.18 widget 与 Bridge 菜单
 
 - 背景：Tern 0.9.18（SDK 2026-11-12）把状态栏改为 widget 栏，并新增 `tern.chrome.widget`（文本/环形等样式、`title` 悬停卡片、单一 `command`）。Bridge 改为提供 **OMP Bridge** widget，默认入口从临时悬浮面板改为原生 Bridge 菜单；悬浮面板保留为插件存储中的可选设置（菜单 Settings 或 **Toggle legacy Bridge panel**）。
