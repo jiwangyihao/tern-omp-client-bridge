@@ -36,8 +36,9 @@ export function nativePresentations(api: Pick<ExtensionAPI, "pi">, editMode?: ()
 	}
 	// `media` lets a renderer name a file the host opens by path, on the agent
 	// host. Paths of a client-owned result exist only on its device, so only the
-	// returned bytes are a correct preview. Deciding here also repairs results
-	// persisted, or still produced by an older broker, with a bare client path.
+	// returned bytes are a correct preview on a tool card. This does not reach
+	// grouped reads: OMP shows their images by `details.mediaPath` outside tool
+	// presentation, so client results reaching OMP carry no `mediaPath` at all.
 	function resultOptions(name: ToolName, details: unknown, options: RenderResultContextOptions): RenderResultContextOptions {
 		const base = name === "edit" ? editOptions(options) : options;
 		return base.media && typeof details === "object" && details !== null && "clientBridge" in details ? { ...base, media: false } : base;

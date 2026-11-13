@@ -20,6 +20,14 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.5.1：客户端读图在分组读取中显示返回的图片
+
+- 现象：beta.12 之后，远端 Agent `read client:///tmp/signout-dlg.png`（绑定的是另一台客户端）实时显示仍为 `Not found /tmp/signout-dlg.png`。会话进程 2026-11-13 17:05 UTC 已升级到 OMP 18.20.0 并重新加载扩展，扩展指向 beta.12 包；broker 仍是 11 月 8 日启动的 beta.11 包，结果仍带设备上的 `mediaPath`。
+- 根因：OMP 把未注册内部 URL 的读取（包括 `client://`）折叠进读取分组，分组读取的图片由助手消息按 `details.mediaPath` 以 `media` 节点显示，不经过工具的 `describeResult`。beta.12 的展示层修复只覆盖工具卡片，从未覆盖这一路径；它的测试与宿主验证也都只走了 `ToolExecutionComponent`。适配层去掉 `mediaPath` 才有效，而 broker 没有切换到新包。
+- 复现：在 wawa-dev 实际的 OMP 18.20.0 中加载一次性探针，用会话里的真实结果驱动宿主自己的组件。分组路径（`AssistantMessageComponent.setToolResultImages`）带 `mediaPath` 时生成 `media` 节点 `/tmp/signout-dlg.png`，去掉后生成 `image` 节点，blob 为返回字节的 SHA-256；工具卡片路径在 beta.12 展示代码下本就生成 `image` 节点。两次运行结果一致。
+- 修复：OMP 扩展在把客户端结果交给 OMP 之前去掉 `mediaPath`，不再依赖 broker 版本。新增回归用例走真实扩展执行路径（模拟 beta.11 broker 返回带 `mediaPath` 的结果），并用 OMP 自己的分组读取组件渲染：修复前失败，修复后通过。
+- 边界：扩展改动在会话重新加载扩展后生效。此前已持久化、仍带 `mediaPath` 的客户端读图，在历史中仍显示 `Not found`，重新读取即可。
+
 ## v0.5.0：正式版
 
 - 以 `v0.5.0-beta.13` 的代码发布正式版，只改版本号和文档里的预发布措辞，没有功能改动；发布前平台 CI 通过，发行包在本机用 `tern plugin install` 安装后插件状态为 ready。

@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/p
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BrokerApi, ServerState } from "../api.ts";
 import { BrokerClient } from "../broker-client.ts";
-import { BridgeError, type ToolName } from "../protocol.ts";
+import { BridgeError, type ToolName, type ToolResult } from "../protocol.ts";
 import { DraftBridge } from "./draft.ts";
 import { parameters, routeTool, withTarget } from "./routing.ts";
 import { nativeMetadata, type NativeMetadata } from "./native-metadata.ts";
@@ -20,6 +20,19 @@ export interface ExecutionIdentity {
 	readonly contextId: string;
 }
 
+/**
+ * OMP collapses `client://` reads into its read group and shows a grouped read's
+ * image by `details.mediaPath`, opened on the agent host, outside any tool
+ * presentation. A client result's path exists only on its device, so the result
+ * OMP receives carries none and the returned bytes are its preview. Brokers
+ * before 0.5.0-beta.12 still forward the device path.
+ */
+function withoutDeviceMediaPath(result: ToolResult): ToolResult {
+	const details = result.details;
+	if (typeof details !== "object" || details === null || !("mediaPath" in details)) return result;
+	const { mediaPath: _devicePath, ...rest } = details as Record<string, unknown>;
+	return { ...result, details: rest };
+}
 
 const MISSING_SESSION_POLICY = "Client bridge did not receive this session's scoped Settings from the native extension lifecycle. Start/reload the extension through OMP session_start/session_switch/session_branch; global or same-directory sibling policies are not accepted.";
 
@@ -108,7 +121,7 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 					const identity = executionIdentity(ctx);
 					owned.set(identity.contextId, identity);
 					// No agent cwd is copied to the client. Broker captures binding once per call.
-					return broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate });
+					return withoutDeviceMediaPath(await broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate }));
 				},
 			};
 			// Tern uses the official semantic hooks; ANSI keeps its existing fallback.

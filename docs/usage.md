@@ -819,16 +819,18 @@ presentation but never grants startup permission. Native callback delivery is
 still required: a suspended or idle native window may need rendering to resume
 delivery. The plugin does not bypass native budgets or replay user operations.
 
-Beta.12 previews client media from the bytes a read returned. A media-capable
-Tern host opens `media` previews by path on the agent host, where a client file
-is absent or is a different file; for client-owned results the Bridge turns that
-path preview off, and the adapter no longer forwards the device's bare
-`mediaPath`. The preview is the image the model received, which the native read
-may have downscaled, not the original file. Client media for which a read returns
-no image block has no inline media viewer. Agent-host reads keep the native
-viewer. Results persisted by earlier versions render from their stored bytes once
-a session loads the updated extension; the adapter half needs the broker to run
-the new package.
+Client image reads preview the bytes the read returned. OMP collapses
+`client://` reads into its read group and shows a grouped read's image by
+`details.mediaPath`, which a media-capable Tern host opens on the agent host,
+where a client file is absent or is a different file. Client results therefore
+reach OMP without `mediaPath`: the broker adapter drops it (0.5.0-beta.12 and
+later), and the OMP extension drops it too (0.5.1 and later), so an older broker
+can no longer show `Not found <path>`. The preview is the image the model
+received, which the native read may have downscaled, not the original file.
+Client media for which a read returns no image block has no inline media viewer.
+Agent-host reads keep the native viewer. The extension change applies once a
+session loads the updated extension. Earlier persisted client reads that kept
+`mediaPath` still show `Not found` in history; reading the file again shows it.
 
 For a legacy managed client, run the installed private package's CLI with its
 approved Bun runtime: `migrate-legacy-client --plugin-data PATH`. This is a read-only
