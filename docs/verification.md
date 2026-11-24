@@ -20,6 +20,13 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## 未发布：Bridge 悬停卡片对齐原悬浮面板
+
+- 用户反馈前一版按钮没有图标。DOM、CSS 规则数和插件 ready 状态都不能证明图标被绘制。前一版用 SVG data URL 作遮罩；新版按钮用文字标签显示单色符号与操作名，主机标识用几何形状绘制，不加载图片。
+- 沿用悬浮面板的顺序：主机和连接状态 → 工作区与会话 → 本机来源、Paste / Upload → 当前 Agent 设备 → 传输与审批。设备选择默认收起，展开不会绑定。选项或绑定版本变动会作废已展开的列表，延迟到达的旧点击不能选择新设备。
+- 本机 Tern 0.9.30 原生离屏渲染器执行工作区的 `tern/window.luau`；SDK 测试边界提供样例会话、设备和传输。点击选择框前后分别截图，浅色和深色各一组。两种主题下，卡片都是 332 px 宽，高度从收起时的 386 px 变为展开时的 546 px。截图可见操作符号、当前设备、置灰的离线项及上传进度条。
+- 227 项 Luau 路由回归通过。未在用户的活动会话中粘贴、上传、切换绑定、取消传输或回复审批；本次截图验证的是 Tern 渲染，不是跨机器操作验收。
+
 ## v0.5.1：客户端读图在分组读取中显示返回的图片
 
 - 现象：beta.12 之后，远端 Agent `read client:///tmp/signout-dlg.png`（绑定的是另一台客户端）实时显示仍为 `Not found /tmp/signout-dlg.png`。会话进程 2026-11-13 17:05 UTC 已升级到 OMP 18.20.0 并重新加载扩展，扩展指向 beta.12 包；broker 仍是 11 月 8 日启动的 beta.11 包，结果仍带设备上的 `mediaPath`。

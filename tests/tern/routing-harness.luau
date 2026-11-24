@@ -2769,39 +2769,54 @@ function run(entry, loadModule)
 		f.poll(); f.flushPanels(); assert(f.choices().generation == generation and #f.binds() == 0)
 	end)
 
-	case("Bridge widget shows a compact label and a fixed-order detail card without IO", function(f)
+	case("Bridge widget card lists the OMP, devices and transfers as native rows without IO", function(f)
 		f.legacyPanel = nil
 		f.warm()
 		local widget = assert(f.widgets.bridge, "Bridge widget was not offered")
 		assert(widget.name == "OMP Bridge" and widget.styles[1] == "text")
+		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }, { id = "client-B", name = "Old Mac", online = false, platform = "darwin" } }, 3)
 		local before = f.ioCount()
 		local view = widget.render({ pane = f.original })
 		assert(f.ioCount() == before, "widget render performed IO")
 		assert(view.text == "Unbound" and view.icon == "plug" and view.command == f.status()[1].command and view.value == nil,
 			"compact label: " .. tostring(view.text) .. " / " .. tostring(view.icon))
-		local rows = string.split(view.title, "\n")
-		assert(rows[1] == "Unbound: Agent device" and rows[2] == "Remote OMP · fixture" and rows[#rows] == "Click for Bridge actions",
-			"card rows: " .. view.title)
-		local idle = string.split(widget.render(nil).title, "\n")
-		assert(idle[1] == "No remote OMP" and idle[2] == "Focus a remote OMP pane to use Bridge", "unfocused card lacks guidance")
-		assert(f.sheets.card and f.sheets.card:find('content: "Online"', 1, true), "card badge missing")
-		f.setTransfers({ { id = "up", viewId = f.viewId, phase = "uploading", names = { "a.bin" }, bytesSent = 1, totalBytes = 4 } })
+		local function row(id)
+			for _, item in widget.render({pane = f.original}).card do if item.id == id then return item end end
+			return nil
+		end
+		assert(row("destination").label == "fixture" and row("destination").text == "Remote OMP", "workspace and conversation must be separate from the transfer controls")
+		assert(row("source").text == "Fixture client" and row("agent").text == "Unbound", "source was mistaken for the agent binding")
+		assert(row("omp").actions[1].id == "paste" and row("omp").actions[2].id == "upload")
+		local function options()
+			local result = {}
+			for _, item in widget.render({pane = f.original}).card do
+				if item.actions and item.actions[1].id == "use" then result[item.label] = item end
+			end
+			return result
+		end
+		assert(next(options()) == nil, "device list must start collapsed")
+		f.invoke("widget_action", { widget = "bridge", row = "agent", act = "toggle" })
+		local shown = options()
+		assert(shown["Desk Mac"] and shown["Old Mac"].tone == "muted" and not shown.Unbound, "only alternatives offer Use")
+		f.noRequest("/v1/intents")
+		f.binding(nil, { { id = "client-B", name = "Old Mac", online = true, platform = "darwin" } }, 4)
+		assert(next(options()) == nil, "changed choices left the disclosure open")
+		f.invoke("widget_action", { widget = "bridge", row = shown["Desk Mac"].id, act = "use" })
+		f.noRequest("/v1/intents")
+		local idle = widget.render(nil).card
+		assert(idle[1].label == "No remote OMP" and not idle[1].actions, "unfocused card offers a target action")
+		f.setTransfers({ { id = string.rep("x", 200), viewId = f.viewId, phase = "uploading", names = { "a.bin" }, bytesSent = 1, totalBytes = 4 } })
 		view = widget.render({ pane = f.original })
 		assert(view.text == "25%" and view.value == 0.25 and view.icon == "arrow-up", "upload progress missing from widget")
-		assert(string.split(view.title, "\n")[3] == "Transfers: Uploading 25%", "Transfers is not the first detail row")
-		assert(f.sheets.card:find("nth-child(3)::after", 1, true), "progress meter targets another row")
-		assert(f.sheets.card:find("var(--accent) 25.0%", 1, true), "card progress meter missing")
+		local transfer = nil
+		for index, row in view.card do if row.label == "a.bin" then transfer = { index = index, row = row } end end
+		assert(transfer and transfer.row.text == "Uploading 25%" and #transfer.row.id <= 64 and transfer.row.actions[1].id == "cancel", "transfer row missing")
+		assert(row("transfers").actions[1].id == "history", "transfer history unreachable")
 		local segments = f.status()
 		assert(segments and segments[#segments].text:find("Uploading 25%", 1, true), "unplaced widget removed Plugin segments")
-		f.binding("client-A", { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 1)
-		f.setTransfers({})
-		view = widget.render({ pane = f.original })
-		assert(view.text == "Desk Mac" and view.icon == "monitor" and string.split(view.title, "\n")[1] == "Desk Mac: Agent device")
-		assert(not f.sheets.card:find("--accent", 1, true), "finished upload left the progress meter")
 		f.widgetBar = { { id = "cpu" }, { id = "omp-client-bridge/bridge" } }
 		f.poll()
 		assert(f.status() == nil, "placed widget still duplicated in Plugin segments")
-		assert(widget.render({ pane = f.original }).text == "Desk Mac")
 	end)
 
 	case("default Toggle Bridge opens the Bridge menu, never a panel, and acts on its pinned OMP", function(f)
@@ -2832,7 +2847,7 @@ function run(entry, loadModule)
 		f.invoke("devices")
 		assert(#f.creations == 0 and #f.picks == 1, "device command opened the floating panel")
 		local items = f.picks[1].options.items
-		assert(items[1].key == "none" and items[1].current and items[2].key == "d1" and not items[2].offline and items[3].offline)
+		assert(items[1].key == "none" and items[1].current and items[2].key == "d1" and items[3].detail:find("Offline", 1, true))
 		for _, item in items do assert(item.label ~= "client-A" and item.detail ~= "client-A", "device identity reached the chooser") end
 		f.choose("key", "d2")
 		assert(#f.binds() == 0 and #f.errors == 0, "offline device was bound")
@@ -2864,6 +2879,72 @@ function run(entry, loadModule)
 		f.invoke("legacy-panel")
 		assert(f.legacyPanel == nil and #f.errors == 1, "unreadable setting was overwritten")
 	end)
+	case("card buttons act on the focused card's OMP and re-validate before acting", function(f)
+		f.legacyPanel = nil
+		f.warm()
+		local devices = { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }, { id = "client-B", name = "Old Mac", online = false, platform = "darwin" } }
+		f.binding(nil, devices, 5)
+		local function act(row, action) return f.invoke("widget_action", { widget = "bridge", row = row, act = action }) end
+		local function cardRow(field, value)
+			for _, row in f.widgets.bridge.render({ pane = f.original }).card do if row[field] == value then return row end end
+			error("card row missing: " .. value)
+		end
+		-- Paste: one clipboard capture for the card's OMP, without a second dialog;
+		-- the button reads Applying… until the capture returns.
+		assert(act("omp", "paste") == true)
+		local capture = f.take("/v1/captures/clipboard")
+		assert(cardRow("id", "omp").actions[1].label:find("Applying…", 1, true), "in-flight paste not labelled")
+		assert(act("omp", "paste") == true)
+		f.noRequest("/v1/captures/clipboard")
+		f.respond(capture, { kind = "text", text = "card paste" })
+		local resolve = f.take("/v1/intents", f.viewId)
+		assert(resolve.body.destinationId == "destination-A", "card paste retargeted")
+		f.resolve(resolve, "session-A", "draft-A")
+		local paste = f.take("/v1/intents", f.viewId)
+		assert(paste.body.kind == "paste" and paste.body.text == "card paste" and paste.body.draftToken == "draft-A")
+		f.respond(paste, { id = "paste-1" })
+		assert(#f.picks == 0 and #f.prompts == 0 and not cardRow("id", "omp").actions[1].label:find("Applying…", 1, true))
+		-- An offline device's Use binds nothing; an online one binds after a fresh resolve.
+		assert(act("agent", "toggle"))
+		local offline = cardRow("label", "Old Mac").id
+		local online = cardRow("label", "Desk Mac").id
+		assert(act(offline, "use") == true)
+		assert(#f.binds() == 0 and #f.errors == 0, "offline device was bound")
+		assert(act(online, "use") == true)
+		assert(#f.binds() == 0, "card bound before fresh conversation validation")
+		assert(cardRow("id", online).actions[1].label:find("Applying…", 1, true), "in-flight bind not labelled")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		local bind = f.take("/v1/intents", f.viewId)
+		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 5)
+		act(online, "use"); f.noRequest("/v1/intents") -- The accepted disclosure was retired.
+		-- Transfer ids beyond Tern's 64-character row id still cancel the right one, once.
+		local long = string.rep("t", 120)
+		f.setTransfers({ { id = long, viewId = f.viewId, phase = "uploading", names = { "big.bin" }, bytesSent = 1, totalBytes = 8 } })
+		local transfer = cardRow("label", "big.bin")
+		assert(act(transfer.id, "cancel") == true)
+		local cancel = f.take("/v1/transfers/cancel")
+		assert(cancel.body.id == long)
+		assert(cardRow("label", "big.bin").actions[1].label:find("Applying…", 1, true), "in-flight cancel not labelled")
+		assert(act(transfer.id, "cancel") == true)
+		f.noRequest("/v1/transfers/cancel")
+		f.respond(cancel, { ok = true })
+		assert(not cardRow("label", "big.bin").actions[1].label:find("Applying…", 1, true))
+		-- An approval answers with the chosen option, once.
+		f.approval("device-approval")
+		local approval = cardRow("label", "Approve client tool?")
+		assert(approval.actions[1].id == "c1" and approval.actions[2].id == "reject")
+		assert(act(approval.id, "c1") == true)
+		local reply = f.take("/v1/interactions/reply")
+		assert(reply.body.id == "device-approval" and reply.body.choice == "allow-once")
+		local pending = cardRow("label", "Approve client tool?")
+		assert(pending.actions[1].label:find("Applying…", 1, true) and not pending.actions[2].label:find("Applying…", 1, true), "only the chosen approval button is busy")
+		assert(act(approval.id, "reject") == true)
+		f.noRequest("/v1/interactions/reply")
+		-- The footer opens the menu; unknown actions are left to Tern.
+		assert(act("bridge", "menu") == true and #f.picks == 1)
+		assert(act("unknown", "x") == false)
+	end)
+
 
 	print("PASS: " .. tostring(passed) .. " synthetic SDK-boundary cases executing shipped window.luau; native Tern/clipboard/editor acceptance remains separate")
 end

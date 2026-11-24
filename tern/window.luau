@@ -571,8 +571,9 @@ end
 local function pasteClipboard(target)
 	local request = { target = target }
 	clipboardRequest = request
+	refreshChrome() -- The card's Paste reads Applying… and Upload greys until the capture returns.
 	api("POST", "/v1/captures/clipboard", { kind = "clipboard" }, function(capture, err, fresh)
-		if clipboardRequest == request then clipboardRequest = nil end
+		if clipboardRequest == request then clipboardRequest = nil; refreshChrome() end
 		if err then if not request.cancelled then report(fresh, err) end; return end
 		if request.cancelled then
 			if capture.kind == "files" then release(capture.id) end
@@ -587,6 +588,7 @@ end
 local function uploadFile(cx, target)
 	api("POST", "/v1/captures/pick-file", { kind = "files" }, function(capture, err, fresh)
 		filePickerOpen = false
+		refreshChrome()
 		if err then report(fresh, err); return end
 		if capture.cancelled then return end
 		if not fresh or not liveTarget(target) then
@@ -614,6 +616,7 @@ local function uploadRemote(cx, explicit)
 	target = pinDestination(cx, target)
 	if not target then return end
 	filePickerOpen = true
+	refreshChrome()
 	uploadFile(cx, target)
 end
 
@@ -1329,9 +1332,24 @@ local function setLegacyPanel(cx, enabled)
 		or "Legacy floating panel disabled; Toggle Bridge opens the Bridge menu")
 end
 
--- The human chooses in this window's native picker; the fresh resolve must still
--- match the exact choices shown before anything is bound.
-local deviceBinding = false
+-- The human chooses in this window (native picker or widget card); the fresh
+-- resolve must still match the exact choices shown before anything is bound.
+local deviceBinding = false -- the chosen option key while its bind is in flight
+local function applyDeviceChoice(cx, target, selection, key, accepted)
+	if deviceBinding or key == selection.current or selection.clients[key] == nil then return end
+	local offered = nil
+	for _, option in selection.options do if option.key == key then offered = option end end
+	if not offered then return end
+	if offered.disabled then cx:toast("info", "OMP Client Bridge", "That device is offline; nothing was bound"); return end
+	local function valid(live)
+		return live ~= nil and selection.available and destination(live, target) ~= nil
+			and sameSnapshot(selection, deviceSelection({ target = target }))
+	end
+	if not valid(cx) then report(cx, "Device choices changed while they were shown; nothing was bound"); return end
+	deviceBinding = key
+	refreshChrome()
+	bindDevice(selection, key, valid, accepted or function() end, function() deviceBinding = false; refreshChrome() end)
+end
 local function chooseDevice(cx, target)
 	local selection = deviceSelection({ target = target })
 	if not selection.available then
@@ -1344,19 +1362,11 @@ local function chooseDevice(cx, target)
 	local items = {}
 	for _, option in selection.options do
 		table.insert(items, { label = option.label, detail = option.detail, icon = option.key == "none" and "link" or "monitor",
-			current = option.key == selection.current, key = option.key, offline = option.disabled })
+			current = option.key == selection.current, key = option.key })
 	end
 	cx:pick({ items = items, icon = "monitor", action = "use", placeholder = "Agent device for " .. publicText(target.title, "this OMP") }):next(function(item, err, fresh)
 		if err then report(fresh, err); return end
-		if not item or not fresh or item.key == selection.current or deviceBinding then return end
-		if item.offline then fresh:toast("info", "OMP Client Bridge", "That device is offline; nothing was bound"); return end
-		local function valid(live)
-			return live ~= nil and selection.clients[item.key] ~= nil and destination(live, target) ~= nil
-				and sameSnapshot(selection, deviceSelection({ target = target }))
-		end
-		if not valid(fresh) then report(fresh, "Device choices changed while the chooser was open; nothing was bound"); return end
-		deviceBinding = true
-		bindDevice(selection, item.key, valid, function() end, function() deviceBinding = false end)
+		if item and fresh then applyDeviceChoice(fresh, target, selection, item.key) end
 	end)
 end
 
@@ -1582,59 +1592,186 @@ local function statusSegments(viewId)
 end
 
 -- The widget reads only values cached here, so its render stays a pure lookup.
--- Its hover card is Tern's plugin card: one row per `title` line, `Key: value`
--- in two columns, anything else across the row. Each card model carries the
--- row marks its sheet styles; the sheet follows the focused pane's model, the
--- only card Tern can show.
+-- Its hover card is Tern's native plugin card (0.9.27+): rows with a label,
+-- text, tone and up to three buttons whose clicks arrive as `widget_action`.
+-- A card model keeps what its buttons act on, and every click re-validates
+-- against live state before acting. Row positions feed the card sheet.
 local widgetId = "bridge"
 local widgetByPane, cardByPane, widgetPlaced = {}, {}, false
 local toneRank = { error = 4, warn = 3, accent = 2, ok = 1, muted = 0 }
-local function plain(text, fallback) return (publicText(text, fallback):gsub(": ", " — ")) end
+-- Leave room for transfer, approval, repair and overflow actions within Tern's 32-row cap.
+local MAX_DEVICE_ROWS, MAX_TRANSFER_ROWS, MAX_APPROVAL_ROWS = 10, 5, 3
+local cancelling, replying = {}, {}
 local function cardLive() return connection ~= nil and not serviceUnavailable and state ~= nil end
--- Hero (device or state, with a caption), one context line, optional details
--- (Transfers first), and a click hint last.
+-- Card text is capped at `limit` characters (200 for rows, 64 for buttons). Tern
+-- silently drops a row that breaks a bound, so empty text takes the fallback.
+local function cardText(value, fallback, limit)
+	local text = publicText(value, fallback)
+	if text:match("^%s*$") then text = fallback or "" end
+	local cap = limit or 200
+	local length = utf8.len(text)
+	if length and length > cap then text = text:sub(1, utf8.offset(text, cap) - 1) .. "…" end
+	return text
+end
+-- Row ids are capped at 64 characters; broker ids reach 256. Keep a stable short
+-- key per live transfer or approval so a click never retargets another item.
+local cardKeys, cardIds, cardKeySerial = {}, {}, 0
+local function cardKey(prefix, id)
+	local key = cardKeys[prefix .. id]
+	if not key then
+		cardKeySerial += 1
+		key = prefix .. tostring(cardKeySerial)
+		cardKeys[prefix .. id], cardIds[key] = key, id
+	end
+	return key
+end
+local function pruneCardKeys()
+	local live = {}
+	for _, item in state and state.transfers or {} do live["t" .. item.id] = true end
+	for _, request in state and state.interactions or {} do live["a" .. request.id] = true end
+	for name, key in cardKeys do
+		if not live[name] then cardKeys[name], cardIds[key] = nil, nil end
+	end
+end
+local transferPhaseText = { captured = "Preparing", uploading = "Uploading", ready = "Handing to OMP" }
+
+-- WidgetCardButton has only id and label. Paint monochrome marks as text, so
+-- losing the sheet never loses either the icon or the action's name.
+local glyph = { paste = "⧉", upload = "↑", device = "▣", use = "✓", cancel = "×", history = "↺", setup = "⚙", menu = "⋯", review = "→" }
+local function addRow(model, row, style)
+	table.insert(model.rows, row)
+	local index = #model.rows
+	model.styles[index] = style or row.id
+	for position, button in row.actions or {} do
+		if button.icon then button.label = glyph[button.icon] .. "  " .. cardText(button.label, "Action", 61) end
+		if button.disabled then table.insert(model.disabled, { row = index, button = position }) end
+		button.icon, button.disabled = nil, nil
+	end
+	return index
+end
+
+-- Like the floating panel's select: opening the list grants no binding authority.
+-- A new disclosure gets new row ids even when another list also contains d1.
+local disclosure, disclosureSerial = nil, 0
+local function addDeviceField(model, viewId, view)
+	local selection = deviceSelection({ target = model.target })
+	model.selection = selection
+	local name, meta = view and "Unavailable device" or "Resolving…", "Unavailable"
+	for _, opt in selection.options do
+		if view and opt.key == selection.current then
+			name = opt.label
+			if opt.key == "none" then meta = "Agent-host only"
+			elseif opt.disabled then meta = "Offline"
+			elseif state.device and selection.clients[opt.key] == state.device.id then meta = "This device"
+			else meta = "Online" end
+			break
+		end
+	end
+	if disclosure and disclosure.viewId == viewId then
+		if selection.available and sameSnapshot(disclosure.selection, selection) then model.disclosure = disclosure else disclosure = nil end
+	end
+	addRow(model, { id = "agent-caption", label = "Agent device", text = meta })
+	addRow(model, { id = "agent", text = cardText(name, "Unavailable device"), actions = {
+		{ id = "toggle", label = name, icon = "device", disabled = not selection.available },
+	} })
+	if not model.disclosure then return end
+	for index, opt in selection.options do
+		if index > MAX_DEVICE_ROWS then
+			addRow(model, { id = "devices-more", text = tostring(#selection.options - MAX_DEVICE_ROWS) .. " more devices",
+				actions = { { id = "choose", label = "Choose…", icon = "review" } } })
+			break
+		end
+		local current = opt.key == selection.current
+		addRow(model, { id = disclosure.prefix .. opt.key, label = cardText(opt.label, "Device"),
+			text = cardText(opt.detail .. (current and " · In use" or "")), tone = current and "ok" or (opt.disabled and "muted" or nil),
+			actions = if current then nil else { { id = "use", icon = "use", label = deviceBinding == opt.key and "Applying…" or "Use",
+				disabled = opt.disabled or deviceBinding ~= false } } }, "choice")
+	end
+end
+
 local function cardModel(viewId, segments)
 	local primary = segments[1]
-	local headline = plain(primary.text:match("^(.-) · ") or primary.text)
-	local headTone = primary.tone == "error" and "bad" or (primary.tone == "warn" and "warn" or nil)
+	local headline = cardText(primary.text:match("^(.-) · ") or primary.text)
+	local model = { rows = {}, styles = {}, disabled = {}, meters = {} }
 	if not cardLive() then
 		local detail = (setupBusy or setupChecking) and setupInfo and setupInfo.message or recovery.message or connectionMessage
-		return { lines = { headline, plain(detail, "Bridge is not running on this device"), "Click to set up or repair Bridge" },
-			tone = headTone, marks = {} }
+		addRow(model, { id = "identity", label = headline, text = cardText(detail, "Bridge is not running on this device"), tone = primary.tone })
+		addRow(model, { id = "bridge", text = "Bridge actions", actions = {
+			{ id = "setup", label = "Set up…", icon = "setup", disabled = setupBusy or setupChecking },
+		} })
+		return model
 	end
 	local target = viewId and targets[viewId]
 	local view = viewId and state.views[viewId]
-	local hero, context, tone = "No remote OMP", "Focus a remote OMP pane to use Bridge", nil
+	local connected = state.connected == true
+	local problem = statusError or panelError
 	if target then
+		model.target = target
 		local folder = type(target.cwd) == "string" and target.cwd:match("([^/\\]+)[/\\]*$")
-		context = plain(publicText(target.title, "Remote OMP") .. (folder and (" · " .. publicText(folder)) or ""))
-		hero = "Resolving…"
-		if view then
-			local bound = view.state.binding.clientId
-			if bound == nil or bound == tern.json.null then hero = "Unbound: Agent device"
-			else
-				local online = false
-				for _, device in view.state.devices do if device.id == bound then online = device.online == true end end
-				local caption = not online and "Offline" or (state.device and bound == state.device.id and "This device") or "Agent device"
-				hero = plain(deviceName(view, bound)) .. ": " .. caption
-				if not online then tone = "warn" end
-			end
+		addRow(model, { id = "identity", label = cardText(state.serverName, "Remote host"), text = "Remote OMP" })
+		addRow(model, { id = "destination", label = cardText(folder, "Remote session"), text = cardText(target.title, "Remote OMP") })
+		addRow(model, { id = "source", label = "From this device", text = cardText(state.device and state.device.name, "This device") })
+		local busy = not connected or clipboardRequest ~= nil or filePickerOpen
+		addRow(model, { id = "omp", text = "Transfer actions", actions = {
+			{ id = "paste", label = clipboardRequest and "Applying…" or "Paste", icon = "paste", disabled = busy },
+			{ id = "upload", label = filePickerOpen and "Selecting…" or "Upload…", icon = "upload", disabled = busy },
+		} })
+		addDeviceField(model, viewId, view)
+	else
+		addRow(model, { id = "identity", label = "No remote OMP", text = "Focus a remote OMP pane to use Bridge" })
+	end
+	if problem or not connected or (primary.command == action .. "setup") then
+		addRow(model, { id = "notice", text = cardText(problem or headline), tone = problem and "error" or "warn" })
+	end
+	local history = { id = "transfers", text = "No active transfers", actions = { { id = "history", label = "History…", icon = "history" } } }
+	addRow(model, history)
+	local shown, failed = 0, 0
+	for _, item in state.transfers do
+		if target and item.viewId ~= target.viewId then continue end
+		if item.phase == "failed" then failed += 1 end
+		if transferPhaseText[item.phase] then
+			shown += 1
+			if shown > MAX_TRANSFER_ROWS then continue end
+			local size, sent = publicCount(item.totalBytes), publicCount(item.bytesSent)
+			local fraction = item.phase == "uploading" and size > 0 and math.min(sent / size, 1) or nil
+			local at = addRow(model, { id = cardKey("t", item.id), label = cardText(item.names and item.names[1], "Transfer"), tone = "accent",
+				text = transferPhaseText[item.phase] .. (fraction and (" " .. tostring(math.floor(fraction * 100)) .. "%") or ""),
+				actions = { { id = "cancel", label = cancelling[item.id] and "Applying…" or "Cancel", icon = "cancel", disabled = cancelling[item.id] ~= nil } } }, "transfer")
+			if fraction then model.meters[at] = fraction end
 		end
 	end
-	-- Link and setup states outrank the device; an error replaces the context.
-	if not (primary.text:find("^Connected") or primary.text:find("^Device offline")) then hero, tone = headline, headTone end
-	local marks = {}
-	if statusError or panelError then context, tone, marks.problem = plain(statusError or panelError), "bad", true end
-	local lines = { hero, context }
-	if transferSummary.text then table.insert(lines, "Transfers: " .. transferSummary.text); marks.transfers = #lines end
-	if transferSummary.failed > 0 then table.insert(lines, "Failed transfers: " .. tostring(transferSummary.failed)) end
-	if #state.interactions > 0 then table.insert(lines, "Pending approvals: " .. tostring(#state.interactions)) end
-	for index = 2, #segments do
-		if segments[index].command == action .. "setup" then table.insert(lines, "Update: " .. segments[index].text) end
+	if shown > 0 or failed > 0 then history.text = shown > MAX_TRANSFER_ROWS and ("Transfers · " .. tostring(shown)) or "Transfers" end
+	if failed > 0 then addRow(model, { id = "failed", label = "Failed transfers", text = tostring(failed), tone = "error" }) end
+	for index, request in state.interactions do
+		if index > MAX_APPROVAL_ROWS then
+			addRow(model, { id = "approvals-more", label = "Approvals", text = tostring(#state.interactions - MAX_APPROVAL_ROWS) .. " more",
+				actions = { { id = "review", label = "Review…", icon = "review" } } })
+			break
+		end
+		local busy = openApprovals[request.id] ~= nil or replying[request.id] ~= nil
+		local actions = {}
+		if #request.choices <= 2 then
+			for position, choice in request.choices do
+				table.insert(actions, { id = "c" .. tostring(position), label = replying[request.id] == "c" .. tostring(position) and "Applying…"
+					or cardText(choice.label, "Option", 61), icon = "review", disabled = busy })
+			end
+			table.insert(actions, { id = "reject", label = replying[request.id] == "reject" and "Applying…" or "Reject", icon = "cancel", disabled = busy })
+		else
+			actions = { { id = "review", label = "Review…", icon = "review", disabled = busy } }
+		end
+		addRow(model, { id = cardKey("a", request.id), label = cardText(request.title, "Approval"),
+			text = cardText(request.message, "Approval requested"), tone = "warn", actions = actions }, "approval")
 	end
-	if #lines > 2 then marks.section = 3 end
-	table.insert(lines, "Click for Bridge actions")
-	return { lines = lines, tone = tone, marks = marks }
+	for index = 2, #segments do
+		if segments[index].command == action .. "setup" then
+			addRow(model, { id = "update-" .. tostring(index), label = "Update", text = cardText(segments[index].text), tone = "warn" })
+		end
+	end
+	addRow(model, { id = "bridge", text = "Bridge actions", actions = {
+		{ id = "setup", label = "Setup…", icon = "setup", disabled = setupBusy or setupChecking },
+		{ id = "menu", label = "More…", icon = "menu" },
+	} })
+	return model
 end
 local function widgetView(viewId, segments, short)
 	local primary = segments[1]
@@ -1643,56 +1780,113 @@ local function widgetView(viewId, segments, short)
 		if (toneRank[segment.tone] or 0) > (toneRank[tone] or 0) then tone = segment.tone end
 	end
 	local card = cardModel(viewId, segments)
+	local lines = {}
+	for _, row in card.rows do table.insert(lines, row.label and (row.label .. " · " .. row.text) or row.text) end
 	local progress = cardLive() and transferSummary.text and transferSummary.progress or nil
 	return { text = progress and (tostring(math.floor(progress * 100)) .. "%") or short,
-		icon = progress and "arrow-up" or primary.icon, tone = tone,
-		title = table.concat(card.lines, "\n"), command = primary.command, value = progress }, card
+		icon = progress and "arrow-up" or primary.icon, tone = tone, title = table.concat(lines, "\n"),
+		command = primary.command, value = progress, card = card.rows }, card
 end
 local defaultWidget, defaultCard = widgetView(nil, statusSegments(nil))
 
--- Card sheet in the TURN Relay plugin's card language: status pill, large hero
--- with a caption, ruled detail section and a flush footer. Only fixed words and
--- numbers enter it; every user or remote string stays in the card's own text.
 local cardRoot = ".kit-popover.wgc[data-widget='omp-client-bridge/" .. widgetId .. "']"
+local cardBase = cardRoot .. [=[ {
+ width: 332px; max-width: calc(100vw - 16px);
+ & .wgc-head { padding: 9px 14px; align-items: center; }
+ & .wgc-head::after { content: var(--bridge-status); flex: none; color: var(--bridge-status-color); font: 550 11px/16px var(--sans); }
+ & .wgc-plugin-rows { padding: 10px 14px; max-height: min(580px, calc(100vh - 98px)); overflow-y: auto; }
+ & .wgc-plugin-row { min-width: 0; gap: 6px; }
+ & .wgc-plugin-row .wgc-k { min-width: 0; color: var(--t1); font: 550 12px/16px var(--sans); }
+ & .wgc-plugin-row .wgc-plugin-v { min-width: 0; text-align: right; font: 12px/16px var(--sans); }
+ & .wgc-plugin-act { min-width: 0; padding: 0 5px; font: 500 11.5px/16px var(--sans); }
+}]=]
+local cardRowStyles = {
+	["identity"] = [=[
+		flex-direction: column; align-items: stretch; justify-content: center; gap: 1px;
+		& .wgc-k, & .wgc-plugin-v { flex: none; max-width: none; width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+		position: relative; padding-left: 42px; min-height: 34px;
+		& .wgc-k { font: 600 14px/18px var(--sans); }
+		& .wgc-plugin-v { color: var(--t3); font-size: 11px; }
+		&::before { content: ""; position: absolute; left: 0; top: 1px; width: 32px; height: 32px; border-radius: var(--r-ctl); background: radial-gradient(circle at 12px 13px, var(--t3) 0 1.2px, transparent 1.5px), radial-gradient(circle at 12px 19px, var(--t3) 0 1.2px, transparent 1.5px), linear-gradient(var(--t3),var(--t3)) 8px 9px/16px 1.5px no-repeat, linear-gradient(var(--t3),var(--t3)) 8px 15.5px/16px 1.5px no-repeat, linear-gradient(var(--t3),var(--t3)) 8px 22px/16px 1.5px no-repeat, linear-gradient(var(--t3),var(--t3)) 8px 9px/1.5px 14px no-repeat, linear-gradient(var(--t3),var(--t3)) 22.5px 9px/1.5px 14px no-repeat, var(--raise); }
+	]=],
+	["destination"] = [=[
+		flex-direction: column; align-items: stretch; justify-content: center; gap: 1px;
+		& .wgc-k, & .wgc-plugin-v { flex: none; max-width: none; width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+		margin: 10px 0; padding-left: 10px; border-left: 2px solid var(--l2);
+		& .wgc-plugin-v { color: var(--t3); }
+	]=],
+	["source"] = [=[
+		& .wgc-k { color: var(--t3); font-weight: 400; font-size: 11px; }
+		& .wgc-plugin-v { font: 11px/15px var(--mono); color: var(--t2); }
+	]=],
+	["omp"] = [=[
+		justify-content: flex-start; padding-top: 4px; gap: 7px;
+		& .wgc-plugin-v { display: none; }
+		& .wgc-plugin-act { flex: none; height: 28px; padding: 0 12px; font-size: 12px; border-radius: var(--r-chip); border: 1px solid var(--l2); background: var(--raise); color: var(--t1); }
+		& .wgc-plugin-act:first-of-type { background: var(--accent-fill); border-color: transparent; color: white; }
+	]=],
+	["agent-caption"] = [=[
+		margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--l2);
+		& .wgc-plugin-v { color: var(--t3); font-size: 11px; }
+	]=],
+	["agent"] = [=[
+		margin-top: 4px;
+		& .wgc-plugin-v { display: none; }
+		& .wgc-plugin-act { width: 100%; display: flex; justify-content: flex-start; align-items: center; height: 30px; padding: 0 9px; overflow: hidden; text-overflow: ellipsis; border: 1px solid var(--l2); border-radius: var(--r-ctl); color: var(--t1); background: var(--card); text-align: left; font: 500 12px/16px var(--sans); }
+		& .wgc-plugin-act::after { content: "▾"; margin-left: auto; color: var(--t3); }
+	]=],
+	["transfers"] = [=[
+		margin-top: 10px; padding-top: 7px; border-top: 1px solid var(--l2);
+		& .wgc-plugin-v { text-align: left; font-weight: 550; }
+	]=],
+	["transfer"] = [=[
+		display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 6px; padding: 5px 0 9px; position: relative;
+		& .wgc-k, & .wgc-plugin-v { max-width: none; text-align: left; }
+		& .wgc-plugin-v { grid-column: 1; font-size: 11px; }
+		& .wgc-plugin-act { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+	]=],
+	["approval"] = [=[
+		display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px; padding: 7px 0;
+		& .wgc-k, & .wgc-plugin-v { flex: 0 0 100%; max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+	]=],
+	["bridge"] = [=[
+		margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--l1); justify-content: flex-end;
+		& .wgc-plugin-v { display: none; }
+	]=],
+	["choice"] = [=[
+		display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 6px; padding: 4px 3px; position: relative;
+		& .wgc-k, & .wgc-plugin-v { max-width: none; text-align: left; }
+		& .wgc-plugin-v { grid-column: 1; font-size: 11px; color: var(--t3); }
+		& .wgc-plugin-act { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+	]=],
+	["notice"] = [=[
+		padding: 5px 0;
+		& .wgc-plugin-v { text-align: left; white-space: normal; overflow-wrap: anywhere; }
+	]=],
+}
 local cardSheet = nil
 local function updateCardStyle(card)
 	if type(tern.css) ~= "function" then return end
-	local function row(index) return cardRoot .. " .wgc-row:nth-child(" .. index .. ")" end
-	local label, pill = "Offline", "--warn"
+	local function row(index) return cardRoot .. " .wgc-plugin-row:nth-child(" .. index .. ")" end
+	local label, color = "Offline", "--warn"
 	if setupRequired or setupBusy or setupChecking then label = "Setup"
 	elseif cardLive() and state.connected == true then
-		if statusError or panelError then label, pill = "Attention", "--bad" else label, pill = "Online", "--ok" end
+		if statusError or panelError then label, color = "Attention", "--bad" else label, color = "Connected", "--ok" end
 	end
-	local heroColor = card.tone == "bad" and "var(--bad)" or (card.tone == "warn" and "var(--warn)" or "var(--t1)")
-	local css = {
-		cardRoot .. " .wgc-sec { border-top: 0; padding-top: 0; }",
-		cardRoot .. " .wgc-head::after { content: \"" .. label .. "\"; flex: none; height: 20px; line-height: 20px;"
-			.. " padding: 0 8px 0 17px; margin-right: -2px; border-radius: 999px; font-size: 11.5px; color: var(--t2);"
-			.. " background: radial-gradient(circle at 9px 50%, var(" .. pill .. ") 0 3px, transparent 3.5px), rgb(from var("
-			.. pill .. ") r g b / 12%); }",
-		cardRoot .. " .wgc-v { max-width: 70%; overflow: hidden; text-overflow: ellipsis; }",
-		row(1) .. " { min-height: 34px; line-height: 30px; align-items: baseline; }",
-		row(1) .. " .wgc-k { flex: 0 1 auto; font: 600 22px/30px var(--sans); letter-spacing: -0.01em; color: " .. heroColor .. "; }",
-		row(1) .. " .wgc-v { margin-left: auto; font: 11.5px var(--mono); color: var(--t3); }",
-		row(2) .. " { min-height: 0; line-height: 16px; }",
-		row(2) .. " .wgc-k { white-space: normal; font-size: 12px; color: " .. (card.marks.problem and "var(--bad)" or "var(--t3)") .. "; }",
-		cardRoot .. " .wgc-row:last-child { margin: 8px -12px -8px; padding: 7px 12px 8px; min-height: 18px; line-height: 18px;"
-			.. " border-top: 1px solid var(--l1); }",
-		cardRoot .. " .wgc-row:last-child .wgc-k { font: 11.5px var(--sans); color: var(--t3); }",
-	}
-	if card.marks.section then
-		table.insert(css, row(card.marks.section) .. " { margin: 8px -12px 2px; padding: 8px 12px 0; border-top: 1px solid var(--l1); }")
-		table.insert(css, row(card.marks.section) .. " .wgc-k { font-weight: 550; color: var(--t2); }")
-		table.insert(css, row(card.marks.section) .. " .wgc-v { font: 11.5px var(--sans); color: var(--t3); }")
+	-- Only fixed style names and numbers enter the sheet. Remote labels stay in native text nodes.
+	local css = { cardBase, cardRoot .. ' { --bridge-status: "● ' .. label .. '"; --bridge-status-color: var(' .. color .. '); }' }
+	for index, style in card.styles do
+		local rules = cardRowStyles[style]
+		if rules then table.insert(css, row(index) .. " { " .. rules .. " }") end
+		if style == "agent" and card.disclosure then table.insert(css, row(index) .. ' .wgc-plugin-act::after { content: "▴"; }') end
 	end
-	local progress = card.marks.transfers and transferSummary.progress
-	if progress then
-		local percent = string.format("%.1f%%", progress * 100)
-		local inset = card.marks.transfers == card.marks.section and "12px" or "0"
-		table.insert(css, row(card.marks.transfers) .. " { position: relative; padding-bottom: 12px; }")
-		table.insert(css, row(card.marks.transfers) .. "::after { content: \"\"; position: absolute; left: " .. inset .. "; right: "
-			.. inset .. "; bottom: 3px; height: 4px; border-radius: 999px; background: linear-gradient(to right, var(--accent) "
-			.. percent .. ", var(--l2) " .. percent .. "); }")
+	for index, fraction in card.meters do
+		local percent = string.format("%.1f%%", fraction * 100)
+		table.insert(css, row(index) .. '::after { content: ""; position: absolute; left: 0; right: 0; bottom: 1px; height: 3px; border-radius: 3px;'
+			.. " background: linear-gradient(to right, var(--accent) " .. percent .. ", var(--l2) " .. percent .. "); }")
+	end
+	for _, mark in card.disabled do
+		table.insert(css, row(mark.row) .. " .wgc-plugin-act:nth-of-type(" .. mark.button .. ") { opacity: 0.45; pointer-events: none; }")
 	end
 	local sheet = table.concat(css, "\n")
 	if sheet ~= cardSheet and pcall(tern.css, "card", sheet) then cardSheet = sheet end
@@ -1707,6 +1901,13 @@ local function widgetPlacedIn(cx)
 	return false
 end
 
+-- The card on screen belongs to the focused pane (the panel maps to its owner).
+local function focusedCard(cx)
+	local ok, focused = pcall(function() return cx.session:focused() end)
+	local pane = ok and focused and (panel and focused == panel.pane and panel.target.pane or focused)
+	return pane and cardByPane[pane] or defaultCard
+end
+
 local chromeQueued = nil
 refreshChrome = function()
 	local now = tern.now()
@@ -1718,6 +1919,7 @@ refreshChrome = function()
 		-- Release before computing or refreshing; a dropped defer is replaced
 		-- after its lease by the independent polling driver.
 		chromeQueued = nil
+		pruneCardKeys()
 		local defaultShort
 		defaultStatus, defaultShort = statusSegments(nil)
 		defaultWidget, defaultCard = widgetView(nil, defaultStatus, defaultShort)
@@ -1733,9 +1935,7 @@ refreshChrome = function()
 		if cx then
 			widgetPlaced = widgetPlacedIn(cx)
 			-- Tern shows one card, the focused pane's: style exactly that model.
-			local ok, focused = pcall(function() return cx.session:focused() end)
-			local pane = ok and focused and (panel and focused == panel.pane and panel.target.pane or focused)
-			updateCardStyle(pane and cardByPane[pane] or defaultCard)
+			updateCardStyle(focusedCard(cx))
 		end
 		tern.chrome.refresh()
 	end)
@@ -1749,7 +1949,7 @@ end)
 if type(tern.chrome.widget) == "function" then
 	tern.chrome.widget(widgetId, {
 		name = "OMP Bridge",
-		description = "Connection, agent device and transfers for the focused remote OMP; click for Bridge actions",
+		description = "Connection, agent device, transfers and approvals for the focused remote OMP, with their actions",
 		icon = "plug",
 		styles = { "text", "ring" },
 		render = function(info)
@@ -1759,6 +1959,88 @@ if type(tern.chrome.widget) == "function" then
 		end,
 	})
 end
+
+local function cancelTransfer(id)
+	local item = nil
+	for _, candidate in state and state.transfers or {} do if candidate.id == id then item = candidate end end
+	if not item or not transferPhaseText[item.phase] or cancelling[id] then return end
+	cancelling[id] = true
+	refreshChrome()
+	api("POST", "/v1/transfers/cancel", { id = id }, function(_, failure, live)
+		cancelling[id] = nil
+		if failure then report(live, failure) end
+		refreshChrome()
+	end)
+end
+
+local function replyApproval(cx, id, act)
+	local request = nil
+	for _, candidate in state and state.interactions or {} do if candidate.id == id then request = candidate end end
+	if not request or openApprovals[id] or replying[id] then return end
+	if act == "review" then interactions(cx, request); return end
+	local choice = tern.json.null
+	if act ~= "reject" then
+		local picked = request.choices[tonumber(act:match("^c(%d)$") or "")]
+		if not picked then return end
+		choice = picked.id
+	end
+	replying[id] = act
+	refreshChrome()
+	api("POST", "/v1/interactions/reply", { id = id, choice = choice }, function(_, failure, live)
+		replying[id] = nil
+		if failure then report(live, failure) end
+		refreshChrome()
+	end)
+end
+
+-- A card button is the human's own gesture in this window. It acts on what the
+-- focused card showed, re-validated against live state; a disabled-looking
+-- button is ignored here too, since the sheet cannot really disable it.
+tern.on("widget_action", function(ev, cx)
+	if ev.widget ~= widgetId or not cx then return false end
+	local card, row, act = focusedCard(cx), ev.row, ev.act
+	if row == "bridge" then
+		if act == "setup" then
+			if not setupBusy and not setupChecking then setupBridge(cx) end
+		elseif act == "menu" then openBridgeMenu(cx)
+		else return false end
+		return true
+	end
+	if row == "transfers" and act == "history" then transfers(cx, card.target); return true end
+	if row == "omp" and (act == "paste" or act == "upload") then
+		local target = card.target and destination(cx, card.target)
+		if not target then cx:toast("info", "OMP Client Bridge", "This OMP is no longer the card's target; open the card again"); return true end
+		if not (state and state.connected == true) or clipboardRequest or filePickerOpen then return true end
+		if act == "paste" then pasteRemote(cx, target) else uploadRemote(cx, target) end
+		return true
+	end
+	if row == "agent" and act == "toggle" then
+		if not card.selection or not card.selection.available or not card.target then return true end
+		if card.disclosure then disclosure = nil
+		else
+			disclosureSerial += 1
+			disclosure = { viewId = card.target.viewId, selection = card.selection, prefix = "device:" .. tostring(disclosureSerial) .. ":" }
+		end
+		refreshChrome()
+		return true
+	end
+	local opened = card.disclosure
+	if opened and disclosure == opened and act == "use" and row:sub(1, #opened.prefix) == opened.prefix then
+		applyDeviceChoice(cx, card.target, opened.selection, row:sub(#opened.prefix + 1), function()
+			if disclosure == opened then disclosure = nil; refreshChrome() end
+		end)
+		return true
+	end
+	if row == "devices-more" and act == "choose" then
+		if card.disclosure and disclosure == card.disclosure then chooseDevice(cx, card.target) end
+		return true
+	end
+	if row == "approvals-more" and act == "review" then interactions(cx); return true end
+	local id = cardIds[row]
+	if id and row:sub(1, 1) == "t" and act == "cancel" then cancelTransfer(id); return true end
+	if id and row:sub(1, 1) == "a" then replyApproval(cx, id, act); return true end
+	return false
+end)
 
 tern.on("focus", function(_, cx)
 	refreshChrome() -- The card sheet follows the newly focused pane's model.

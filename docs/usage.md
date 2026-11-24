@@ -526,20 +526,31 @@ Tern 0.9.18 and later offer the **OMP Bridge** widget to the widget bar: add it
 with palette **Edit widgets…**. The bar shows a short label: the bound device's
 name, `Unbound`, `Connected`, or a setup/connection state such as `Set up` or
 `Waiting`; while uploading it shows the percentage, filling the ring when you
-pick the ring style. Hovering it opens a read-only card: a link pill (`Online`,
-`Offline`, `Setup` or `Attention`), the agent device in large type captioned
-`Agent device`, `This device` or `Offline` (or `Unbound`, or the setup/connection
-state), the focused OMP session and folder, then only what needs attention:
-**Transfers** with an upload meter, failed transfers, pending approvals and
-client updates. The card has no buttons: Tern delivers no clicks from a
-plugin card, so actions live in the menu below. Clicking the widget, its
-status segment, or **Toggle Bridge** in the native command palette opens the
-Bridge menu for the focused remote OMP: **Paste to remote**, **Upload file…**,
-**Agent device…**, **Human transfers…**, pending approvals, **Start / repair
-Bridge**, and the legacy panel setting. Actions keep the OMP target that was
-focused when the menu opened. **Paste to remote** directly captures clipboard text
-or an image; **Upload file** directly opens the system file chooser. Both also have
-standalone palette commands; neither opens an intermediate source menu.
+pick the ring style. On Tern 0.9.27 and later, hover to open the connection card:
+
+- Check the **remote host**, workspace and conversation at the top. **From this device**
+  is the source of **Paste** and **Upload…**; it does not change when the agent binding does.
+- The **Agent device** field shows the current binding. Click the field to expand or
+  collapse its choices. Opening it does not bind a device. **Use** rechecks the
+  conversation, draft, binding revision and device choices before applying. Offline
+  devices cannot be selected. If choices change, the old list closes; reopen it to
+  select from the new list. **Choose…** opens the native picker for longer lists.
+- **Transfers** shows active files, progress, **Cancel** and **History…**. Approvals
+  show the request and its choices (or **Review…** for longer choice lists).
+  **Setup…** and **More…** are in the footer. The card shows up to ten device choices
+  when expanded, five active transfers and three approvals at once.
+
+The action symbols are part of the button labels; they need no image URLs or
+icon font. Tern 0.9.18–0.9.26 uses the read-only title and the Bridge menu.
+
+Clicking the widget, its status segment, or **Toggle Bridge** in the native
+command palette opens the Bridge menu for the focused remote OMP: **Paste to
+remote**, **Upload file…**, **Agent device…**, **Human transfers…**, pending
+approvals, **Start / repair Bridge**, and the legacy panel setting. Actions keep
+the OMP target that was focused when the menu opened. **Paste to remote** directly
+captures clipboard text or an image; **Upload file** directly opens the system
+file chooser. Both also have standalone palette commands; neither opens an
+intermediate source menu.
 
 **Assign your own shortcut:** the registered action is
 `plugin.omp-client-bridge.paste-remote` (palette: **OMP → Paste to remote**).
