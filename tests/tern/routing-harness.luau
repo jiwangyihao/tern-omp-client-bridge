@@ -266,6 +266,10 @@ function run(entry, loadModule)
 				local value = copy(assert(encoded[token], "unknown JSON token"))
 				if value.views then
 					decodedState = value
+					if f.protectBindingIds then
+						local ids = value.views[f.viewId].state.binding.clientIds
+						setmetatable(ids, { __metatable = "protected JSON array" })
+					end
 					if f.interruptAfterState then
 						f.interruptAfterState, f.interruptSleep = false, true
 					end
@@ -2739,6 +2743,7 @@ function run(entry, loadModule)
 
 	case("adding a device preserves a joined member beyond the panel display cap", function(f)
 		f.warm()
+		f.protectBindingIds = true
 		local devices = {}
 		for i = 1, 34 do devices[i] = { id = "client-" .. i, name = "Device " .. i, platform = "linux", online = i ~= 34 } end
 		f.binding({ "client-34" }, devices, 9); f.toggle()

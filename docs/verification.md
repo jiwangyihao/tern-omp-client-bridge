@@ -20,6 +20,10 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.6.1：设备选择兼容 Tern 解码的数组
+
+路由回归用例给解码后的已绑定设备 ID 数组设置受保护的元表，并检查加入设备时提交的完整成员列表与绑定版本。该用例执行实际 `window.luau`，不代表跨设备 GUI 验收。
+
 ## v0.6.0：一个会话同时绑定多个 Client（协议 3）
 
 - 在同一测试主机上启动隔离的 Broker 和三份独立 Client 服务。一份作为查看者，另外两份同时绑定在同一会话。让 B 的原生 Eval 阻塞，C 的点名调用在 B 解除阻塞前返回；两个结果分别携带各自的设备 ID。运行中移除 B 后，B 的在途结果仍归 B，新调用则不能再选择 B。

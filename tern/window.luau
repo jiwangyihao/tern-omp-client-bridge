@@ -788,7 +788,11 @@ local function deviceSelection(owned)
 		and type(binding.revision) == "number" and binding.revision >= 0 and binding.revision < math.huge
 		and binding.revision % 1 == 0
 	local ids = membership(view)
-	local members = table.freeze(table.clone(ids or {}))
+	local members = table.create(if ids then #ids else 0)
+	if ids then
+		for index, id in ids do members[index] = id end
+	end
+	table.freeze(members)
 	available = available and ids ~= nil
 	local clients, seen, labels = {}, {}, {}
 	local options = { { key = "none", label = "Clear all devices", detail = "Agent-host operations only",
