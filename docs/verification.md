@@ -20,14 +20,14 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
-## 未发布：一个会话同时绑定多个 Client（协议 3）
+## v0.6.0：一个会话同时绑定多个 Client（协议 3）
 
 - 在同一测试主机上启动隔离的 Broker 和三份独立 Client 服务。一份作为查看者，另外两份同时绑定在同一会话。让 B 的原生 Eval 阻塞，C 的点名调用在 B 解除阻塞前返回；两个结果分别携带各自的设备 ID。运行中移除 B 后，B 的在途结果仍归 B，新调用则不能再选择 B。
 - 测试覆盖：只有一个成员时省略 `clientId`；有多个成员但仅一台在线时仍必须点名；拒绝未授权设备、跨会话访问、过期的成员修改和错设备的取消请求。旧 Broker 不识别点名接口时，新调用不会重试到旧的执行入口。
 - Tern 0.9.30 原生离屏渲染器执行实际 `window.luau`。用户点击动作由原生卡片派发，Broker 回执使用隔离测试数据。加入第二台时提交 `[a,b]`，移除第一台时提交 `[b]`。窗口路由 233 项、旧面板 28 项回归通过；TypeScript 类型检查及实际 OMP 宿主的七个工具参数校验通过。
 - 未在用户的物理设备或活动会话上部署、绑定或重启服务。以上并发结果是独立客户端进程之间的验证，不是跨物理机器的验收。
 
-## 未发布：Bridge 悬停卡片对齐原悬浮面板
+## v0.6.0：Bridge 悬停卡片对齐原悬浮面板
 
 - 用户反馈前一版按钮没有图标。DOM、CSS 规则数和插件 ready 状态都不能证明图标被绘制。前一版用 SVG data URL 作遮罩；新版按钮用文字标签显示单色符号与操作名，主机标识用几何形状绘制，不加载图片。
 - 沿用悬浮面板的顺序：主机和连接状态 → 工作区与会话 → 本机来源、Paste / Upload → 当前 Agent 设备 → 传输与审批。设备选择默认收起，展开不会绑定。选项或绑定版本变动会作废已展开的列表，延迟到达的旧点击不能选择新设备。
