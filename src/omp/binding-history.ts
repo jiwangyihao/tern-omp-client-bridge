@@ -15,11 +15,11 @@ export function bindingMessage(
 ): CustomMessagePayload | undefined {
 	const details = {
 		source: SOURCE,
-		version: 1,
+		version: 2,
 		sessionId: manager.getSessionId(),
 		bindingSessionId: state.binding.sessionId,
-		bindingKey: JSON.stringify([state.binding.clientId, state.binding.revision, state.binding.change?.actor.id,
-			state.binding.change?.previousClientId, state.binding.change?.at]),
+		bindingKey: JSON.stringify([state.binding.clientIds, state.binding.revision, state.binding.change?.actor.id,
+			state.binding.change?.previousClientIds, state.binding.change?.at]),
 		serverInstance: state.serverInstance,
 	};
 	// The host projection honors the selected branch, reset boundaries and compaction.

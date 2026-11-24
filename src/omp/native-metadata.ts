@@ -7,8 +7,6 @@ import type { ToolName } from "../protocol.ts";
 export interface NativeMetadata extends Pick<ToolDefinition, "approval" | "label" | "loadMode" | "strict" | "readsSkillUris"> {
 	readonly concurrency?: "shared" | "exclusive" | ((params: Record<string, unknown>) => "shared" | "exclusive");
 	readonly formatApprovalDetails?: (args: unknown) => string[];
-	readonly customFormat?: { syntax: "lark"; definition: string };
-	readonly customWireName?: string;
 	/** Renderer-only metadata; never expose this as the registered tool's mode. */
 	readonly presentationEditMode?: InstanceType<ExtensionAPI["pi"]["EditTool"]>["mode"];
 }
@@ -55,7 +53,8 @@ export function nativeMetadata(api: Pick<ExtensionAPI, "pi">, context: () => Met
 			...("concurrency" in tool ? { concurrency: tool.concurrency } : {}),
 			...("readsSkillUris" in tool ? { readsSkillUris: tool.readsSkillUris } : {}),
 			...("formatApprovalDetails" in tool ? { formatApprovalDetails: tool.formatApprovalDetails } : {}),
-			...("customFormat" in tool ? { customFormat: tool.customFormat, customWireName: tool.customWireName } : {}),
+			// Raw-text edit wire formats cannot carry a sibling clientId. Keep the native edit
+			// payload/validator but expose the composed object schema for all providers.
 		};
 	}
 	result.edit = { ...result.edit, get presentationEditMode() { return tools.edit.mode; } };

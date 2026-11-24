@@ -133,7 +133,7 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		const state = LocalUiStateSchema.parse(await (await fetch(client.endpoint.url + "/v1/state", { headers: { authorization: `Bearer ${client.endpoint.token}` } })).json());
 		const view = state.views["fixture-view"];
 		if (!view) throw new Error("Native draft has not resolved");
-		return intent({ kind: "bind", viewId: view.viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientId: identity.device.id, expectedRevision: 0 });
+		return intent({ kind: "bind", viewId: view.viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientIds: [identity.device.id], expectedRevision: 0 });
 	}
 	try {
 		await startViewer();
@@ -165,7 +165,7 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		server = await startBroker({ stateDir });
 		const restarted = await transport.state(sessionId);
 		expect(restarted.serverInstance).not.toBe(old.serverInstance);
-		expect(restarted.binding).toMatchObject({ clientId: null, revision: 0 });
+		expect(restarted.binding).toMatchObject({ clientIds: [], revision: 0 });
 		await visible(restarted); // Real BrokerClient reconnect reads the replacement endpoint.
 		const queuedAfterRestart = queued.length;
 		firstCallback(old); // A late HTTP claim/watch callback from the retired broker.
@@ -190,7 +190,7 @@ test("broker restart resets native visible/model binding and retired callbacks c
 		await runner.emit({ type: "session_switch", reason: "new", previousSessionFile: undefined });
 		const switched = await resolveViewer();
 		expect(native.destinationId()).not.toBe(previousDestination);
-		expect(switched.binding).toMatchObject({ sessionId: manager.getSessionId(), clientId: null, revision: 0 });
+		expect(switched.binding).toMatchObject({ sessionId: manager.getSessionId(), clientIds: [], revision: 0 });
 		await visible(switched);
 		const stale = await fetch(client!.endpoint.url + "/v1/intents", { method: "POST", headers: { authorization: `Bearer ${client!.endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify({ kind: "resolve", viewId: "stale-session-view", destinationId: previousDestination }) });
 		expect(stale.ok).toBe(false);

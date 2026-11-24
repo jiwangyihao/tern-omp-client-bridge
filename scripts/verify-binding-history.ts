@@ -108,7 +108,7 @@ const watchers = new Map<string, (state: ServerState) => void>();
 const stateFor = (sessionId: string): ServerState => {
 	let state = states.get(sessionId);
 	if (!state) {
-		state = { serverInstance: "synthetic-broker", binding: { sessionId, clientId: null, revision: 0, change: null }, devices: [] };
+		state = { serverInstance: "synthetic-broker", binding: { sessionId, clientIds: [], revision: 0, change: null }, devices: [] };
 		states.set(sessionId, state);
 	}
 	return state;
@@ -528,7 +528,7 @@ try {
 	} finally { afterTransformation.abort(); }
 
 	const oldState = stateFor(manager.getSessionId());
-	const changed: ServerState = { ...oldState, binding: { ...oldState.binding, revision: 1, clientId: "synthetic-device" },
+	const changed: ServerState = { ...oldState, binding: { ...oldState.binding, revision: 1, clientIds: ["synthetic-device"] },
 		devices: [{ id: "synthetic-device", name: "Synthetic device", platform: "linux", arch: "synthetic", online: true }] };
 	states.set(manager.getSessionId(), changed);
 	watchers.get(manager.getSessionId())!(changed);

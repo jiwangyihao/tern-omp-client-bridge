@@ -10,17 +10,20 @@ function hasNativeIntersection(schema: NativeParameters): schema is NativeParame
 	return "and" in schema && typeof schema.and === "function";
 }
 
-/** Extend the installed schema, including its validators; never maintain a second Eval/Bash schema. */
-export function withTarget(schema: ToolInfo["parameters"]): ToolInfo["parameters"] {
+const CLIENT_ID = /^[A-Za-z0-9_-]{1,256}$/;
+
+/** Extend through the installed schema owner, retaining each native tool's validation. */
+export function withClientRouting(schema: ToolInfo["parameters"], execution: boolean): ToolInfo["parameters"] {
 	if (typeof schema === "function") {
 		// Compose through the schema's owner; a bundled host has a different type-library instance.
 		if (!hasNativeIntersection(schema)) throw new BridgeError("unsupported_schema", "The native validator does not expose schema composition");
-		return schema.and({ "target?": "'agent' | 'client'" });
+		return schema.and(execution ? { "clientId?": CLIENT_ID, "target?": "'agent' | 'client'" } : { "clientId?": CLIENT_ID });
 	}
 	if (schema.type !== "object" || !isRecord(schema.properties)) {
-		throw new BridgeError("unsupported_schema", "The native execution tool does not expose an object parameter schema");
+		throw new BridgeError("unsupported_schema", "The native tool does not expose an object parameter schema");
 	}
-	return { ...schema, properties: { ...schema.properties, target: { type: "string", enum: ["agent", "client"], description: "Execution host: agent (default), or the manually bound client." } } };
+	return { ...schema, properties: { ...schema.properties, clientId: { type: "string", pattern: CLIENT_ID.source },
+		...(execution ? { target: { type: "string", enum: ["agent", "client"] } } : {}) } };
 }
 
 export function isBridgePath(path: string): boolean {
@@ -35,16 +38,19 @@ function pathHasBridgeResource(value: unknown): boolean {
 
 export interface ToolRoute {
 	readonly client: boolean;
+	readonly clientId?: string;
 	readonly params: ToolParameters;
 }
 
 export function routeTool(name: ToolName, params: ToolParameters): ToolRoute {
-	if (name === "eval" || name === "bash") {
-		const { target, ...native } = params;
+	const execution = name === "eval" || name === "bash";
+	if (execution && !Object.hasOwn(params, "target") && !Object.hasOwn(params, "clientId")) return { client: false, params };
+	if (execution) {
+		const { target, clientId, ...native } = params;
 		if (target !== undefined && target !== "agent" && target !== "client") {
 			throw new BridgeError("invalid_target", 'target must be "agent" or "client"');
 		}
-		return { client: target === "client", params: native };
+		return selectedRoute(target === "client", native, clientId);
 	}
 	let client = pathHasBridgeResource(params.path) || pathHasBridgeResource(params.paths);
 	if (name === "edit" && typeof params.input === "string") {
@@ -56,7 +62,16 @@ export function routeTool(name: ToolName, params: ToolParameters): ToolRoute {
 			if ((header && isBridgePath(header)) || (patchPath && isBridgePath(patchPath)) || (movePath && isBridgePath(movePath))) client = true;
 		}
 	}
-	return { client, params };
+	if (!Object.hasOwn(params, "clientId")) return { client, params };
+	const { clientId, ...native } = params;
+	return selectedRoute(client, native, clientId);
+}
+
+function selectedRoute(client: boolean, params: ToolParameters, clientId: unknown): ToolRoute {
+	if (clientId === undefined) return { client, params };
+	if (!client) throw new BridgeError("invalid_target", 'clientId requires target: "client" for eval/bash or a Bridge path/handle for file tools');
+	if (typeof clientId !== "string" || !CLIENT_ID.test(clientId)) throw new BridgeError("invalid_client_id", "clientId must be a stable device ID from the binding snapshot");
+	return { client, params, clientId };
 }
 
 export function parameters(value: unknown): ToolParameters {

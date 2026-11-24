@@ -4,11 +4,31 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { convertToLlm, normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ServerState } from "../../src/api.ts";
 import { bindingMessage } from "../../src/omp/binding-history.ts";
+import { bindingDescription } from "../../src/omp/extension.ts";
 
 const stateFor = (sessionId: string): ServerState => ({
-	serverInstance: "synthetic-broker", binding: { sessionId, clientId: null, revision: 0, change: null }, devices: [],
+	serverInstance: "synthetic-broker", binding: { sessionId, clientIds: [], revision: 0, change: null }, devices: [],
 });
 const text = "Client target: unbound; revision 0. Synthetic binding fixture.";
+
+test("status and history distinguish identically named devices, including an offline member", () => {
+	const manager = SessionManager.inMemory("/synthetic-binding-fixture");
+	const base = stateFor(manager.getSessionId());
+	const ids = ["client_A", "client_B"];
+	const state: ServerState = { ...base, binding: { ...base.binding, clientIds: ids, revision: 2,
+		change: { revision: 2, actor: { id: "client_A", name: "Twin" }, previousClientIds: ["client_A"], clientIds: ids, at: "2026-01-02" } },
+		devices: ids.map((id, index) => ({ id, name: "Twin", platform: "linux", arch: "x64", online: index === 0 })) };
+	const description = bindingDescription(state);
+	expect(description).toContain('client_A ("Twin"; linux; online)');
+	expect(description).toContain('client_B ("Twin"; linux; offline)');
+	expect(description).toContain("requires one explicit clientId");
+	commit(manager, state, description);
+	expect(bindingMessage(manager, state, description)).toBeUndefined();
+	const offline = { ...state, devices: state.devices.map(device => ({ ...device, online: false })) };
+	expect(bindingMessage(manager, offline, bindingDescription(offline))?.content).toContain('client_A ("Twin"; linux; offline)');
+	const misleading = { ...state, devices: state.devices.map(device => ({ ...device, name: "Twin\u202e_B" })) };
+	expect(bindingDescription(misleading)).toContain('client_A ("Twin\\u202e_B"; linux; online)');
+});
 
 function commit(manager: SessionManager, state: ServerState, content = text) {
 	const payload = bindingMessage(manager, state, content);
@@ -123,7 +143,7 @@ test("discarding a changed snapshot cannot rewrite or consume the last committed
 	const state = stateFor(manager.getSessionId());
 	commit(manager, state);
 	const original = structuredClone(manager.getBranch());
-	const changed = { ...state, binding: { ...state.binding, clientId: "synthetic-other-device", revision: 1 } };
+	const changed = { ...state, binding: { ...state.binding, clientIds: ["synthetic-other-device"], revision: 1 } };
 	const prepared = bindingMessage(manager, changed, text);
 	expect(prepared).toBeDefined();
 	expect(bindingMessage(manager, changed, text)).toEqual(prepared);

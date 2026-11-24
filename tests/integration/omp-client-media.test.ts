@@ -46,7 +46,7 @@ test("a client image read shows its returned bytes in OMP's grouped read, even f
 	const invocations: unknown[] = [];
 	const broker: BrokerApi = {
 		state: unused, claimIntent: unused, finishIntent: unused,
-		invoke: async (_sessionId, _contextId, tool, params) => { invocations.push({ tool, params }); return structuredClone(brokerResult); },
+		invoke: async (_sessionId, _contextId, tool, params, options) => { invocations.push({ tool, params, clientId: options?.clientId }); return structuredClone(brokerResult); },
 		openDraft: () => ({ update() {}, close() {} }),
 		watch: () => () => {},
 		closeContext: async () => {},
@@ -77,9 +77,9 @@ test("a client image read shows its returned bytes in OMP's grouped read, even f
 		expect(errors).toEqual([]);
 		const read = session.getToolByName("read");
 		if (!read) throw new Error("Native read missing");
-		const args = { path: `client://${clientPath}` };
+		const args = { path: `client://${clientPath}`, clientId: target.device.id };
 		const result = await read.execute(crypto.randomUUID(), args);
-		expect(invocations).toHaveLength(1);
+		expect(invocations).toEqual([{ tool: "read", params: { path: args.path }, clientId: target.device.id }]);
 		expect(result.details).toMatchObject({ clientBridge: { target }, meta: { source: { value: `client://${clientPath}` } } });
 		expect(result.details).not.toHaveProperty("mediaPath");
 

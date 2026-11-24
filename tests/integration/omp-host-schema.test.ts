@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
-import { expect, test } from "bun:test";
+import { test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-const CheckSchema = z.object({
-	defaultAllowed: z.boolean(), agentAllowed: z.boolean(), clientAllowed: z.boolean(),
-	invalidTargetRejected: z.boolean(), missingNativeRequiredRejected: z.boolean(), invalidNativeInputRejected: z.boolean(),
-});
-const ResultSchema = z.object({ eval: CheckSchema, bash: CheckSchema });
+const FileChecks = z.object({ defaultAllowed: z.literal(true), clientAllowed: z.literal(true), namedAllowed: z.literal(true),
+	invalidIdRejected: z.literal(true), invalidNativeInputRejected: z.literal(true) });
+const ExecutionChecks = FileChecks.extend({ agentAllowed: z.literal(true), invalidTargetRejected: z.literal(true), missingNativeRequiredRejected: z.literal(true) });
+const ResultSchema = z.object({ eval: ExecutionChecks, bash: ExecutionChecks, read: FileChecks, write: FileChecks, edit: FileChecks, grep: FileChecks, glob: FileChecks });
 
-test("bundled OMP host retains native validation while accepting only the two execution targets", async () => {
+test("bundled OMP host composes clientId with all seven native validators", async () => {
 	// Keep the SDK's HOME-relative configuration on the same volume on native Windows.
 	const root = await mkdtemp(join(homedir(), ".bridge-host-schema-"));
 	const resultPath = join(root, "result.json");
@@ -34,10 +33,7 @@ test("bundled OMP host retains native validation while accepting only the two ex
 	try {
 		const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
 		if (code !== 0) throw new Error(`Isolated host exited ${code}: ${stderr}\n${stdout}`);
-		const result = ResultSchema.parse(JSON.parse(await readFile(resultPath, "utf8")));
-		for (const tool of [result.eval, result.bash]) {
-			expect(tool).toEqual({ defaultAllowed: true, agentAllowed: true, clientAllowed: true, invalidTargetRejected: true, missingNativeRequiredRejected: true, invalidNativeInputRejected: true });
-		}
+		ResultSchema.parse(JSON.parse(await readFile(resultPath, "utf8")));
 	} finally {
 		if (child.exitCode === null) { child.kill("SIGTERM"); await child.exited; }
 		await rm(root, { recursive: true, force: true });

@@ -8,24 +8,31 @@ import { BrokerClient } from "../../src/broker-client.ts";
 export default function hostParametersProbe(api: ExtensionAPI): void {
 	const checks: Record<string, Record<string, boolean>> = {};
 	const broker = new BrokerClient({ stateDir: process.env.BRIDGE_HOST_PROBE_STATE });
+	const path = "client:///fixture";
+	const nativeInputs: Record<string, [Record<string, unknown>, Record<string, unknown>]> = {
+		eval: [{ language: "js", code: "1" }, { language: "ruby", code: "1" }], bash: [{ command: "printf fixture" }, { command: 17 }],
+		read: [{ path }, { path: 7 }], write: [{ path, content: "fixture" }, { path: 7 }],
+		grep: [{ path, pattern: "fixture" }, { pattern: 7 }], glob: [{ path }, { path: 7 }],
+		edit: [{ input: "fixture", path, edits: [], old_string: "x", new_string: "y" }, {}],
+	};
 	const observed = new Proxy(api, {
 		get(target, property, receiver) {
 			if (property !== "registerTool") return Reflect.get(target, property, receiver);
 			return (definition: ToolDefinition) => {
-				if (definition.name === "eval" || definition.name === "bash") {
-					const schema = definition.parameters;
-					if (typeof schema !== "function") throw new Error("Expected the pinned host's callable native validator");
-					const input = definition.name === "eval" ? { language: "js", code: "1" } : { command: "printf fixture" };
-					const invalidNative = definition.name === "eval" ? { language: "ruby", code: "1" } : { command: 17 };
-					checks[definition.name] = {
-						defaultAllowed: schema.allows(input),
-						agentAllowed: schema.allows({ ...input, target: "agent" }),
-						clientAllowed: schema.allows({ ...input, target: "client" }),
+				const schema = definition.parameters;
+				if (typeof schema !== "function") throw new Error("Expected the pinned host's callable native validator");
+				const [input, invalidNative] = nativeInputs[definition.name]!;
+				const execution = definition.name === "eval" || definition.name === "bash";
+				const client = execution ? { ...input, target: "client" } : input;
+				checks[definition.name] = {
+					defaultAllowed: schema.allows(input), clientAllowed: schema.allows(client),
+					namedAllowed: schema.allows({ ...client, clientId: "client_A" }),
+					invalidIdRejected: !schema.allows({ ...client, clientId: "device name" }),
+					invalidNativeInputRejected: !schema.allows({ ...invalidNative, clientId: "client_A" }),
+					...(execution ? { agentAllowed: schema.allows({ ...input, target: "agent" }),
 						invalidTargetRejected: !schema.allows({ ...input, target: "another-device" }),
-						missingNativeRequiredRejected: !schema.allows({ target: "client" }),
-						invalidNativeInputRejected: !schema.allows({ ...invalidNative, target: "client" }),
-					};
-				}
+						missingNativeRequiredRejected: !schema.allows({ target: "client" }) } : {}),
+				};
 				return target.registerTool(definition);
 			};
 		},

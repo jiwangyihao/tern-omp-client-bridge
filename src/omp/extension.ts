@@ -5,7 +5,7 @@ import type { BrokerApi, ServerState } from "../api.ts";
 import { BrokerClient } from "../broker-client.ts";
 import { BridgeError, type ToolName, type ToolResult } from "../protocol.ts";
 import { DraftBridge } from "./draft.ts";
-import { parameters, routeTool, withTarget } from "./routing.ts";
+import { parameters, routeTool, withClientRouting } from "./routing.ts";
 import { nativeMetadata, type NativeMetadata } from "./native-metadata.ts";
 import { nativePresentations } from "./native-presentation.ts";
 import { BackgroundDelivery } from "./background.ts";
@@ -45,12 +45,21 @@ export function executionIdentity(ctx: Pick<ExtensionContext, "sessionManager" |
 	return { sessionId: rootSessionId, contextId: `${ownSessionId}:${ctx.agent.id}` };
 }
 
+// Keep human-supplied labels on one visual line; bidi controls must not reorder a stable ID.
+function quotedLabel(name: string): string {
+	return JSON.stringify(name).replace(/[\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, char => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"));
+}
+
 export function bindingDescription(state: ServerState): string {
-	const selected = state.devices.find(device => device.id === state.binding.clientId);
-	const target = state.binding.clientId === null ? "unbound" : selected ? `${selected.name} (${selected.platform}; ${selected.online ? "online" : "offline"})` : `${state.binding.clientId} (unavailable)`;
+	const { clientIds } = state.binding;
+	const target = clientIds.map(id => {
+		const device = state.devices.find(candidate => candidate.id === id);
+		return device ? `${id} (${quotedLabel(device.name)}; ${device.platform}; ${device.online ? "online" : "offline"})` : `${id} (unavailable)`;
+	}).join(", ") || "unbound";
 	const change = state.binding.change;
-	const actor = change ? `; changed by ${change.actor.name} from ${change.previousClientId ?? "unbound"}` : "";
-	return `Client target: ${target}${actor}; revision ${state.binding.revision}. Agent host remains the default for eval/bash. Client resources use client:///absolute/path; copy complete snapshot headers verbatim, including provenance query and hash.`;
+	const actor = change ? `; changed by ${quotedLabel(change.actor.name)} (${change.actor.id}) from ${change.previousClientIds.join(", ") || "unbound"}` : "";
+	const selection = clientIds.length > 1 ? " Every client invocation, including handle operations, requires one explicit clientId even when only one device is online." : "";
+	return `Client target: ${target}${actor}; revision ${state.binding.revision}.${selection} Agent host remains the default for eval/bash. Client resources use client:///absolute/path; copy complete snapshot headers verbatim, including provenance query and hash.`;
 }
 
 /** Public factory is also the DI seam for isolated SDK sessions and transport tests. */
@@ -108,8 +117,8 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 				...executionMetadata,
 				...presentations[name],
 				name,
-				description: `${native.description}\n${execution ? 'Optional target: "agent" (default) or "client" (the manually bound device); target is fixed for the entire invocation.' : 'Explicit client:// paths and bridge-owned artifact/proc handles route to their client. Other paths retain native agent-host behavior.'}`,
-				parameters: execution ? withTarget(native.parameters) : native.parameters,
+				description: `${native.description}\n${execution ? 'Optional target: "agent" (default) or "client". A clientId requires target: "client".' : 'Explicit client:// paths and bridge-owned artifact/proc handles route to their client. Do not supply clientId for agent paths.'} For client operations, pass one stable clientId from the binding snapshot, never a display name. Required with multiple bindings, even if only one is online; optional with one.`,
+				parameters: withClientRouting(native.parameters, execution),
 				async execute(_id, input, signal, onUpdate, ctx) {
 					const route = routeTool(name, parameters(input));
 					if (!route.client) {
@@ -121,7 +130,7 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 					const identity = executionIdentity(ctx);
 					owned.set(identity.contextId, identity);
 					// No agent cwd is copied to the client. Broker captures binding once per call.
-					return withoutDeviceMediaPath(await broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate }));
+					return withoutDeviceMediaPath(await broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate, clientId: route.clientId }));
 				},
 			};
 			// Tern uses the official semantic hooks; ANSI keeps its existing fallback.

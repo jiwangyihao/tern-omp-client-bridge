@@ -9,7 +9,7 @@ import { DraftBridge, type DraftContext } from "../../src/omp/draft.ts";
 import { INBOX_REMINDER } from "../../src/inbox-guidance.ts";
 import type { ExtensionWidgetContent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 
-const state = { serverInstance: "broker-fixture", binding: { sessionId: "session-real", clientId: null, revision: 0, change: null }, devices: [] };
+const state = { serverInstance: "broker-fixture", binding: { sessionId: "session-real", clientIds: [], revision: 0, change: null }, devices: [] };
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
