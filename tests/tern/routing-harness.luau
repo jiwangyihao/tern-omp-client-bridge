@@ -562,8 +562,9 @@ function run(entry, loadModule)
 		function f.connected(value) ui.connected = value end
 		function f.surface(role, kind) surfaceRole, paneKind = role, kind end
 		function f.outcomes(value) ui.outcomes = value; f.poll() end
-		function f.approval(id)
-			ui.interactions = { { id = id, title = "Approve client tool?", message = "Allow this native client operation once", choices = { { id = "allow-once", label = "Allow once" } } } }
+		function f.approval(id, choices)
+			ui.interactions = { { id = id, title = "Approve client tool?", message = "Allow this native client operation once",
+				choices = choices or { { id = "allow-once", label = "Allow once" } } } }
 			f.poll()
 		end
 		function f.choose(field, value)
@@ -2797,7 +2798,7 @@ function run(entry, loadModule)
 		assert(next(options()) == nil, "device list must start collapsed")
 		f.invoke("widget_action", { widget = "bridge", row = "agent", act = "toggle" })
 		local shown = options()
-		assert(shown["Desk Mac"] and shown["Old Mac"].tone == "muted" and not shown.Unbound, "only alternatives offer Use")
+		assert(shown["Desk Mac"] and not shown["Old Mac"] and not shown.Unbound, "only online alternatives may be chosen")
 		f.noRequest("/v1/intents")
 		f.binding(nil, { { id = "client-B", name = "Old Mac", online = true, platform = "darwin" } }, 4)
 		assert(next(options()) == nil, "changed choices left the disclosure open")
@@ -2879,6 +2880,31 @@ function run(entry, loadModule)
 		f.invoke("legacy-panel")
 		assert(f.legacyPanel == nil and #f.errors == 1, "unreadable setting was overwritten")
 	end)
+	case("long device names and approval choices remain distinguishable", function(f)
+		f.warm()
+		local prefix = string.rep("研发", 44)
+		local first, second = prefix .. "甲", prefix .. "乙"
+		f.binding("alpha", { { id = "alpha", name = first, online = true, platform = "linux" },
+			{ id = "beta", name = second, online = true, platform = "darwin" } }, 3)
+		local function row(field, value)
+			for _, item in f.widgets.bridge.render({ pane = f.original }).card do if item[field] == value then return item end end
+			error("missing complete card field: " .. field)
+		end
+		assert(row("id", "agent").text == first, "bound device lost its distinguishing suffix")
+		f.invoke("widget_action", { widget = "bridge", row = "agent", act = "toggle" })
+		assert(not row("label", first).actions and row("label", second).actions[1].id == "use")
+		f.noRequest("/v1/intents")
+		f.approval("scope", { { id = "one", label = first }, { id = "two", label = second } })
+		local approval = row("label", "Approve client tool?")
+		assert(#approval.actions == 1 and approval.actions[1].id == "review", "truncated approval choices offered directly")
+		f.invoke("widget_action", { widget = "bridge", row = approval.id, act = "review" })
+		local items = f.picks[1].options.items
+		assert(items[1].label == first and items[2].label == second)
+		f.noRequest("/v1/interactions/reply")
+		f.choose("label", second)
+		assert(f.take("/v1/interactions/reply").body.choice == "two", "review changed the chosen scope")
+	end)
+
 	case("card buttons act on the focused card's OMP and re-validate before acting", function(f)
 		f.legacyPanel = nil
 		f.warm()
@@ -2890,10 +2916,10 @@ function run(entry, loadModule)
 			error("card row missing: " .. value)
 		end
 		-- Paste: one clipboard capture for the card's OMP, without a second dialog;
-		-- the button reads Applying… until the capture returns.
+		-- the button reads Applying until the capture returns.
 		assert(act("omp", "paste") == true)
 		local capture = f.take("/v1/captures/clipboard")
-		assert(cardRow("id", "omp").actions[1].label:find("Applying…", 1, true), "in-flight paste not labelled")
+		assert(cardRow("id", "omp").actions[1].label:find("Applying", 1, true), "in-flight paste not labelled")
 		assert(act("omp", "paste") == true)
 		f.noRequest("/v1/captures/clipboard")
 		f.respond(capture, { kind = "text", text = "card paste" })
@@ -2903,7 +2929,7 @@ function run(entry, loadModule)
 		local paste = f.take("/v1/intents", f.viewId)
 		assert(paste.body.kind == "paste" and paste.body.text == "card paste" and paste.body.draftToken == "draft-A")
 		f.respond(paste, { id = "paste-1" })
-		assert(#f.picks == 0 and #f.prompts == 0 and not cardRow("id", "omp").actions[1].label:find("Applying…", 1, true))
+		assert(#f.picks == 0 and #f.prompts == 0 and not cardRow("id", "omp").actions[1].label:find("Applying", 1, true))
 		-- An offline device's Use binds nothing; an online one binds after a fresh resolve.
 		assert(act("agent", "toggle"))
 		local offline = cardRow("label", "Old Mac").id
@@ -2912,7 +2938,7 @@ function run(entry, loadModule)
 		assert(#f.binds() == 0 and #f.errors == 0, "offline device was bound")
 		assert(act(online, "use") == true)
 		assert(#f.binds() == 0, "card bound before fresh conversation validation")
-		assert(cardRow("id", online).actions[1].label:find("Applying…", 1, true), "in-flight bind not labelled")
+		assert(cardRow("id", online).actions[1].label:find("Applying", 1, true), "in-flight bind not labelled")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 		local bind = f.take("/v1/intents", f.viewId)
 		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 5)
@@ -2924,11 +2950,11 @@ function run(entry, loadModule)
 		assert(act(transfer.id, "cancel") == true)
 		local cancel = f.take("/v1/transfers/cancel")
 		assert(cancel.body.id == long)
-		assert(cardRow("label", "big.bin").actions[1].label:find("Applying…", 1, true), "in-flight cancel not labelled")
+		assert(cardRow("label", "big.bin").actions[1].label:find("Applying", 1, true), "in-flight cancel not labelled")
 		assert(act(transfer.id, "cancel") == true)
 		f.noRequest("/v1/transfers/cancel")
 		f.respond(cancel, { ok = true })
-		assert(not cardRow("label", "big.bin").actions[1].label:find("Applying…", 1, true))
+		assert(not cardRow("label", "big.bin").actions[1].label:find("Applying", 1, true))
 		-- An approval answers with the chosen option, once.
 		f.approval("device-approval")
 		local approval = cardRow("label", "Approve client tool?")
@@ -2937,7 +2963,7 @@ function run(entry, loadModule)
 		local reply = f.take("/v1/interactions/reply")
 		assert(reply.body.id == "device-approval" and reply.body.choice == "allow-once")
 		local pending = cardRow("label", "Approve client tool?")
-		assert(pending.actions[1].label:find("Applying…", 1, true) and not pending.actions[2].label:find("Applying…", 1, true), "only the chosen approval button is busy")
+		assert(pending.actions[1].label:find("Applying", 1, true) and not pending.actions[2].label:find("Applying", 1, true), "only the chosen approval button is busy")
 		assert(act(approval.id, "reject") == true)
 		f.noRequest("/v1/interactions/reply")
 		-- The footer opens the menu; unknown actions are left to Tern.

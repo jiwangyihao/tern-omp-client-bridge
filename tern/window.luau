@@ -630,11 +630,13 @@ end
 pasteRemote = preparedAction(pasteRemote)
 uploadRemote = preparedAction(uploadRemote)
 
+local function singleLine(value, fallback)
+	if type(value) ~= "string" or utf8.len(value) == nil then return fallback or "" end
+	return (value:gsub("%c", " "))
+end
+
 local function publicText(value, fallback)
-	if type(value) ~= "string" then return fallback or "" end
-	local valid = pcall(function() for _ in utf8.codes(value) do end end)
-	if not valid then return fallback or "" end
-	value = value:gsub("%c", " ")
+	value = singleLine(value, fallback)
 	if #value > 240 then
 		local boundary = utf8.offset(value, 0, 241)
 		value = value:sub(1, boundary - 1)
@@ -772,7 +774,7 @@ local function deviceSelection(owned)
 		clients[key] = device.id
 		if device.id == bound then current = key end
 		table.insert(options, table.freeze({ key = key,
-			label = publicText(device.name),
+			label = singleLine(device.name, "Unnamed device"),
 			detail = publicText(device.platform .. " · " .. (device.online == true and "Online" or "Offline") .. (state.device and device.id == state.device.id and " · This device" or "")),
 			disabled = device.online ~= true }))
 	end
@@ -794,9 +796,19 @@ local function publishDeviceSelection(cx, owned)
 	if tern.now() < (owned.selectionHeartbeat or 0) then return end
 	local session = cx.sessions:current()
 	if session.id ~= owned.session or session.host ~= owned.host or not panelSurface(cx, owned.pane) then return end
+	-- The legacy panel's event is byte-bounded; the window card keeps the full display names.
+	local options = selection.options
+	for index, option in selection.options do
+		if #option.label > 240 then
+			if options == selection.options then options = table.clone(options) end
+			local wire = table.clone(option)
+			wire.label = publicText(option.label)
+			options[index] = wire
+		end
+	end
 	local payload = tern.json.encode({ owner = windowId, panelId = owned.id,
 		generation = owned.selectionGeneration, available = selection.available,
-		current = selection.current, options = selection.options })
+		current = selection.current, options = options })
 	local ok = pcall(function()
 		cx.session:event(owned.pane, { ev = "action", act = "bridge-device-selection", value = payload })
 	end)
@@ -1603,14 +1615,11 @@ local toneRank = { error = 4, warn = 3, accent = 2, ok = 1, muted = 0 }
 local MAX_DEVICE_ROWS, MAX_TRANSFER_ROWS, MAX_APPROVAL_ROWS = 10, 5, 3
 local cancelling, replying = {}, {}
 local function cardLive() return connection ~= nil and not serviceUnavailable and state ~= nil end
--- Card text is capped at `limit` characters (200 for rows, 64 for buttons). Tern
--- silently drops a row that breaks a bound, so empty text takes the fallback.
-local function cardText(value, fallback, limit)
-	local text = publicText(value, fallback)
-	if text:match("^%s*$") then text = fallback or "" end
-	local cap = limit or 200
-	local length = utf8.len(text)
-	if length and length > cap then text = text:sub(1, utf8.offset(text, cap) - 1) .. "…" end
+-- Row text has a 200-character limit, independent of the transport's byte limit.
+local function cardText(value, fallback)
+	local text = singleLine(value, fallback)
+	if text:match("^%s*$") then return fallback or "" end
+	if #text > 200 and utf8.len(text) > 200 then text = text:sub(1, utf8.offset(text, 200) - 1) .. "…" end
 	return text
 end
 -- Row ids are capped at 64 characters; broker ids reach 256. Keep a stable short
@@ -1637,13 +1646,13 @@ local transferPhaseText = { captured = "Preparing", uploading = "Uploading", rea
 
 -- WidgetCardButton has only id and label. Paint monochrome marks as text, so
 -- losing the sheet never loses either the icon or the action's name.
-local glyph = { paste = "⧉", upload = "↑", device = "▣", use = "✓", cancel = "×", history = "↺", setup = "⚙", menu = "⋯", review = "→" }
+local glyph = { paste = "⧉", upload = "↑", use = "→", cancel = "×", history = "↺", setup = "⚙", menu = "☰", review = "→" }
 local function addRow(model, row, style)
 	table.insert(model.rows, row)
 	local index = #model.rows
 	model.styles[index] = style or row.id
 	for position, button in row.actions or {} do
-		if button.icon then button.label = glyph[button.icon] .. "  " .. cardText(button.label, "Action", 61) end
+		if button.icon then button.label = glyph[button.icon] .. "  " .. button.label end
 		if button.disabled then table.insert(model.disabled, { row = index, button = position }) end
 		button.icon, button.disabled = nil, nil
 	end
@@ -1656,7 +1665,7 @@ local disclosure, disclosureSerial = nil, 0
 local function addDeviceField(model, viewId, view)
 	local selection = deviceSelection({ target = model.target })
 	model.selection = selection
-	local name, meta = view and "Unavailable device" or "Resolving…", "Unavailable"
+	local name, meta = view and "Unavailable device" or "Resolving", "Unavailable"
 	for _, opt in selection.options do
 		if view and opt.key == selection.current then
 			name = opt.label
@@ -1672,20 +1681,20 @@ local function addDeviceField(model, viewId, view)
 	end
 	addRow(model, { id = "agent-caption", label = "Agent device", text = meta })
 	addRow(model, { id = "agent", text = cardText(name, "Unavailable device"), actions = {
-		{ id = "toggle", label = name, icon = "device", disabled = not selection.available },
+		{ id = "toggle", label = model.disclosure and "Close" or "Change", disabled = not selection.available },
 	} })
 	if not model.disclosure then return end
 	for index, opt in selection.options do
 		if index > MAX_DEVICE_ROWS then
 			addRow(model, { id = "devices-more", text = tostring(#selection.options - MAX_DEVICE_ROWS) .. " more devices",
-				actions = { { id = "choose", label = "Choose…", icon = "review" } } })
+				actions = { { id = "choose", label = "Choose", icon = "review" } } })
 			break
 		end
 		local current = opt.key == selection.current
 		addRow(model, { id = disclosure.prefix .. opt.key, label = cardText(opt.label, "Device"),
-			text = cardText(opt.detail .. (current and " · In use" or "")), tone = current and "ok" or (opt.disabled and "muted" or nil),
-			actions = if current then nil else { { id = "use", icon = "use", label = deviceBinding == opt.key and "Applying…" or "Use",
-				disabled = opt.disabled or deviceBinding ~= false } } }, "choice")
+			text = cardText(opt.detail .. (current and " · In use" or "")), tone = opt.disabled and "muted" or (current and "ok" or nil),
+			actions = if current or opt.disabled then nil else { { id = "use", icon = "use", label = deviceBinding == opt.key and "Applying" or "Use",
+				disabled = deviceBinding ~= false } } }, "choice")
 	end
 end
 
@@ -1697,7 +1706,7 @@ local function cardModel(viewId, segments)
 		local detail = (setupBusy or setupChecking) and setupInfo and setupInfo.message or recovery.message or connectionMessage
 		addRow(model, { id = "identity", label = headline, text = cardText(detail, "Bridge is not running on this device"), tone = primary.tone })
 		addRow(model, { id = "bridge", text = "Bridge actions", actions = {
-			{ id = "setup", label = "Set up…", icon = "setup", disabled = setupBusy or setupChecking },
+			{ id = "setup", label = "Set up", icon = "setup", disabled = setupBusy or setupChecking },
 		} })
 		return model
 	end
@@ -1713,8 +1722,8 @@ local function cardModel(viewId, segments)
 		addRow(model, { id = "source", label = "From this device", text = cardText(state.device and state.device.name, "This device") })
 		local busy = not connected or clipboardRequest ~= nil or filePickerOpen
 		addRow(model, { id = "omp", text = "Transfer actions", actions = {
-			{ id = "paste", label = clipboardRequest and "Applying…" or "Paste", icon = "paste", disabled = busy },
-			{ id = "upload", label = filePickerOpen and "Selecting…" or "Upload…", icon = "upload", disabled = busy },
+			{ id = "paste", label = clipboardRequest and "Applying" or "Paste", icon = "paste", disabled = busy },
+			{ id = "upload", label = filePickerOpen and "Selecting" or "Upload", icon = "upload", disabled = busy },
 		} })
 		addDeviceField(model, viewId, view)
 	else
@@ -1723,7 +1732,7 @@ local function cardModel(viewId, segments)
 	if problem or not connected or (primary.command == action .. "setup") then
 		addRow(model, { id = "notice", text = cardText(problem or headline), tone = problem and "error" or "warn" })
 	end
-	local history = { id = "transfers", text = "No active transfers", actions = { { id = "history", label = "History…", icon = "history" } } }
+	local history = { id = "transfers", text = "No active transfers", actions = { { id = "history", label = "History", icon = "history" } } }
 	addRow(model, history)
 	local shown, failed = 0, 0
 	for _, item in state.transfers do
@@ -1736,7 +1745,7 @@ local function cardModel(viewId, segments)
 			local fraction = item.phase == "uploading" and size > 0 and math.min(sent / size, 1) or nil
 			local at = addRow(model, { id = cardKey("t", item.id), label = cardText(item.names and item.names[1], "Transfer"), tone = "accent",
 				text = transferPhaseText[item.phase] .. (fraction and (" " .. tostring(math.floor(fraction * 100)) .. "%") or ""),
-				actions = { { id = "cancel", label = cancelling[item.id] and "Applying…" or "Cancel", icon = "cancel", disabled = cancelling[item.id] ~= nil } } }, "transfer")
+				actions = { { id = "cancel", label = cancelling[item.id] and "Applying" or "Cancel", icon = "cancel", disabled = cancelling[item.id] ~= nil } } }, "transfer")
 			if fraction then model.meters[at] = fraction end
 		end
 	end
@@ -1745,19 +1754,27 @@ local function cardModel(viewId, segments)
 	for index, request in state.interactions do
 		if index > MAX_APPROVAL_ROWS then
 			addRow(model, { id = "approvals-more", label = "Approvals", text = tostring(#state.interactions - MAX_APPROVAL_ROWS) .. " more",
-				actions = { { id = "review", label = "Review…", icon = "review" } } })
+				actions = { { id = "review", label = "Review", icon = "review" } } })
 			break
 		end
 		local busy = openApprovals[request.id] ~= nil or replying[request.id] ~= nil
 		local actions = {}
-		if #request.choices <= 2 then
+		local inline = #request.choices <= 2
+		if inline then
 			for position, choice in request.choices do
-				table.insert(actions, { id = "c" .. tostring(position), label = replying[request.id] == "c" .. tostring(position) and "Applying…"
-					or cardText(choice.label, "Option", 61), icon = "review", disabled = busy })
+				local label = singleLine(choice.label)
+				local length = utf8.len(label)
+				-- Never shorten a permission scope to fit a 64-character button. The picker shows the original labels.
+				if length > 64 or not label:find("%S") then inline = false; break end
+				local id = "c" .. tostring(position)
+				table.insert(actions, { id = id, label = replying[request.id] == id and "Applying" or label,
+					icon = length <= 61 and "review" or nil, disabled = busy })
 			end
-			table.insert(actions, { id = "reject", label = replying[request.id] == "reject" and "Applying…" or "Reject", icon = "cancel", disabled = busy })
+		end
+		if inline then
+			table.insert(actions, { id = "reject", label = replying[request.id] == "reject" and "Applying" or "Reject", icon = "cancel", disabled = busy })
 		else
-			actions = { { id = "review", label = "Review…", icon = "review", disabled = busy } }
+			actions = { { id = "review", label = "Review", icon = "review", disabled = busy } }
 		end
 		addRow(model, { id = cardKey("a", request.id), label = cardText(request.title, "Approval"),
 			text = cardText(request.message, "Approval requested"), tone = "warn", actions = actions }, "approval")
@@ -1768,8 +1785,8 @@ local function cardModel(viewId, segments)
 		end
 	end
 	addRow(model, { id = "bridge", text = "Bridge actions", actions = {
-		{ id = "setup", label = "Setup…", icon = "setup", disabled = setupBusy or setupChecking },
-		{ id = "menu", label = "More…", icon = "menu" },
+		{ id = "setup", label = "Setup", icon = "setup", disabled = setupBusy or setupChecking },
+		{ id = "menu", label = "Menu", icon = "menu" },
 	} })
 	return model
 end
@@ -1798,7 +1815,16 @@ local cardBase = cardRoot .. [=[ {
  & .wgc-plugin-row { min-width: 0; gap: 6px; }
  & .wgc-plugin-row .wgc-k { min-width: 0; color: var(--t1); font: 550 12px/16px var(--sans); }
  & .wgc-plugin-row .wgc-plugin-v { min-width: 0; text-align: right; font: 12px/16px var(--sans); }
- & .wgc-plugin-act { min-width: 0; padding: 0 5px; font: 500 11.5px/16px var(--sans); }
+ & .wgc-plugin-act {
+  box-sizing: border-box; flex: 0 1 auto; width: auto; min-width: 0; max-width: 100%; height: auto; min-height: 24px;
+  white-space: normal; overflow-wrap: anywhere; text-overflow: clip; padding: 3px 8px; font: 500 11.5px/16px var(--sans);
+  border: 1px solid var(--bridge-btn-line, transparent); border-radius: var(--r-chip); background: var(--bridge-btn-fill, transparent);
+  color: var(--bridge-btn-ink, var(--t2)); cursor: pointer;
+  transition: background-color 140ms var(--ease), border-color 140ms var(--ease), box-shadow 140ms var(--ease), transform 100ms var(--ease);
+  &:hover { background: var(--bridge-btn-over, rgb(from var(--accent) r g b / 22%)); border-color: var(--bridge-btn-edge, rgb(from var(--accent) r g b / 65%)); color: var(--bridge-btn-hover-ink, var(--accent-ink)); }
+  &:focus-visible { box-shadow: 0 0 0 2px rgb(from var(--accent) r g b / 65%); }
+  &:active { background: var(--bridge-btn-down, rgb(from var(--accent) r g b / 32%)); transform: translateY(1px); }
+ }
 }]=]
 local cardRowStyles = {
 	["identity"] = [=[
@@ -1820,20 +1846,28 @@ local cardRowStyles = {
 		& .wgc-plugin-v { font: 11px/15px var(--mono); color: var(--t2); }
 	]=],
 	["omp"] = [=[
-		justify-content: flex-start; padding-top: 4px; gap: 7px;
+		justify-content: flex-start; flex-wrap: wrap; padding-top: 4px; gap: 7px;
 		& .wgc-plugin-v { display: none; }
-		& .wgc-plugin-act { flex: none; height: 28px; padding: 0 12px; font-size: 12px; border-radius: var(--r-chip); border: 1px solid var(--l2); background: var(--raise); color: var(--t1); }
-		& .wgc-plugin-act:first-of-type { background: var(--accent-fill); border-color: transparent; color: white; }
+		& .wgc-plugin-act { min-height: 28px; padding: 4px 12px; font-size: 12px; --bridge-btn-line: var(--l2); --bridge-btn-fill: var(--raise); --bridge-btn-ink: var(--t1); }
+		& .wgc-plugin-act:first-of-type {
+			--bridge-btn-fill: var(--accent-fill); --bridge-btn-line: transparent; --bridge-btn-ink: white; --bridge-btn-hover-ink: white;
+			--bridge-btn-over: var(--accent-fill); --bridge-btn-down: var(--accent-fill); --bridge-btn-edge: var(--accent-ink);
+			&:hover { box-shadow: inset 0 0 0 48px rgb(255 255 255 / 12%), 0 0 0 2px rgb(from var(--accent) r g b / 15%); }
+			&:active { box-shadow: inset 0 0 0 48px rgb(0 0 0 / 12%); }
+		}
 	]=],
 	["agent-caption"] = [=[
 		margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--l2);
 		& .wgc-plugin-v { color: var(--t3); font-size: 11px; }
 	]=],
 	["agent"] = [=[
-		margin-top: 4px;
-		& .wgc-plugin-v { display: none; }
-		& .wgc-plugin-act { width: 100%; display: flex; justify-content: flex-start; align-items: center; height: 30px; padding: 0 9px; overflow: hidden; text-overflow: ellipsis; border: 1px solid var(--l2); border-radius: var(--r-ctl); color: var(--t1); background: var(--card); text-align: left; font: 500 12px/16px var(--sans); }
-		& .wgc-plugin-act::after { content: "▾"; margin-left: auto; color: var(--t3); }
+		position: relative; align-items: center; padding: 4px 10px; gap: 8px; margin-top: 4px; min-height: 34px;
+		border: 1px solid var(--bridge-field-line, var(--l2)); border-radius: var(--r-ctl); background: var(--card);
+		transition: border-color 130ms var(--ease), background-color 130ms var(--ease), box-shadow 130ms var(--ease);
+		&::before { content: "▣"; flex: none; color: var(--bridge-field-ink, var(--t3)); }
+		& .wgc-plugin-v { flex: 1 1 0; min-width: 0; color: var(--t1); text-align: left; white-space: normal; overflow-wrap: anywhere; font-weight: 550; }
+		& .wgc-plugin-act { display: flex; align-items: center; gap: 7px; color: var(--bridge-field-ink, var(--t3)); }
+		& .wgc-plugin-act::after { content: ""; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(var(--bridge-angle, 45deg)); transition: transform 140ms var(--ease); }
 	]=],
 	["transfers"] = [=[
 		margin-top: 10px; padding-top: 7px; border-top: 1px solid var(--l2);
@@ -1850,20 +1884,39 @@ local cardRowStyles = {
 		& .wgc-k, & .wgc-plugin-v { flex: 0 0 100%; max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 	]=],
 	["bridge"] = [=[
-		margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--l1); justify-content: flex-end;
+		margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--l1); flex-wrap: wrap; justify-content: flex-end;
 		& .wgc-plugin-v { display: none; }
 	]=],
 	["choice"] = [=[
-		display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 6px; padding: 4px 3px; position: relative;
-		& .wgc-k, & .wgc-plugin-v { max-width: none; text-align: left; }
-		& .wgc-plugin-v { grid-column: 1; font-size: 11px; color: var(--t3); }
-		& .wgc-plugin-act { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+		position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 8px;
+		padding: 6px 10px; border-left: 1px solid var(--l2); border-right: 1px solid var(--l2); background: var(--card);
+		transition: background-color 130ms var(--ease);
+		& .wgc-k, & .wgc-plugin-v { grid-column: 1; min-width: 0; max-width: none; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+		& .wgc-k { grid-row: 1; }
+		& .wgc-plugin-v { grid-row: 2; font-size: 11px; color: var(--t3); }
+		& .wgc-plugin-act { grid-column: 2; grid-row: 1 / span 2; }
+		&[data-tone='ok'] { background: rgb(from var(--accent) r g b / 7%); }
+		&[data-tone='ok']::after { content: "✓"; grid-column: 2; grid-row: 1 / span 2; color: var(--accent-ink); padding: 0 9px; }
+		&[data-tone='muted'] .wgc-k { color: var(--t3); }
 	]=],
 	["notice"] = [=[
 		padding: 5px 0;
 		& .wgc-plugin-v { text-align: left; white-space: normal; overflow-wrap: anywhere; }
 	]=],
 }
+-- Stretch the native button's hit region without forcing its text into a fixed-width box.
+local fieldHitStyle = [=[ {
+ & .wgc-plugin-act { position: static; transform: none; background: transparent; border-color: transparent; }
+ & .wgc-plugin-act::before { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+ &:has(.wgc-plugin-act:hover), &:has(.wgc-plugin-act:focus-visible) {
+  background: rgb(from var(--accent) r g b / 13%); border-color: rgb(from var(--accent) r g b / 65%);
+  box-shadow: inset 0 0 0 1px rgb(from var(--accent) r g b / 22%); --bridge-field-ink: var(--accent-ink);
+ }
+ &:has(.wgc-plugin-act:active) { background: rgb(from var(--accent) r g b / 22%); }
+}]=]
+local reduceCardMotion = "@media (prefers-reduced-motion: reduce) { " .. cardRoot .. [=[ .wgc-plugin-rows * {
+ transition: none !important; animation: none !important;
+} ]=] .. cardRoot .. " .wgc-plugin-act:active { transform: none !important; } " .. cardRoot .. " .wgc-plugin-act::after { transition: none !important; } }"
 local cardSheet = nil
 local function updateCardStyle(card)
 	if type(tern.css) ~= "function" then return end
@@ -1878,7 +1931,13 @@ local function updateCardStyle(card)
 	for index, style in card.styles do
 		local rules = cardRowStyles[style]
 		if rules then table.insert(css, row(index) .. " { " .. rules .. " }") end
-		if style == "agent" and card.disclosure then table.insert(css, row(index) .. ' .wgc-plugin-act::after { content: "▴"; }') end
+		if style == "agent" or style == "choice" then table.insert(css, row(index) .. fieldHitStyle) end
+		if style == "agent" and card.disclosure then
+			table.insert(css, row(index) .. " { --bridge-field-line: var(--accent); --bridge-field-ink: var(--accent-ink); --bridge-angle: 225deg; }")
+		elseif style == "choice" then
+			if card.styles[index - 1] ~= "choice" then table.insert(css, row(index) .. " { margin-top: 4px; border-top: 1px solid var(--l2); border-radius: 8px 8px 0 0; }") end
+			if card.styles[index + 1] ~= "choice" then table.insert(css, row(index) .. " { border-bottom: 1px solid var(--l2); border-radius: 0 0 8px 8px; }") end
+		end
 	end
 	for index, fraction in card.meters do
 		local percent = string.format("%.1f%%", fraction * 100)
@@ -1886,8 +1945,9 @@ local function updateCardStyle(card)
 			.. " background: linear-gradient(to right, var(--accent) " .. percent .. ", var(--l2) " .. percent .. "); }")
 	end
 	for _, mark in card.disabled do
-		table.insert(css, row(mark.row) .. " .wgc-plugin-act:nth-of-type(" .. mark.button .. ") { opacity: 0.45; pointer-events: none; }")
+		table.insert(css, row(mark.row) .. " .wgc-plugin-act:nth-of-type(" .. mark.button .. ") { opacity: 0.45; pointer-events: none; cursor: default; transition: none; transform: none; }")
 	end
+	table.insert(css, reduceCardMotion)
 	local sheet = table.concat(css, "\n")
 	if sheet ~= cardSheet and pcall(tern.css, "card", sheet) then cardSheet = sheet end
 end

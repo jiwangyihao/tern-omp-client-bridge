@@ -530,15 +530,21 @@ pick the ring style. On Tern 0.9.27 and later, hover to open the connection card
 
 - Check the **remote host**, workspace and conversation at the top. **From this device**
   is the source of **Paste** and **Upload…**; it does not change when the agent binding does.
-- The **Agent device** field shows the current binding. Click the field to expand or
-  collapse its choices. Opening it does not bind a device. **Use** rechecks the
-  conversation, draft, binding revision and device choices before applying. Offline
-  devices cannot be selected. If choices change, the old list closes; reopen it to
-  select from the new list. **Choose…** opens the native picker for longer lists.
-- **Transfers** shows active files, progress, **Cancel** and **History…**. Approvals
-  show the request and its choices (or **Review…** for longer choice lists).
-  **Setup…** and **More…** are in the footer. The card shows up to ten device choices
+- Click anywhere in the **Agent device** field to open or close it. The device name
+  wraps independently of the button. Opening the list does not change the binding.
+  Click an online alternative's row to select it; Bridge rechecks the conversation,
+  draft, binding revision and choices before applying. The current device has an
+  in-use indicator; offline devices cannot be selected. If the choices change,
+  reopen the list. **Choose** opens the native picker for longer lists.
+- **Transfers** shows active files, progress, **Cancel** and **History**. Approval
+  buttons fit their captions and wrap if necessary. **Review** opens the full
+  choices if there are more than two or a caption cannot fit Tern's 64-character
+  button limit. **Setup** and **Menu** are in the footer. The card shows up to ten device choices
   when expanded, five active transfers and three approvals at once.
+
+Hovering highlights an available button or device row. Pressing a button darkens
+its fill and moves it down slightly; with Reduce Motion on, the color feedback
+remains without movement.
 
 The action symbols are part of the button labels; they need no image URLs or
 icon font. Tern 0.9.18–0.9.26 uses the read-only title and the Bridge menu.
