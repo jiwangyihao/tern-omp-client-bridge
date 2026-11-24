@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 import { z } from "zod";
+import { MAX_BOUND_CLIENTS } from "./protocol.ts";
 
 export const IdentifierSchema = z.string().min(1).max(256);
+export const ClientIdSchema = IdentifierSchema.regex(/^[A-Za-z0-9_-]+$/);
+const ClientIdsSchema = z.array(ClientIdSchema).max(MAX_BOUND_CLIENTS).refine(ids => new Set(ids).size === ids.length, "Duplicate client IDs");
 export const DeviceDescriptorSchema = z.object({
-	id: IdentifierSchema.regex(/^[A-Za-z0-9_-]+$/),
+	id: ClientIdSchema,
 	name: z.string().min(1).max(128).regex(/^[^\x00-\x1f\x7f]+$/),
 	platform: z.enum(["darwin", "win32", "linux"]),
 	arch: z.string().min(1).max(32),
@@ -11,20 +14,23 @@ export const DeviceDescriptorSchema = z.object({
 export const DeviceStatusSchema = DeviceDescriptorSchema.extend({ online: z.boolean() });
 export const BindingChangeSchema = z.object({
 	revision: z.number().int().nonnegative(), actor: z.object({ id: IdentifierSchema, name: z.string() }),
-	previousClientId: IdentifierSchema.nullable(), clientId: IdentifierSchema.nullable(), at: z.string(),
+	previousClientIds: ClientIdsSchema, clientIds: ClientIdsSchema, at: z.string(),
 });
-export const BindingStateSchema = z.object({ sessionId: IdentifierSchema, clientId: IdentifierSchema.nullable(), revision: z.number().int().nonnegative(), change: BindingChangeSchema.nullable() });
+export const BindingStateSchema = z.object({ sessionId: IdentifierSchema, clientIds: ClientIdsSchema, revision: z.number().int().nonnegative(), change: BindingChangeSchema.nullable() });
 export const ServerStateSchema = z.object({ serverInstance: IdentifierSchema, binding: BindingStateSchema, devices: z.array(DeviceStatusSchema) });
 export const ImportedFileSchema = z.object({ name: z.string(), path: z.string(), size: z.number().int().nonnegative(), sha256: z.string().regex(/^[a-f0-9]{64}$/) });
 export const UiClaimSchema = z.object({ id: IdentifierSchema, kind: z.enum(["resolve", "bind", "attach", "paste"]), state: ServerStateSchema, files: z.array(ImportedFileSchema).optional(), text: z.string().optional() });
 export const UiIntentSchema = z.discriminatedUnion("kind", [
 	z.object({ kind: z.literal("resolve"), viewId: IdentifierSchema, destinationId: IdentifierSchema }).strict(),
-	z.object({ kind: z.literal("bind"), viewId: IdentifierSchema, sessionId: IdentifierSchema, draftToken: IdentifierSchema, clientId: IdentifierSchema.nullable(), expectedRevision: z.number().int().nonnegative() }).strict(),
+	z.object({ kind: z.literal("bind"), viewId: IdentifierSchema, sessionId: IdentifierSchema, draftToken: IdentifierSchema, clientIds: ClientIdsSchema, expectedRevision: z.number().int().nonnegative() }).strict(),
 	z.object({ kind: z.literal("attach"), viewId: IdentifierSchema, sessionId: IdentifierSchema, draftToken: IdentifierSchema, transferId: IdentifierSchema }).strict(),
 	z.object({ kind: z.literal("paste"), viewId: IdentifierSchema, sessionId: IdentifierSchema, draftToken: IdentifierSchema, text: z.string().min(1).max(512 * 1024) }).strict(),
 ]);
 export const ToolNameSchema = z.enum(["read", "write", "edit", "grep", "glob", "bash", "eval"]);
-export const InvocationSchema = z.object({ sessionId: IdentifierSchema, contextId: IdentifierSchema, tool: ToolNameSchema, params: z.record(z.string(), z.unknown()) });
+export const InvocationSchema = z.object({
+	sessionId: IdentifierSchema, contextId: IdentifierSchema, clientId: ClientIdSchema.optional(), tool: ToolNameSchema,
+	params: z.record(z.string(), z.unknown()).refine(params => !Object.hasOwn(params, "clientId"), "clientId belongs on the invocation, not in native tool params"),
+}).strict();
 export const InvocationTargetSchema = z.object({ requestId: IdentifierSchema, sessionId: IdentifierSchema, contextId: IdentifierSchema, bindingRevision: z.number().int().nonnegative(), device: DeviceDescriptorSchema });
 export const ExecuteRequestSchema = z.object({ target: InvocationTargetSchema, tool: ToolNameSchema, params: z.record(z.string(), z.unknown()) });
 export const ToolResultSchema = z.object({

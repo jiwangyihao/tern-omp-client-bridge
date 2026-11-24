@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+export const MAX_BOUND_CLIENTS = 32;
 export type Platform = "darwin" | "win32" | "linux";
 export type ToolName = "read" | "write" | "edit" | "grep" | "glob" | "bash" | "eval";
 export type ToolParameters = Record<string, unknown>;
@@ -26,14 +27,14 @@ export interface SwitchActor {
 export interface BindingChange {
 	readonly revision: number;
 	readonly actor: SwitchActor;
-	readonly previousClientId: string | null;
-	readonly clientId: string | null;
+	readonly previousClientIds: readonly string[];
+	readonly clientIds: readonly string[];
 	readonly at: string;
 }
 
 export interface BindingState {
 	readonly sessionId: string;
-	readonly clientId: string | null;
+	readonly clientIds: readonly string[];
 	readonly revision: number;
 	readonly change: BindingChange | null;
 }

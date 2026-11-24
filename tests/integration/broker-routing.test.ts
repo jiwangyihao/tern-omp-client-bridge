@@ -8,10 +8,10 @@ import { startBroker } from "../../src/broker.ts";
 import { BrokerClient } from "../../src/broker-client.ts";
 import { startClientService, type ClientService } from "../../src/client.ts";
 import { loadClientIdentity, signIdentity, type Endpoint } from "../../src/config.ts";
-import { CaptureResultSchema, LocalUiStateSchema, NativePanelSnapshotSchema, PanelStateSchema, TransferStatusSchema, UiIntentReceiptSchema } from "../../src/schemas.ts";
-import type { DraftChannel, DraftDestination, DraftIntent, LocalUiState } from "../../src/api.ts";
+import { CaptureResultSchema, ExecuteRequestSchema, LocalUiStateSchema, NativePanelSnapshotSchema, PanelStateSchema, TransferStatusSchema, UiIntentReceiptSchema } from "../../src/schemas.ts";
+import type { BackgroundResult, DraftChannel, DraftDestination, DraftIntent, LocalUiState } from "../../src/api.ts";
 import type { ToolResult } from "../../src/protocol.ts";
-import { RpcPeer, TransportHeartbeatSchema } from "../../src/wire.ts";
+import { RpcPeer, TransportHeartbeatSchema, type RpcHandler } from "../../src/wire.ts";
 
 const Ok = z.object({ ok: z.literal(true) });
 async function ui<T extends z.ZodType>(endpoint: Endpoint, route: string, schema: T, body?: unknown, signal?: AbortSignal): Promise<z.output<T>> {
@@ -59,13 +59,13 @@ async function openDraft(broker: BrokerClient, sessionId = "conversation", draft
 }
 const draftOwners = new WeakMap<BrokerClient, DraftFixture>();
 
-interface PairedFixture { readonly peer: RpcPeer; close(): void }
-async function paired(endpoint: Endpoint, stateDir: string): Promise<PairedFixture> {
+interface PairedFixture { readonly peer: RpcPeer; readonly clientId: string; close(): void }
+async function paired(endpoint: Endpoint, stateDir: string, handleRequest?: RpcHandler): Promise<PairedFixture> {
 	const identity = await loadClientIdentity(stateDir, { name: "Direct protocol fixture" });
 	const ready = Promise.withResolvers<void>();
 	const url = new URL("/v1/connect", endpoint.url); url.protocol = "ws:";
 	const socket = new WebSocket(url, { headers: { authorization: `Bearer ${endpoint.token}` } });
-	const peer = new RpcPeer(frame => { socket.send(JSON.stringify(frame)); }, undefined, (name, body) => {
+	const peer = new RpcPeer(frame => { socket.send(JSON.stringify(frame)); }, handleRequest, (name, body) => {
 		if (name === "transport.ping") { peer.notify("transport.pong", TransportHeartbeatSchema.parse(body)); return; }
 		if (name === "challenge") {
 			const { nonce } = z.object({ nonce: z.string() }).parse(body);
@@ -76,7 +76,7 @@ async function paired(endpoint: Endpoint, stateDir: string): Promise<PairedFixtu
 	socket.addEventListener("error", () => ready.reject(new Error("Fixture paired channel failed")));
 	socket.addEventListener("close", () => peer.close());
 	await ready.promise;
-	return { peer, close() { peer.close(); socket.close(); } };
+	return { peer, clientId: identity.device.id, close() { peer.close(); socket.close(); } };
 }
 
 async function fixture(count: number) {
@@ -108,9 +108,9 @@ async function resolveView(client: ClientService, broker: BrokerClient, viewId: 
 	const state = await stateWhen(client, state => state.views[viewId]?.resolveIntentId === receipt.id);
 	return state.views[viewId]!;
 }
-async function bind(client: ClientService, broker: BrokerClient, viewId: string, clientId: string | null, expectedRevision: number) {
+async function bind(client: ClientService, broker: BrokerClient, viewId: string, clientIds: string[], expectedRevision: number) {
 	const view = (await ui(client.endpoint, "/v1/state", LocalUiStateSchema)).views[viewId]!;
-	const receipt = await ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientId, expectedRevision });
+	const receipt = await ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientIds, expectedRevision });
 	const intent = await draftOwners.get(broker)!.intent(receipt.id);
 	const result = await broker.claimIntent(intent.id, intent.sessionId, intent.draftToken, intent.destinationId); await broker.finishIntent(intent.id);
 	return result.state;
@@ -125,49 +125,156 @@ test("manual binding enables native execution without grants and unbinding rejec
 		expect(state.device).not.toHaveProperty("capabilities");
 		const params = { language: "js", code: 'print("BOUND_NATIVE_EXECUTION");' };
 		await expect(f.broker.invoke("conversation", "execution-root", "eval", params)).rejects.toMatchObject({ code: "UNBOUND" });
-		await bind(client, f.broker, "view", state.device.id, 0);
+		await expect(f.broker.invoke("conversation", "execution-root", "eval", params, { clientId: state.device.id })).rejects.toMatchObject({ code: "UNBOUND" });
+		await bind(client, f.broker, "view", [state.device.id], 0);
 		const result = await f.broker.invoke("conversation", "execution-root", "eval", params);
 		expect(result.isError).not.toBe(true);
 		expect(text(result)).toContain("BOUND_NATIVE_EXECUTION");
 		expect(result.details).toMatchObject({ clientBridge: { target: { device: { id: state.device.id }, bindingRevision: 1 } } });
-		await bind(client, f.broker, "view", null, 1);
+		await bind(client, f.broker, "view", [], 1);
 		await expect(f.broker.invoke("conversation", "execution-root", "eval", params)).rejects.toMatchObject({ code: "UNBOUND" });
 	} finally { await f.close(); }
 }, 60000);
 
-test("three real helpers converge on one binding while active native Eval stays on its original client", async () => {
+test("an older broker cannot silently ignore the clientId or receive a replay on its legacy invoke route", async () => {
+	const requests: { path: string; body: unknown }[] = [];
+	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+		requests.push({ path: new URL(request.url).pathname, body: await request.json() });
+		return new Response("Not found", { status: 404 });
+	} });
+	const broker = new BrokerClient({ endpoint: { url: server.url.origin, token: "protocol-fixture" } });
+	try {
+		const input = { sessionId: "session", contextId: "context", tool: "bash", params: { command: "echo ok" } } as const;
+		for (const options of [{ clientId: "selected" }, {}]) {
+			await expect(broker.invoke(input.sessionId, input.contextId, input.tool, input.params, options)).rejects.toMatchObject({ code: "BROKER_INCOMPATIBLE" });
+		}
+		expect(requests).toEqual([{ path: "/v2/invoke", body: { ...input, clientId: "selected" } }, { path: "/v2/invoke", body: input }]);
+	} finally { broker.close(); await server.stop(true); }
+});
+
+test("paired peers keep call receipts, handles, updates and disposal on their original devices", async () => {
+	const f = await fixture(1);
+	const actor = f.clients[0]!;
+	const actions: string[] = [];
+	const release = Promise.withResolvers<void>();
+	const progress = Promise.withResolvers<ToolResult>();
+	const result = (text: string) => ({ content: [{ type: "text" as const, text }] });
+	const owner = await paired(f.server.endpoint, join(f.root, "owner"), async (method, body, context) => {
+		if (method === "context.close") { actions.push("owner:close"); return {}; }
+		if (method !== "execute") throw new Error(`Unexpected method ${method}`);
+		const { tool, params } = ExecuteRequestSchema.parse(body);
+		actions.push(`owner:${tool}:${params.path ?? ""}`);
+		if (tool === "bash") {
+			context.update({ ...result("started"), details: { async: { jobId: "owned-job" } } });
+			await release.promise;
+		}
+		return result("owner");
+	});
+	const other = await paired(f.server.endpoint, join(f.root, "other"), async (method, body) => {
+		if (method === "context.close") { actions.push("other:close"); return {}; }
+		if (method !== "execute") throw new Error(`Unexpected method ${method}`);
+		actions.push(`other:${ExecuteRequestSchema.parse(body).tool}`);
+		return result("other");
+	});
+	try {
+		const view = await resolveView(actor, f.broker, "view");
+		await bind(actor, f.broker, "view", [owner.clientId, other.clientId], 0);
+		const ready = Promise.withResolvers<void>();
+		const background = Promise.withResolvers<BackgroundResult>();
+		f.broker.watch(view.sessionId, () => ready.resolve(), ready.reject, event => background.resolve(event));
+		await ready.promise;
+		const owned = { clientId: owner.clientId };
+		const foreign = { clientId: other.clientId };
+		const active = f.broker.invoke(view.sessionId, "ctx", "bash", { command: "foreground" }, { ...owned, onUpdate: progress.resolve });
+		const update = await Promise.race([progress.promise, active.then(() => { throw new Error("Missing in-flight update"); })]);
+		const issued = z.object({ async: z.object({ jobId: z.string() }), clientBridge: z.object({ target: z.object({ requestId: z.string(), device: z.object({ id: z.string() }) }) }) }).parse(update.details);
+		expect(issued.clientBridge.target.device.id).toBe(owner.clientId);
+		const handle = `proc://${issued.async.jobId}`;
+		const receipt = `proc://client-bridge-call/${issued.clientBridge.target.requestId}`;
+		expect(text(await f.broker.invoke(view.sessionId, "ctx", "eval", {}, foreign))).toContain("other");
+		for (const path of [`${handle}/kill`, `${receipt}/cancel`]) {
+			await expect(f.broker.invoke(view.sessionId, "ctx", "write", { path })).rejects.toMatchObject({ code: "CLIENT_ID_REQUIRED" });
+			await expect(f.broker.invoke(view.sessionId, "ctx", "write", { path }, foreign)).rejects.toMatchObject({ code: "CLIENT_ID_MISMATCH" });
+		}
+		await expect(f.broker.invoke("other-session", "ctx", "read", { path: receipt }, owned)).rejects.toMatchObject({ code: "CALL_UNAVAILABLE" });
+		expect((await f.broker.invoke(view.sessionId, "ctx", "read", { path: receipt }, owned)).details).toMatchObject({ phase: "running" });
+		expect(actions).toEqual(["owner:bash:", "other:eval"]);
+
+		await bind(actor, f.broker, "view", [other.clientId], 1);
+		const input = { sessionId: view.sessionId, contextId: "ctx", tool: "eval", params: { clientId: owner.clientId } };
+		const post = { method: "POST", headers: { authorization: `Bearer ${f.server.endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify(input) };
+		const retired = await fetch(f.server.endpoint.url + "/v1/invoke", post);
+		expect(retired.status).toBe(404);
+		await retired.body?.cancel();
+		const misplaced = await fetch(f.server.endpoint.url + "/v2/invoke", post);
+		expect(await misplaced.json()).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+		await expect(f.broker.invoke(view.sessionId, "ctx", "write", { path: `${handle}/kill` }, foreign)).rejects.toMatchObject({ code: "CLIENT_ID_MISMATCH" });
+		await expect(f.broker.invoke(view.sessionId, "ctx", "write", { path: `${receipt}/cancel` }, foreign)).rejects.toMatchObject({ code: "CLIENT_ID_MISMATCH" });
+		expect(text(await f.broker.invoke(view.sessionId, "ctx", "read", { path: handle }))).toContain("owner");
+		const actorId = (await ui(actor.endpoint, "/v1/state", LocalUiStateSchema)).device.id;
+		await bind(actor, f.broker, "view", [actorId, other.clientId], 2);
+		await expect(f.broker.invoke(view.sessionId, "ctx", "read", { path: handle })).rejects.toMatchObject({ code: "CLIENT_ID_REQUIRED" });
+		expect(text(await f.broker.invoke(view.sessionId, "ctx", "read", { path: handle }, owned))).toContain("owner");
+		owner.peer.notify("tool.background", { requestId: issued.clientBridge.target.requestId, result: result("late output") });
+		expect(await background.promise).toMatchObject({ target: { device: { id: owner.clientId }, bindingRevision: 1 }, result: { details: { clientBridge: { target: { device: { id: owner.clientId } } } } } });
+		await f.broker.invoke(view.sessionId, "ctx", "write", { path: `${receipt}/cancel` }, owned);
+		await expect(active).rejects.toMatchObject({ code: "CANCELLED" });
+		release.resolve();
+		expect(actions).toEqual(["owner:bash:", "other:eval", "owner:read:proc://owned-job", "owner:read:proc://owned-job"]);
+		actions.length = 0;
+		await f.broker.closeContext(view.sessionId, "ctx");
+		expect(actions.sort()).toEqual(["other:close", "owner:close"]);
+	} finally { release.resolve(); try { await f.close(); } finally { owner.close(); other.close(); } }
+}, 30000);
+
+test("three real helpers converge on a binding set and named native Eval calls overlap on distinct devices", async () => {
 	const f = await fixture(3);
 	const entered = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<Response>();
-	const gate = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { entered.resolve(); return release.promise; } });
+	const gate = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: () => { entered.resolve(); return release.promise; } });
 	try {
 		const [a, b, c] = f.clients;
 		const views = await Promise.all(f.clients.map((client, index) => resolveView(client, f.broker, `view-${index}`)));
-		for (const view of views) expect(view.state.binding.clientId).toBeNull();
+		for (const view of views) expect(view.state.binding.clientIds).toEqual([]);
 		const identities = await Promise.all(f.clients.map(client => ui(client.endpoint, "/v1/state", LocalUiStateSchema)));
-		const stale = await ui(b!.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId: "view-1", sessionId: "conversation", draftToken: views[1]!.draftToken, clientId: identities[2]!.device.id, expectedRevision: 0 });
-		await bind(a!, f.broker, "view-0", identities[1]!.device.id, 0);
+		const [actorId, bId, cId] = [identities[0]!.device.id, identities[1]!.device.id, identities[2]!.device.id];
+		const members = [bId, cId].sort();
+		const stale = await ui(b!.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId: "view-1", sessionId: "conversation", draftToken: views[1]!.draftToken, clientIds: [cId], expectedRevision: 0 });
+		await bind(a!, f.broker, "view-0", members, 0);
 		await expect(f.broker.claimIntent(stale.id, "conversation", "draft", views[1]!.destinationId)).rejects.toMatchObject({ code: "STALE_BINDING" });
 		for (const [index, client] of f.clients.entries()) {
 			const state = await stateWhen(client, state => state.views[`view-${index}`]?.state.binding.revision === 1);
-			expect(state.views[`view-${index}`]!.state.binding.clientId).toBe(identities[1]!.device.id);
-			expect(state.views[`view-${index}`]!.state.binding.change?.actor.id).toBe(identities[0]!.device.id);
+			expect(state.views[`view-${index}`]!.state.binding.clientIds).toEqual(members);
+			expect(state.views[`view-${index}`]!.state.binding.change?.actor.id).toBe(actorId);
 		}
-		expect((await f.broker.state("other-conversation")).binding.clientId).toBeNull();
+		const checkOwner = { language: "js", code: 'print(typeof globalThis.bridgeOwner === "undefined" ? "C_ISOLATED" : "WRONG_OWNER");' };
+		expect((await f.broker.state("other-conversation")).binding.clientIds).toEqual([]);
+		await expect(f.broker.invoke("other-conversation", "other-context", "eval", checkOwner, { clientId: cId })).rejects.toMatchObject({ code: "UNBOUND" });
+		await expect(f.broker.invoke("conversation", "execution-root", "eval", checkOwner)).rejects.toMatchObject({ code: "CLIENT_ID_REQUIRED" });
+		await expect(f.broker.invoke("conversation", "execution-root", "eval", checkOwner, { clientId: actorId })).rejects.toMatchObject({ code: "CLIENT_NOT_BOUND" });
 		const updates: ToolResult[] = [];
-		const active = f.broker.invoke("conversation", "execution-root", "eval", { language: "js", code: `globalThis.bridgeOwner = "PINNED_B"; await fetch("http://127.0.0.1:${gate.port}/gate"); print(globalThis.bridgeOwner);`, timeout: 30 }, { onUpdate: result => updates.push(result) });
+		const active = f.broker.invoke("conversation", "execution-root", "eval", { language: "js", code: `globalThis.bridgeOwner = "PINNED_B"; await fetch("http://127.0.0.1:${gate.port}/gate"); print(globalThis.bridgeOwner);`, timeout: 60 }, { clientId: bId, onUpdate: result => updates.push(result) });
 		await Promise.race([entered.promise, active.then(result => { throw new Error(`Native Eval finished before reaching its gate: ${text(result)}`); })]);
-		await bind(a!, f.broker, "view-0", identities[2]!.device.id, 1);
+		const concurrent = await f.broker.invoke("conversation", "execution-root", "eval", checkOwner, { clientId: cId });
+		expect(text(concurrent)).toContain("C_ISOLATED");
+		expect(concurrent.details).toMatchObject({ clientBridge: { target: { device: { id: cId }, bindingRevision: 1 } } });
+		await bind(a!, f.broker, "view-0", [cId], 1);
 		release.resolve(new Response("released"));
 		const completed = await active;
 		expect(text(completed)).toContain("PINNED_B");
-		const originalTarget = { device: { id: identities[1]!.device.id }, bindingRevision: 1, sessionId: "conversation", contextId: "execution-root" };
+		const originalTarget = { device: { id: bId }, bindingRevision: 1, sessionId: "conversation", contextId: "execution-root" };
 		expect(completed.details).toMatchObject({ clientBridge: { target: originalTarget } });
 		for (const update of updates) expect(update.details).toMatchObject({ clientBridge: { target: originalTarget } });
-		const next = await f.broker.invoke("conversation", "execution-root", "eval", { language: "js", code: 'print(typeof globalThis.bridgeOwner === "undefined" ? "C_ISOLATED" : "WRONG_OWNER");' });
+		const next = await f.broker.invoke("conversation", "execution-root", "eval", checkOwner);
 		expect(text(next)).toContain("C_ISOLATED");
-		expect(next.details).toMatchObject({ clientBridge: { target: { device: { id: identities[2]!.device.id }, bindingRevision: 2 } } });
-		await bind(a!, f.broker, "view-0", identities[1]!.device.id, 2);
+		expect(next.details).toMatchObject({ clientBridge: { target: { device: { id: cId }, bindingRevision: 2 } } });
+		await expect(f.broker.invoke("conversation", "execution-root", "eval", checkOwner, { clientId: bId })).rejects.toMatchObject({ code: "CLIENT_NOT_BOUND" });
+		await bind(a!, f.broker, "view-0", members, 2);
+		await c!.close();
+		await stateWhen(a!, state => state.views["view-0"]?.state.devices.some(device => device.id === cId && !device.online) === true);
+		await expect(f.broker.invoke("conversation", "execution-root", "eval", checkOwner)).rejects.toMatchObject({ code: "CLIENT_ID_REQUIRED" });
+		await expect(f.broker.invoke("conversation", "execution-root", "eval", checkOwner, { clientId: cId })).rejects.toMatchObject({ code: "CLIENT_OFFLINE" });
+		await bind(a!, f.broker, "view-0", [bId], 3);
 		expect(text(await f.broker.invoke("conversation", "execution-root", "eval", { language: "js", code: "print(globalThis.bridgeOwner);" }))).toContain("PINNED_B");
 		await f.broker.closeContext("conversation", "execution-root");
 	} finally { release.resolve(new Response("released")); await gate.stop(true); await f.close(); }
@@ -190,7 +297,7 @@ test("unbound human uploads preserve bytes and cancellation cannot claim a nativ
 			return { transfer: ready, intentId: intent.id };
 		};
 		const first = await start();
-		expect((await f.broker.state("conversation")).binding.clientId).toBeNull();
+		expect((await f.broker.state("conversation")).binding.clientIds).toEqual([]);
 		const destination = join(f.root, "server", "imports", first.transfer.id);
 		const filename = (await readdir(destination)).find(name => name !== "README");
 		expect(await readFile(join(destination, filename!))).toEqual(bytes);
@@ -221,7 +328,7 @@ test("unbound image transfer preserves native image format and bytes through the
 		expect(ready.phase).toBe("ready");
 		const { id: intentId } = await draftOwners.get(f.broker)!.intent();
 		const claimed = await f.broker.claimIntent(intentId, view.sessionId, view.draftToken, view.destinationId);
-		expect(claimed.state.binding.clientId).toBeNull();
+		expect(claimed.state.binding.clientIds).toEqual([]);
 		expect(claimed.files).toHaveLength(1);
 		const file = claimed.files![0]!;
 		expect(file.name).toBe("synthetic image.png");
@@ -256,7 +363,7 @@ test("directed intents require the exact live channel and draft, never a sibling
 		await original.intent(paste.id);
 		expect(await f.broker.claimIntent(paste.id, "conversation", "draft", original.destination.id)).toMatchObject({ kind: "paste", text });
 		await f.broker.finishIntent(paste.id);
-		const pending = await ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId: "owned-view", sessionId: "conversation", draftToken: "draft", clientId: null, expectedRevision: 0 });
+		const pending = await ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId: "owned-view", sessionId: "conversation", draftToken: "draft", clientIds: [], expectedRevision: 0 });
 		const updated = await original.update("submitted-draft");
 		expect(updated.id).toBe(original.destination.id);
 		await stateWhen(client, state => !state.views["owned-view"]);
@@ -264,7 +371,7 @@ test("directed intents require the exact live channel and draft, never a sibling
 		await expect(ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "paste", viewId: "owned-view", sessionId: "conversation", draftToken: "draft", text: "stale" })).rejects.toThrow("DESTINATION_CHANGED");
 		const fresh = await resolveView(client, f.broker, "owned-view");
 		expect(fresh.draftToken).toBe("submitted-draft");
-		await expect(ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId: "owned-view", sessionId: "conversation", draftToken: "draft", clientId: null, expectedRevision: 0 })).rejects.toThrow("DESTINATION_CHANGED");
+		await expect(ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "bind", viewId: "owned-view", sessionId: "conversation", draftToken: "draft", clientIds: [], expectedRevision: 0 })).rejects.toThrow("DESTINATION_CHANGED");
 		original.channel.close();
 		await stateWhen(client, state => !state.views["owned-view"]);
 		await expect(ui(client.endpoint, "/v1/intents", UiIntentReceiptSchema, { kind: "resolve", viewId: "owned-view", destinationId: original.destination.id })).rejects.toThrow("DESTINATION_CHANGED");

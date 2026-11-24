@@ -494,9 +494,27 @@ local function transfer(target, capture)
 	end)
 end
 
-local function deviceName(view, id)
-	if id == nil or id == tern.json.null then return "Unbound" end
-	for _, device in view.state.devices do if device.id == id then return device.name end end
+local function validDeviceId(id)
+	return type(id) == "string" and #id <= 256 and id:match("^[%w_-]+$") ~= nil
+end
+
+local function membership(view)
+	local binding = view and view.state.binding
+	local ids = binding and binding.clientIds
+	if type(ids) ~= "table" or ids == tern.json.null or #ids > 32 or binding.sessionId ~= view.sessionId then return nil end
+	local seen, count = {}, 0
+	for index, id in ids do
+		if type(index) ~= "number" or index % 1 ~= 0 or index < 1 or index > #ids or not validDeviceId(id) or seen[id] then return nil end
+		seen[id], count = true, count + 1
+	end
+	return count == #ids and ids or nil
+end
+
+local function deviceName(view, ids)
+	if not ids then return "Binding unavailable" end
+	if #ids == 0 then return "Unbound" end
+	if #ids > 1 then return tostring(#ids) .. " devices" end
+	for _, device in view.state.devices do if device.id == ids[1] then return device.name end end
 	return "Unavailable device"
 end
 
@@ -752,8 +770,13 @@ local function sameSnapshot(a, b)
 	return true
 end
 
+local function pickerLabel(option)
+	local verb = option.key == "none" and "" or (option.selected and "Remove · " or "Add · ")
+	return publicText(verb .. option.label)
+end
+
 -- Device choices travel only to our native panel. Real identities never cross
--- this display boundary; each generation pins scalar identity and opaque keys.
+-- this display boundary; each generation pins the full membership and opaque keys.
 local function deviceSelection(owned)
 	local target = owned.target
 	local view = state and state.views[target.viewId]
@@ -764,25 +787,35 @@ local function deviceSelection(owned)
 		and type(view.draftToken) == "string" and view.draftToken ~= ""
 		and type(binding.revision) == "number" and binding.revision >= 0 and binding.revision < math.huge
 		and binding.revision % 1 == 0
-	local clients = { none = tern.json.null }
-	local options = { table.freeze({ key = "none", label = "Unbound", detail = "Agent-host operations only", disabled = false }) }
-	local bound = binding and binding.clientId
-	local current = (bound == nil or bound == tern.json.null) and "none" or ""
-	for index, device in view and view.state.devices or {} do
-		if index > 32 then break end
-		local key = "d" .. tostring(index)
-		clients[key] = device.id
-		if device.id == bound then current = key end
-		table.insert(options, table.freeze({ key = key,
-			label = singleLine(device.name, "Unnamed device"),
-			detail = publicText(device.platform .. " · " .. (device.online == true and "Online" or "Offline") .. (state.device and device.id == state.device.id and " · This device" or "")),
-			disabled = device.online ~= true }))
+	local ids = membership(view)
+	local members = table.freeze(table.clone(ids or {}))
+	available = available and ids ~= nil
+	local clients, seen, labels = {}, {}, {}
+	local options = { { key = "none", label = "Clear all devices", detail = "Agent-host operations only",
+		selected = ids ~= nil and #members == 0, disabled = #members == 0 } }
+	local function add(id, name, platform, online)
+		if not validDeviceId(id) or seen[id] then available = false; return end
+		seen[id] = true
+		local key = "d" .. tostring(#options)
+		local joined = table.find(members, id) ~= nil
+		clients[key] = id
+		local label = singleLine(name, "Unavailable device")
+		local detail = publicText((joined and "Joined" or "Not joined") .. " · " .. platform .. " · " .. (online and "Online" or "Offline")
+			.. (state.device and id == state.device.id and " · This device" or ""))
+		local option = { key = key, label = label, detail = detail, selected = joined, disabled = not joined and (not online or #members >= 32) }
+		-- If the bounded public descriptions coincide, neither row identifies a precise device.
+		local signature = pickerLabel(option) .. "\0" .. detail
+		if labels[signature] then option.disabled = true; labels[signature].disabled = true end
+		labels[signature] = option
+		table.insert(options, option)
 	end
-	if current == "" then available = false end
+	for _, device in view and view.state.devices or {} do add(device.id, device.name, device.platform, device.online == true) end
+	for _, id in members do if not seen[id] then add(id, nil, "Not listed", false) end end
+	for _, option in options do table.freeze(option) end
 	return table.freeze({ target = table.freeze({ destinationId = target.destinationId, viewId = target.viewId,
 			sessionId = view and view.sessionId, draftToken = view and view.draftToken }),
 		revision = binding and binding.revision, clients = table.freeze(clients),
-		available = available == true, current = current, options = table.freeze(options) })
+		available = available == true, members = members, options = table.freeze(options) })
 end
 
 local function publishDeviceSelection(cx, owned)
@@ -797,18 +830,17 @@ local function publishDeviceSelection(cx, owned)
 	local session = cx.sessions:current()
 	if session.id ~= owned.session or session.host ~= owned.host or not panelSurface(cx, owned.pane) then return end
 	-- The legacy panel's event is byte-bounded; the window card keeps the full display names.
-	local options = selection.options
+	local options = {}
 	for index, option in selection.options do
-		if #option.label > 240 then
-			if options == selection.options then options = table.clone(options) end
-			local wire = table.clone(option)
-			wire.label = publicText(option.label)
-			options[index] = wire
-		end
+		if index > 33 then break end
+		local wire = table.clone(option)
+		wire.label = publicText(option.label)
+		table.insert(options, wire)
 	end
 	local payload = tern.json.encode({ owner = windowId, panelId = owned.id,
 		generation = owned.selectionGeneration, available = selection.available,
-		current = selection.current, options = options })
+		summary = publicText(deviceName(state and state.views[owned.target.viewId], selection.available and selection.members or nil)),
+		overflow = #selection.options > #options, options = options })
 	local ok = pcall(function()
 		cx.session:event(owned.pane, { ev = "action", act = "bridge-device-selection", value = payload })
 	end)
@@ -824,14 +856,22 @@ local function bindDevice(selection, key, valid, accepted, finished)
 	validateConversation(selection.target, function(view, err, fresh)
 		finished()
 		if err then report(fresh, err); return end
-		if not valid(fresh) or view.draftToken ~= selection.target.draftToken or view.state.binding.revision ~= selection.revision then
+		if not valid(fresh) or view.draftToken ~= selection.target.draftToken or not sameSnapshot(membership(view), selection.members)
+			or view.state.binding.revision ~= selection.revision then
 			report(fresh, "Original conversation, draft, binding or device choices changed; nothing was bound")
 			return
+		end
+		local desired = tern.json.decode("[]")
+		if key ~= "none" then
+			local id = selection.clients[key]
+			for _, member in selection.members do if member ~= id then table.insert(desired, member) end end
+			if not table.find(selection.members, id) then table.insert(desired, id) end
+			table.sort(desired)
 		end
 		accepted()
 		api("POST", "/v1/intents", { kind = "bind", viewId = selection.target.viewId,
 			sessionId = selection.target.sessionId, draftToken = selection.target.draftToken,
-			clientId = selection.clients[key], expectedRevision = selection.revision }, function(receipt, failure, live)
+			clientIds = desired, expectedRevision = selection.revision }, function(receipt, failure, live)
 			if failure then report(live, failure); return end
 			operations[receipt.id] = { viewId = selection.target.viewId, deadline = tern.now() + 65000 }
 		end)
@@ -845,8 +885,7 @@ local function applyDevice(cx, generation, key)
 		if not fresh or panel ~= owned or owned.selection ~= selection
 			or generation ~= owned.selectionGeneration or not selection or not selection.available
 			or not owned.selectionSentAt or tern.now() >= owned.selectionSentAt + 15000
-			or owned.appliedGeneration == generation or selection.clients[key] == nil
-			or key == selection.current or not sameSnapshot(selection, deviceSelection(owned)) then return false end
+			or owned.appliedGeneration == generation or not sameSnapshot(selection, deviceSelection(owned)) then return false end
 		local offered = false
 		for _, option in selection.options do if option.key == key and not option.disabled then offered = true end end
 		local session = fresh.sessions:current()
@@ -854,7 +893,7 @@ local function applyDevice(cx, generation, key)
 			and fresh.session:focused() == owned.pane and panelSurface(fresh, owned.pane)
 	end
 	if owned.applying then return end
-	if not valid(cx) then report(cx, "Device choices changed or expired; select a current online device and apply again"); return end
+	if not valid(cx) then report(cx, "Device choices changed or expired; select a current action and apply again"); return end
 	owned.applying = true
 	bindDevice(selection, key, valid, function() owned.appliedGeneration = generation end, function() owned.applying = false end)
 end
@@ -901,16 +940,17 @@ local function publishPanel(cx)
 		owner = windowId, panelId = panel.id,
 		source = publicText(state and state.device.name, "This device"),
 		target = publicText(targetTitle .. (available and "" or " (closed)")),
-		agent = publicText(view and deviceName(view, view.state.binding.clientId), "Resolving"),
+		agent = publicText(view and deviceName(view, membership(view)), "Resolving"),
 		connected = available and state ~= nil and state.connected == true and statusError == nil,
 		devices = tern.json.decode("[]"), transfers = tern.json.decode("[]"), approvals = state and #state.interactions or 0,
 	}
 	-- Never serialize raw errors: they can contain endpoint URLs or local paths.
 	if statusError or not available then snapshot.error = "Bridge or original OMP target unavailable; see local status" end
 	if view then
+		local ids = membership(view)
 		for index, device in view.state.devices do
 			if index > 32 then break end
-			table.insert(snapshot.devices, { name = publicText(device.name), platform = publicText(device.platform), online = device.online == true, bound = device.id == view.state.binding.clientId })
+			table.insert(snapshot.devices, { name = publicText(device.name), platform = publicText(device.platform), online = device.online == true, bound = ids ~= nil and table.find(ids, device.id) ~= nil })
 		end
 	end
 	if state then
@@ -1347,14 +1387,16 @@ end
 -- The human chooses in this window (native picker or widget card); the fresh
 -- resolve must still match the exact choices shown before anything is bound.
 local deviceBinding = false -- the chosen option key while its bind is in flight
-local function applyDeviceChoice(cx, target, selection, key, accepted)
-	if deviceBinding or key == selection.current or selection.clients[key] == nil then return end
+local function applyDeviceChoice(cx, target, selection, key, accepted, owner)
+	if deviceBinding then return end
 	local offered = nil
 	for _, option in selection.options do if option.key == key then offered = option end end
 	if not offered then return end
-	if offered.disabled then cx:toast("info", "OMP Client Bridge", "That device is offline; nothing was bound"); return end
+	if offered.disabled then cx:toast("info", "OMP Client Bridge", "That device action is unavailable; nothing was changed"); return end
 	local function valid(live)
-		return live ~= nil and selection.available and destination(live, target) ~= nil
+		local current = destination(live)
+		return current ~= nil and current.viewId == target.viewId and selection.available
+			and (not owner or (panel == owner and live.session:focused() == owner.pane and panelSurface(live, owner.pane)))
 			and sameSnapshot(selection, deviceSelection({ target = target }))
 	end
 	if not valid(cx) then report(cx, "Device choices changed while they were shown; nothing was bound"); return end
@@ -1362,7 +1404,7 @@ local function applyDeviceChoice(cx, target, selection, key, accepted)
 	refreshChrome()
 	bindDevice(selection, key, valid, accepted or function() end, function() deviceBinding = false; refreshChrome() end)
 end
-local function chooseDevice(cx, target)
+local function chooseDevice(cx, target, owner)
 	local selection = deviceSelection({ target = target })
 	if not selection.available then
 		cx:toast("info", "OMP Client Bridge", "Agent device choices are not ready for this OMP; retry once Bridge resolves it")
@@ -1373,12 +1415,12 @@ local function chooseDevice(cx, target)
 	end
 	local items = {}
 	for _, option in selection.options do
-		table.insert(items, { label = option.label, detail = option.detail, icon = option.key == "none" and "link" or "monitor",
-			current = option.key == selection.current, key = option.key })
+		table.insert(items, { label = pickerLabel(option), detail = option.detail, icon = option.key == "none" and "link" or "monitor",
+			current = option.selected, key = option.key })
 	end
-	cx:pick({ items = items, icon = "monitor", action = "use", placeholder = "Agent device for " .. publicText(target.title, "this OMP") }):next(function(item, err, fresh)
+	cx:pick({ items = items, icon = "monitor", action = "apply", placeholder = "Agent devices for " .. publicText(target.title, "this OMP") }):next(function(item, err, fresh)
 		if err then report(fresh, err); return end
-		if item and fresh then applyDeviceChoice(fresh, target, selection, item.key) end
+		if item and fresh then applyDeviceChoice(fresh, target, selection, item.key, nil, owner) end
 	end)
 end
 
@@ -1387,10 +1429,10 @@ local function openBridgeMenu(cx)
 	local view = target and state and state.views[target.viewId]
 	local items, here, transfersHere = {}, "This OMP", 0
 	if target then
-		local agent = view and deviceName(view, view.state.binding.clientId) or "Resolving"
+		local agent = view and deviceName(view, membership(view)) or "Resolving"
 		table.insert(items, { label = "Paste to remote", icon = "clipboard", group = here, run = "paste" })
 		table.insert(items, { label = "Upload file…", icon = "file-plus", group = here, run = "upload" })
-		table.insert(items, { label = "Agent device…", detail = publicText(agent), icon = "monitor", group = here, run = "devices" })
+		table.insert(items, { label = "Agent devices…", detail = publicText(agent), icon = "monitor", group = here, run = "devices" })
 	end
 	for _, item in state and state.transfers or {} do
 		if not target or item.viewId == target.viewId then transfersHere += 1 end
@@ -1452,6 +1494,7 @@ local function handlePanelLink(req, cx)
 	if verb == "paste" then pasteRemote(cx, target)
 	elseif verb == "upload" then uploadRemote(cx, target)
 	elseif generation and #generation <= 32 and (key == "none" or (key:match("^d[1-9]%d?$") and tonumber(key:sub(2)) <= 32)) then applyDevice(cx, generation, key)
+	elseif verb == "moredevices" and panel.selection and panel.selection.available and #panel.selection.options > 33 then chooseDevice(cx, target, panel)
 	elseif verb == "transfers" then transfers(cx, target)
 	elseif verb == "approvals" then interactions(cx)
 	else cx:toast("error", "OMP Client Bridge", "Unknown Bridge panel action") end
@@ -1570,13 +1613,18 @@ local function statusSegments(viewId)
 		text, icon, tone = resolving and "Connected · Resolving" or "Connected · No session", "plug", "muted"
 		short = resolving and "Resolving" or "Connected"
 		if view then
-			local bound = view.state.binding.clientId
-			if bound == nil or bound == tern.json.null then
+			local ids = membership(view)
+			if not ids then
+				text, short, tone = "Connected · Binding unavailable", "Unavailable", "warn"
+			elseif #ids > 1 then
+				short, icon = deviceName(view, ids), "monitor"
+				text = "Connected · " .. short
+			elseif #ids == 0 then
 				text, short = "Connected · Unbound", "Unbound"
 			else
 				local device = nil
 				for _, candidate in view.state.devices do
-					if candidate.id == bound then device = candidate; break end
+					if candidate.id == ids[1] then device = candidate; break end
 				end
 				local name = publicText(device and device.name, "Unavailable device")
 				local cut = utf8.offset(name, 25)
@@ -1665,21 +1713,19 @@ local disclosure, disclosureSerial = nil, 0
 local function addDeviceField(model, viewId, view)
 	local selection = deviceSelection({ target = model.target })
 	model.selection = selection
-	local name, meta = view and "Unavailable device" or "Resolving", "Unavailable"
-	for _, opt in selection.options do
-		if view and opt.key == selection.current then
-			name = opt.label
-			if opt.key == "none" then meta = "Agent-host only"
-			elseif opt.disabled then meta = "Offline"
-			elseif state.device and selection.clients[opt.key] == state.device.id then meta = "This device"
-			else meta = "Online" end
-			break
+	local name = view and deviceName(view, membership(view)) or "Resolving"
+	local meta = "Unavailable"
+	if selection.available then
+		if #selection.members == 0 then meta = "Agent-host only"
+		elseif #selection.members > 1 then meta = "Explicit target required"
+		else
+			for _, opt in selection.options do if opt.selected then meta = opt.detail; break end end
 		end
 	end
 	if disclosure and disclosure.viewId == viewId then
 		if selection.available and sameSnapshot(disclosure.selection, selection) then model.disclosure = disclosure else disclosure = nil end
 	end
-	addRow(model, { id = "agent-caption", label = "Agent device", text = meta })
+	addRow(model, { id = "agent-caption", label = "Agent devices", text = meta })
 	addRow(model, { id = "agent", text = cardText(name, "Unavailable device"), actions = {
 		{ id = "toggle", label = model.disclosure and "Close" or "Change", disabled = not selection.available },
 	} })
@@ -1690,10 +1736,10 @@ local function addDeviceField(model, viewId, view)
 				actions = { { id = "choose", label = "Choose", icon = "review" } } })
 			break
 		end
-		local current = opt.key == selection.current
+		local verb = opt.key == "none" and "Clear" or (opt.selected and "Remove" or "Add")
 		addRow(model, { id = disclosure.prefix .. opt.key, label = cardText(opt.label, "Device"),
-			text = cardText(opt.detail .. (current and " · In use" or "")), tone = opt.disabled and "muted" or (current and "ok" or nil),
-			actions = if current or opt.disabled then nil else { { id = "use", icon = "use", label = deviceBinding == opt.key and "Applying" or "Use",
+			text = cardText(opt.detail), tone = opt.disabled and "muted" or (opt.selected and "ok" or nil),
+			actions = if opt.disabled then nil else { { id = "use", icon = "use", label = deviceBinding == opt.key and "Applying" or verb,
 				disabled = deviceBinding ~= false } } }, "choice")
 	end
 end
@@ -1896,7 +1942,8 @@ local cardRowStyles = {
 		& .wgc-plugin-v { grid-row: 2; font-size: 11px; color: var(--t3); }
 		& .wgc-plugin-act { grid-column: 2; grid-row: 1 / span 2; }
 		&[data-tone='ok'] { background: rgb(from var(--accent) r g b / 7%); }
-		&[data-tone='ok']::after { content: "✓"; grid-column: 2; grid-row: 1 / span 2; color: var(--accent-ink); padding: 0 9px; }
+		&[data-tone='ok'] .wgc-k { color: var(--accent-ink); }
+		&[data-tone='ok'] .wgc-k::before { content: "✓"; margin-right: 5px; }
 		&[data-tone='muted'] .wgc-k { color: var(--t3); }
 	]=],
 	["notice"] = [=[

@@ -86,11 +86,15 @@ administrative enrollment service or durable per-human authorization database.
 Use separate OS accounts/hosts and appropriate access controls if participants
 must be isolated.
 
-The manual binding belongs to the real OMP conversation. It begins unbound and
-changes through an attributed, revision-checked local UI intent. Every invocation
-captures one target. URI authorities cannot select arbitrary devices. A running
-invocation, its cancellation, background output, and returned handles retain the
-captured device, even if a viewer changes the next target.
+The session starts with no bound devices. Local human gestures change the
+membership under a revision check; seeing an online device or learning its
+ID never authorizes it. A client invocation captures one target. When two or
+more devices are bound, the caller must supply one stable `clientId`, even if
+all other members are offline. Unknown, unbound and offline targets are not
+redirected. The broker resolves membership before forwarding native tool input.
+Separate calls may run concurrently, never by broadcasting one command.
+For an issued process handle or receipt, a supplied ID must match the captured
+owner. Session/context ownership still applies after a membership change.
 
 The native Bridge panel is host-rendered and therefore visible to other windows
 of the Tern session. Its snapshots contain display information only: never the

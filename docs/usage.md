@@ -1,14 +1,16 @@
 # Setup and usage
 
-## Binding-authorized native tools (0.5.0)
+## Binding-authorized native tools
 
 Update the broker, client service, OMP extension and both Tern plugin halves
 together. Copying a package does not upgrade an already-running service or reload
 an extension in an existing conversation. Use the host's supported extension/plugin
 reload controls; do not reset Tern's daemon state or restart a conversation merely
-to repair pane addressing. Existing device credentials are retained. Protocol 2
-requires both ends to upgrade together; old grant fields are removed from saved
-identities without replacing their keys. Remove obsolete `--allow` launcher flags.
+to repair pane addressing. Existing device credentials are retained. Multi-client
+membership uses protocol 3: upgrade the broker, participating clients and extensions
+together. Do not retry a rejected named call without its `clientId` against an older
+broker. A broker restart resets session membership; paired identities do not grant
+access until a viewer binds them to the conversation again.
 
 The interactive OMP extension publishes invisible destination metadata in its native
 composer dock, without a visible **Client bridge** button or click action. Its locator
@@ -417,35 +419,31 @@ file into an issue or chat. Run one client service per chosen client state root.
 
 ## Choose the shared execution target
 
-Focus the live remote OMP conversation in Tern and use **OMP: Select agent device**,
-or **Agent device…** in the Bridge menu. This opens a native chooser on this device
-listing **Unbound** and the session's devices, with the current choice checked and
-offline devices marked. Choosing an online device applies it only after a fresh
-resolve still matches the conversation, draft, binding revision and the exact
-choices shown; otherwise nothing is bound. Dismissing the chooser or choosing the
-current entry changes nothing. With the [legacy floating panel](#legacy-floating-panel)
-enabled, the command instead focuses the panel's inline **Agent device** field,
-where a changed choice applies only through an explicit **Use device** click.
-New sessions are **Unbound**; **This device** identifies the current viewer, not
-necessarily the agent target.
+Open the device selector in the intended remote OMP conversation. Add each
+online, paired device that this conversation may use. Adding B keeps A bound;
+removing A keeps B bound. An offline member can be removed but cannot be added
+back until it reconnects. Opening the list does not grant access. Changes apply
+only after a fresh check of the conversation, draft, binding revision and
+device choices. All viewers manage the same membership. New sessions start
+empty; **This device** identifies the viewer, not an implicit execution target.
 
-The selection belongs to the OMP session, not its pane, SSH username, or latest
-viewer. All viewers see ordered changes with the actor and old/new targets.
-Stale choices are rejected; reopen the chooser (or the refreshed inline field)
-before applying again.
-Focus changes and reconnects do not auto-select. An offline selected device stays
-selected and fails client operations rather than falling back to the agent host.
+**Routing rule:** with one bound client, `clientId` is optional. With two or
+more, supply one bound device's exact ID on each client call, even if only one
+is currently online. The Bridge status and model-visible binding snapshot list
+IDs alongside names. Names are for display; choosing a name, or choosing the
+first online device, is not a fallback. Separate calls may run concurrently
+on A and B; a single call never runs on both.
 
-A switch takes effect at the next invocation boundary. A running Eval cell,
-including later helper statements, keeps its original device. Background results
-and process handles retain that owner. Switching back reuses still-live device
-state; it does not copy kernels, cookies, shells, or handles between devices.
+The selected device is captured before dispatch: updates, cancellation,
+background results, snapshots and process handles keep their original owner.
+Do not pass a handle obtained on A with B's `clientId`. Membership changes
+do not copy kernels, cookies, shell state or handles across devices.
 
 ## Existing tools, not a second tool family
 
-The extension adds `target: "agent" | "client"` only to existing `eval` and `bash`.
-Omitting it keeps native agent-host behavior. For example, these are model-tool
-argument objects, not shell commands:
+Execution tools use `target: "agent" | "client"`; omitting `target` keeps
+native agent-host behavior. All seven Bridge tools accept a separate optional
+`clientId` for client operations. For a single bound device:
 
 ```json
 {"target":"client","language":"js","code":"console.log(process.platform, process.cwd())"}
@@ -455,9 +453,20 @@ argument objects, not shell commands:
 {"target":"client","command":"pwd"}
 ```
 
-Keep the native tool's other required arguments and supported options. The
-extension retains the installed host's schemas and strips its routing field
-before native execution. Client Eval has separate persistent JS/Python contexts;
+With two bound devices, select by ID. For example, given the bound IDs
+`studio-mac` and `build-linux`, these are separate model tool arguments:
+
+```json
+{"target":"client","clientId":"build-linux","command":"pwd"}
+```
+
+```json
+{"clientId":"studio-mac","path":"client:///Users/example/project/README.md"}
+```
+
+Use the actual IDs shown for the conversation and keep each tool's native
+required arguments. Do not put a `clientId` on an agent-host path or execution.
+Bridge strips target selectors before execution. Client Eval has separate persistent JS/Python contexts;
 `reset` applies to the selected language/device/context. Subagents use the parent
 conversation's binding but separate execution contexts. Client Eval does not
 provide model completion, judgment, image questions, or reasoning-agent spawning.
@@ -530,12 +539,10 @@ pick the ring style. On Tern 0.9.27 and later, hover to open the connection card
 
 - Check the **remote host**, workspace and conversation at the top. **From this device**
   is the source of **Paste** and **Upload…**; it does not change when the agent binding does.
-- Click anywhere in the **Agent device** field to open or close it. The device name
-  wraps independently of the button. Opening the list does not change the binding.
-  Click an online alternative's row to select it; Bridge rechecks the conversation,
-  draft, binding revision and choices before applying. The current device has an
-  in-use indicator; offline devices cannot be selected. If the choices change,
-  reopen the list. **Choose** opens the native picker for longer lists.
+- Open **Agent devices** to manage the bound set. Opening does not bind a
+  device. Add an online non-member or remove a member (including an offline
+  one); other members are untouched. If choices change, reopen the list.
+  Use the native picker for longer lists.
 - **Transfers** shows active files, progress, **Cancel** and **History**. Approval
   buttons fit their captions and wrap if necessary. **Review** opens the full
   choices if there are more than two or a caption cannot fit Tern's 64-character
@@ -604,9 +611,9 @@ filesystem sandbox. Completed referenced uploads do not expire automatically.
 Image-only handoff adds neither file-path prose nor an agent-facing archival
 reminder: the agent receives the native image, not a working-directory path.
 
-The right-aligned status control shows connection and agent-device state rather
-than the word Bridge: `Connected · Unbound`, `Connected · <device>`, or
-`Device offline · <device>`. Device names are capped at 24 Unicode characters.
+The right-aligned status control distinguishes unbound, one bound device and
+multiple bound devices. Device names in compact status are shortened; the full
+binding state is available to the conversation.
 Without a resolved target it distinguishes `No session` from `Resolving`;
 client disconnects show `Waiting for connection`, and errors show `Needs attention`.
 Connection refers to the client/broker link, not proof that a remote OMP pane is usable.
@@ -673,7 +680,7 @@ launch labels; they never replace the routing locators or authorize actions.
 The native PiP frame owns the title and close action; the body does not repeat
 them. A compact workspace identity and source-device line precede the shared
 paste/upload action row. The inline agent field is separate from human transfer
-actions. **Use device** appears only for a changed, valid choice. Empty transfers
+actions. Only an explicit membership action applies a choice. Empty transfers
 occupy one quiet row beside History; approvals appear only when pending.
 Without a live snapshot, the panel shows a concise connection empty state.
 These inline selection and compact presentation changes are post-beta.3 source

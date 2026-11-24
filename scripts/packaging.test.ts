@@ -203,7 +203,7 @@ test("relay transports real authenticated registration and draft resolution, the
 		const claimed = await claimReady.promise;
 		expect(claimed.id).toBe(receipt.id);
 		await broker.finishIntent(claimed.id);
-		expect(claimed.state.binding.clientId).toBeNull();
+		expect(claimed.state.binding.clientIds).toEqual([]);
 		expect(await resolved.promise).toMatchObject({ viewId: "fixture-window:pane", sessionId: "fixture-session", draftToken: "fixture-draft" });
 		relay.stdin.end();
 		expect(await relay.exited).toBe(0);

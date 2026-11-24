@@ -8,7 +8,7 @@ import type { Server, ServerWebSocket } from "bun";
 import type { BackgroundResult, NativePanelSnapshot, PanelState, ResolvedView, ServerState, UiClaim, UiIntentInput, UiIntentReceipt } from "./api.ts";
 import { assertSupportedRuntime, authorized, defaultStateDir, protectPrivatePath, verifyIdentity, writePrivateJson, type Endpoint } from "./config.ts";
 import { failure } from "./json.ts";
-import { BridgeError, PROTOCOL_VERSION, type DeviceDescriptor, type ExecuteRequest, type ExecutionOptions, type InvocationTarget, type ToolName, type ToolParameters, type ToolResult } from "./protocol.ts";
+import { BridgeError, PROTOCOL_VERSION, type DeviceDescriptor, type ExecuteRequest, type ExecutionOptions, type InvocationTarget, type ToolResult } from "./protocol.ts";
 import { ClientResources } from "./resources/index.ts";
 import { DeviceDescriptorSchema, EndpointSchema, IdentifierSchema, InvocationSchema, PanelCloseSchema, PanelPublishSchema, PanelRouteIdSchema, ToolResultSchema, UiIntentSchema } from "./schemas.ts";
 import { SessionBindings } from "./session-bindings.ts";
@@ -365,7 +365,7 @@ class Broker {
 			} else {
 				const view = this.#liveView(intent.clientId, operation.viewId, input.sessionId, input.draftToken);
 				if (view.destinationId !== input.destinationId) throw new BridgeError("DESTINATION_CHANGED", "The view moved to another native OMP channel");
-				if (operation.kind === "bind") { this.#bindings.select(input.sessionId, intent.clientId, operation.clientId, operation.expectedRevision); this.#broadcast(input.sessionId); }
+				if (operation.kind === "bind") { this.#bindings.setMembers(input.sessionId, intent.clientId, operation.clientIds, operation.expectedRevision); this.#broadcast(input.sessionId); }
 				else if (operation.kind === "attach") {
 					this.#uploadOwner(intent.clientId, operation.transferId);
 					const uploaded = this.#uploads.completed(intent.clientId, operation.transferId); intent.handedOff = true;
@@ -390,11 +390,20 @@ class Broker {
 		return ToolResultSchema.parse(await socket.data.peer.request("execute", request, { signal: options.signal, onUpdate: value => options.onUpdate?.(ToolResultSchema.parse(value)) }));
 	}
 
-	async #invoke(sessionId: string, contextId: string, tool: ToolName, params: ToolParameters, signal: AbortSignal, onUpdate: (result: ToolResult) => void): Promise<ToolResult> {
+	// Lifecycle operations retain their issued owner, including after removal.
+	#pinnedTarget(target: InvocationTarget, clientId: string | undefined): InvocationTarget {
+		if (clientId === undefined && this.#bindings.state(target.sessionId).clientIds.length > 1) throw new BridgeError("CLIENT_ID_REQUIRED", "Several clients are bound; specify the clientId that owns this receipt or handle");
+		if (clientId !== undefined && clientId !== target.device.id) throw new BridgeError("CLIENT_ID_MISMATCH", "The specified clientId does not own this receipt or handle; the operation was not redirected");
+		return target;
+	}
+
+	async #invoke(input: z.infer<typeof InvocationSchema>, signal: AbortSignal, onUpdate: (result: ToolResult) => void): Promise<ToolResult> {
+		const { sessionId, contextId, tool, params, clientId } = input;
 		if (typeof params.path === "string" && params.path.startsWith("proc://client-bridge-call/")) {
 			const match = /^proc:\/\/client-bridge-call\/([a-f0-9-]+)(\/cancel)?$/.exec(params.path);
 			const call = match && this.#calls.get(match[1]!);
 			if (!call || call.target.sessionId !== sessionId || call.target.contextId !== contextId) throw new BridgeError("CALL_UNAVAILABLE", "This execution receipt belongs to no active call in this context");
+			this.#pinnedTarget(call.target, clientId);
 			if (tool === "write" && match![2]) {
 				if (call.phase !== "running") throw new BridgeError("CALL_NOT_RUNNING", "The initial call finished; control any native background job through its own returned handle");
 				call.controller.abort(new BridgeError("CANCELLED", "Cancellation requested through the original call receipt"));
@@ -404,10 +413,10 @@ class Broker {
 		let context = this.#contexts.get(contextId);
 		if (context && context.sessionId !== sessionId) throw new BridgeError("CONTEXT_OWNER_MISMATCH", "An execution context cannot be moved to another conversation");
 		if (context?.closing) throw new BridgeError("CONTEXT_CLOSING", "The execution context is closing");
-		if (!context) { context = { sessionId, clients: new Set() }; this.#contexts.set(contextId, context); }
 		const requestId = crypto.randomUUID();
 		const owned = typeof params.path === "string" ? this.#resources.resolveOwnedHandle(sessionId, contextId, params.path, requestId) : null;
-		const target = owned?.target ?? this.#bindings.capture(sessionId, contextId, requestId);
+		const target = owned ? this.#pinnedTarget(owned.target, clientId) : this.#bindings.capture(sessionId, contextId, requestId, clientId);
+		if (!context) { context = { sessionId, clients: new Set() }; this.#contexts.set(contextId, context); }
 		context.clients.add(target.device.id);
 		const controller = new AbortController();
 		const call: Call = { target, controller, phase: "running" };
@@ -501,7 +510,7 @@ class Broker {
 				this.#finishIntent(intent, input.error); return Response.json({ ok: true });
 			}
 			if (url.pathname === "/v1/context/close") { const input = ContextSchema.parse(body); await this.#closeContext(input.sessionId, input.contextId); return Response.json({ ok: true }); }
-			if (url.pathname === "/v1/invoke") {
+			if (url.pathname === "/v2/invoke") {
 				const input = InvocationSchema.parse(body);
 				const abort = new AbortController();
 				let writable = true;
@@ -529,7 +538,7 @@ class Broker {
 				const stream = new ReadableStream<Uint8Array>({
 					start: output => {
 						controller = output;
-						void this.#invoke(input.sessionId, input.contextId, input.tool, input.params, AbortSignal.any([request.signal, abort.signal]), result => { update = result; flush(); })
+						void this.#invoke(input, AbortSignal.any([request.signal, abort.signal]), result => { update = result; flush(); })
 							.then(result => { terminal = { kind: "result", result }; flush(); }, error => { terminal = { kind: "error", error: error instanceof z.ZodError ? { code: "INVALID_REQUEST", message: error.message } : failure(error) }; flush(); });
 					},
 					pull: flush,

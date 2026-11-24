@@ -587,9 +587,9 @@ function run(entry, loadModule)
 		end
 		function f.setTransfers(items) ui.transfers = items; f.poll() end
 		function f.status() return handlers.status({ pane = focused }) end
-		function f.binding(id, devices, revision)
+		function f.binding(ids, devices, revision)
 			local view = assert(ui.views[f.viewId])
-			view.state.binding.clientId = id or null
+			view.state.binding.clientIds = ids
 			view.state.binding.revision = revision or view.state.binding.revision
 			view.state.devices = copy(devices)
 			f.poll()
@@ -613,7 +613,7 @@ function run(entry, loadModule)
 			local previous = ui.views[viewId]
 			ui.views[viewId] = {
 				viewId = viewId, destinationId = request.body.destinationId, resolveIntentId = id, sessionId = session, draftToken = draft,
-				state = previous and copy(previous.state) or { serverInstance = "broker-fixture", binding = { sessionId = session, clientId = null, revision = 0 }, devices = {} },
+				state = previous and copy(previous.state) or { serverInstance = "broker-fixture", binding = { sessionId = session, clientIds = {}, revision = 0 }, devices = {} },
 			}
 			ui.views[viewId].state.binding.sessionId = session
 			f.poll()
@@ -1070,7 +1070,7 @@ function run(entry, loadModule)
 				f.resolve(validate, "session-A", "draft-A")
 				path, original = "/v1/transfers", f.take("/v1/transfers")
 			else
-				f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 7)
+				f.binding({}, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 7)
 				f.toggle(); f.link("bind/" .. f.choices().generation .. "/d1")
 				f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 				path, kind, original = "/v1/intents", "bind", f.take("/v1/intents", f.viewId)
@@ -1532,7 +1532,7 @@ function run(entry, loadModule)
 	case("status shows the selected agent device and follows original panel context", function(f)
 		f.warm()
 		print("STATUS unbound: " .. f.status()[1].text)
-		f.binding("selected", {
+		f.binding({ "selected" }, {
 			{ id = "other-device", name = "Wrong device", online = true, platform = "darwin" },
 			{ id = "selected", name = "Dev Mac", online = true, platform = "darwin" },
 		})
@@ -1542,7 +1542,7 @@ function run(entry, loadModule)
 		f.toggle()
 		f.focus(f.panelPane)
 		assert(f.status()[1].text:find("Dev Mac", 1, true), "panel focus lost its original agent device")
-		f.binding("selected", { { id = "selected", name = "Dev Mac", online = false, platform = "darwin" } })
+		f.binding({ "selected" }, { { id = "selected", name = "Dev Mac", online = false, platform = "darwin" } })
 		assert(f.status()[1].tone == "warn")
 		print("STATUS device offline: " .. f.status()[1].text)
 		f.connected(false)
@@ -2131,7 +2131,7 @@ function run(entry, loadModule)
 
 	case("panel focus and inline choice publication never open a picker or submit a binding", function(f)
 		f.warm()
-		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } })
+		f.binding({}, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } })
 		f.invoke("devices"); f.flushPanels()
 		local pane = f.panelPane
 		f.invoke("focus", {})
@@ -2608,10 +2608,10 @@ function run(entry, loadModule)
 
 	case("explicit inline Apply binds only the frozen original client and retains operation receipts", function(f)
 		f.warm()
-		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 7)
+		f.binding({}, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 7)
 		f.toggle()
 		local choices = f.choices()
-		assert(choices.available and choices.current == "none" and choices.options[2].key == "d1")
+		assert(choices.available and choices.options[1].selected and choices.options[2].key == "d1")
 		local request = f.linkRequest("bind/" .. choices.generation .. "/d1")
 		local before = f.ioCount()
 		assert(f.dispatch("link", request).handled and f.ioCount() == before)
@@ -2619,7 +2619,7 @@ function run(entry, loadModule)
 		assert(#f.binds() == 0, "Apply skipped fresh conversation validation")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 		local bind = f.take("/v1/intents", f.viewId)
-		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 7)
+		assert(bind.body.kind == "bind" and table.concat(bind.body.clientIds, ",") == "client-A" and bind.body.expectedRevision == 7)
 		assert(bind.body.viewId == f.viewId and bind.body.sessionId == "session-A" and bind.body.draftToken == "draft-A")
 		f.respond(bind, { id = "bind-receipt", expiresAt = 60000 })
 		f.outcomes({ { id = "bind-receipt", viewId = f.viewId, kind = "bind", error = "Binding rejected by agent" } })
@@ -2630,14 +2630,14 @@ function run(entry, loadModule)
 	case("inline choices contain only bounded public fields and stable heartbeat generations", function(f)
 		f.warm()
 		local devices = {}
-		for index = 1, 40 do table.insert(devices, { id = "private-device-" .. index, name = string.rep("界", 100), platform = "darwin", online = index ~= 2 }) end
-		f.binding(nil, devices); f.toggle()
+		for index = 1, 40 do table.insert(devices, { id = "private-device-" .. index, name = tostring(index) .. string.rep("界", 100), platform = "darwin", online = index ~= 2 }) end
+		f.binding({}, devices); f.toggle()
 		local value, count = f.choices(), #f.deviceEvents
-		local fields = { owner = true, panelId = true, generation = true, available = true, current = true, options = true }
+		local fields = { owner = true, panelId = true, generation = true, available = true, summary = true, overflow = true, options = true }
 		for key in value do assert(fields[key], "private field crossed native selection boundary") end
-		assert(value.generation:match("^[1-9]%d*$") and #value.options == 33 and value.options[1].key == "none")
+		assert(value.generation:match("^[1-9]%d*$") and value.overflow and #value.options == 33 and value.options[1].key == "none")
 		for _, option in value.options do
-			for key in option do assert(key == "key" or key == "label" or key == "detail" or key == "disabled") end
+			for key in option do assert(key == "key" or key == "label" or key == "detail" or key == "disabled" or key == "selected") end
 			assert(#option.label <= 240 and #option.detail <= 240 and utf8.len(option.label) ~= nil)
 		end
 		assert(value.options[3].disabled and not value.options[2].disabled)
@@ -2655,7 +2655,7 @@ function run(entry, loadModule)
 				{ id = "client-A", name = "Desk Mac", online = true, platform = "darwin" },
 				{ id = "client-B", name = "Other Mac", online = true, platform = "darwin" },
 			}
-			f.binding(nil, devices, 3); f.toggle()
+			f.binding({}, devices, 3); f.toggle()
 			local generation = f.choices().generation
 			local path = "bind/" .. (change == "generation" and "999999" or generation) .. "/" .. (change == "unknown key" and "d32" or change == "malformed key" and "d01" or "d1")
 			local request = f.linkRequest(path, change == "wrong pane" and f.original or nil,
@@ -2663,10 +2663,10 @@ function run(entry, loadModule)
 			if change == "focus" then f.focus(f.other)
 			elseif change == "nonce" then f.panelSurfaceOwner = "another-window/another-panel"
 			elseif change == "expired" then f.advance(15001)
-			elseif change == "offline" then devices[1].online = false; f.binding(nil, devices, 3)
-			elseif change == "revoked" then f.binding(nil, { devices[2] }, 3)
-			elseif change == "reordered" then f.binding(nil, { devices[2], devices[1] }, 3)
-			elseif change == "revision" then f.binding(nil, devices, 4)
+			elseif change == "offline" then devices[1].online = false; f.binding({}, devices, 3)
+			elseif change == "revoked" then f.binding({}, { devices[2] }, 3)
+			elseif change == "reordered" then f.binding({}, { devices[2], devices[1] }, 3)
+			elseif change == "revision" then f.binding({}, devices, 4)
 			elseif change == "disconnected" then f.connected(false); f.poll() end
 			local before = f.ioCount()
 			assert(f.dispatch("link", request).handled); f.flush()
@@ -2675,21 +2675,22 @@ function run(entry, loadModule)
 		end)
 	end
 
-	for _, change in { "session", "draft", "revision", "offline", "revoked", "reordered", "focus", "panel closed" } do
+	for _, change in { "session", "draft", "revision", "membership", "offline", "revoked", "reordered", "focus", "panel closed" } do
 		case("inline Apply revalidates frozen choices after fresh resolve changes " .. change, function(f)
 			f.warm()
 			local devices = {
 				{ id = "client-A", name = "Desk Mac", online = true, platform = "darwin" },
 				{ id = "client-B", name = "Other Mac", online = true, platform = "darwin" },
 			}
-			f.binding(nil, devices, 3); f.toggle()
+			f.binding({}, devices, 3); f.toggle()
 			local generation = f.choices().generation
 			f.link("bind/" .. generation .. "/d1")
 			local validate = f.take("/v1/intents", f.viewId)
-			if change == "revision" then f.binding(nil, devices, 4)
-			elseif change == "offline" then devices[1].online = false; f.binding(nil, devices, 3)
-			elseif change == "revoked" then f.binding(nil, { devices[2] }, 3)
-			elseif change == "reordered" then f.binding(nil, { devices[2], devices[1] }, 3)
+			if change == "revision" then f.binding({}, devices, 4)
+			elseif change == "membership" then f.binding({ "client-B" }, devices, 3)
+			elseif change == "offline" then devices[1].online = false; f.binding({}, devices, 3)
+			elseif change == "revoked" then f.binding({}, { devices[2] }, 3)
+			elseif change == "reordered" then f.binding({}, { devices[2], devices[1] }, 3)
 			elseif change == "focus" then f.focus(f.other)
 			elseif change == "panel closed" then f.toggle() end
 			f.resolve(validate, change == "session" and "session-B" or "session-A", change == "draft" and "draft-B" or "draft-A")
@@ -2701,9 +2702,9 @@ function run(entry, loadModule)
 		f.warm()
 		local a = { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }
 		local b = { id = "client-B", name = "Other Mac", online = true, platform = "darwin" }
-		f.binding(nil, { a, b }); f.toggle()
+		f.binding({}, { a, b }); f.toggle()
 		local old = f.choices().generation
-		f.binding(nil, { b, a }); f.flushPanels()
+		f.binding({}, { b, a }); f.flushPanels()
 		assert(f.choices().generation ~= old)
 		f.link("bind/" .. old .. "/d1")
 		assert(#f.binds() == 0)
@@ -2711,31 +2712,94 @@ function run(entry, loadModule)
 		f.poll(); f.flushPanels()
 		f.link("bind/" .. f.choices().generation .. "/d2")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
-		assert(f.take("/v1/intents", f.viewId).body.clientId == "client-A")
+		assert(table.concat(f.take("/v1/intents", f.viewId).body.clientIds, ",") == "client-A")
 	end)
 
-	case("explicit Unbound Apply uses the cached null mapping and unchanged selection is rejected", function(f)
+	case("explicit Clear all removes every member at the presented revision", function(f)
 		f.warm()
-		f.binding("client-A", { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 2)
+		f.binding({ "client-A", "client-B" }, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 2)
 		f.toggle()
-		assert(f.choices().current == "d1")
-		f.link("bind/" .. f.choices().generation .. "/d1")
-		assert(#f.binds() == 0)
-		f.poll(); f.flushPanels()
+		assert(f.choices().summary == "2 devices" and f.choices().options[2].selected and f.choices().options[3].selected)
 		f.link("bind/" .. f.choices().generation .. "/none")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 		local bind = f.take("/v1/intents", f.viewId)
-		assert(bind.body.kind == "bind" and bind.body.clientId == tern.json.null and bind.body.expectedRevision == 2)
+		assert(bind.body.kind == "bind" and #bind.body.clientIds == 0 and bind.body.expectedRevision == 2)
 	end)
 
-	case("missing current binding stays unavailable without presenting a false Unbound selection", function(f)
+	case("missing member can be removed without changing the other member", function(f)
 		f.warm()
-		f.binding("revoked-client", { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 4)
+		f.binding({ "client-A", "revoked-client" }, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }, 4)
 		f.toggle()
 		local choices = f.choices()
-		assert(not choices.available and choices.current == "" and choices.options[1].key == "none")
-		f.link("bind/" .. choices.generation .. "/d1")
-		assert(#f.binds() == 0 and #f.errors == 1)
+		assert(choices.available and choices.options[3].selected and not choices.options[3].disabled)
+		f.link("bind/" .. choices.generation .. "/d2")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		assert(table.concat(f.take("/v1/intents", f.viewId).body.clientIds, ",") == "client-A")
+	end)
+
+	case("adding a device preserves a joined member beyond the panel display cap", function(f)
+		f.warm()
+		local devices = {}
+		for i = 1, 34 do devices[i] = { id = "client-" .. i, name = "Device " .. i, platform = "linux", online = i ~= 34 } end
+		f.binding({ "client-34" }, devices, 9); f.toggle()
+		assert(f.choices().overflow and #f.choices().options == 33 and #f.binds() == 0)
+		f.link("moredevices")
+		local items = f.picks[1].options.items
+		assert(#items == 35 and items[35].current and items[35].label == "Remove · Device 34")
+		f.choose("key", "d33")
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		local bind = f.take("/v1/intents", f.viewId).body
+		assert(bind.expectedRevision == 9 and table.concat(bind.clientIds, ",") == "client-33,client-34")
+	end)
+
+	case("widget explicitly removes a joined offline device, preserving its peer", function(f)
+		f.warm()
+		f.binding({ "A", "B" }, { { id = "A", name = "Laptop", platform = "linux", online = true },
+			{ id = "B", name = "Desktop", platform = "linux", online = false } }, 2)
+		assert(f.status()[1].text == "Connected · 2 devices")
+		f.invoke("widget_action", { widget = "bridge", row = "agent", act = "toggle" })
+		f.noRequest("/v1/intents")
+		local found
+		for _, row in f.widgets.bridge.render({ pane = f.original }).card do
+			if row.label == "Desktop" then found = row end
+		end
+		assert(found and found.text:find("Offline", 1, true), "offline member missing from the selector")
+		local remove = found.actions and found.actions[1]
+		assert(remove and remove.label:find("Remove", 1, true), "offline member has no removal action")
+		f.invoke("widget_action", { widget = "bridge", row = found.id, act = remove.id })
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		assert(table.concat(f.take("/v1/intents", f.viewId).body.clientIds, ",") == "A")
+	end)
+
+	case("old state, duplicate members and indistinguishable device choices grant no authority", function(f)
+		f.warm()
+		local devices = { { id = "A", name = "Desk", platform = "linux", online = true },
+			{ id = "B", name = "Desk", platform = "linux", online = true } }
+		f.binding(nil, devices, 1); f.toggle()
+		assert(not f.choices().available and f.choices().summary == "Binding unavailable")
+		f.binding({ "A", "A" }, devices, 1); f.flushPanels()
+		assert(not f.choices().available)
+		f.binding({}, devices, 1); f.flushPanels()
+		local offer = f.choices()
+		assert(offer.available and offer.options[2].disabled and offer.options[3].disabled)
+		f.link("bind/" .. offer.generation .. "/d1")
+		f.noRequest("/v1/intents")
+	end)
+
+	case("picker cannot bind either choice when its action prefix clips the distinguishing suffix", function(f)
+		f.legacyPanel = nil
+		f.warm()
+		local prefix = string.rep("界", 77)
+		f.binding({}, { { id = "A", name = prefix .. "甲", platform = "linux", online = true },
+			{ id = "B", name = prefix .. "乙", platform = "linux", online = true } }, 1)
+		for _, key in { "d1", "d2" } do
+			f.invoke("devices")
+			local items = f.picks[1].options.items
+			assert(items[2].label == items[3].label and #items[2].label <= 240 and utf8.len(items[2].label) ~= nil)
+			assert(items[2].detail == items[3].detail)
+			f.choose("key", key)
+			f.noRequest("/v1/intents")
+		end
 	end)
 
 	case("device command in another session preserves the existing owned panel", function(f)
@@ -2749,7 +2813,7 @@ function run(entry, loadModule)
 
 	case("failed native choice delivery grants no Apply authority", function(f)
 		f.warm()
-		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } })
+		f.binding({}, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } })
 		f.eventError = true; f.toggle()
 		assert(#f.deviceEvents == 0)
 		f.link("bind/1/d1")
@@ -2759,12 +2823,12 @@ function run(entry, loadModule)
 	case("inline generation changes with device label and online state but not binding-free refresh", function(f)
 		f.warm()
 		local devices = { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" } }
-		f.binding(nil, devices); f.toggle()
+		f.binding({}, devices); f.toggle()
 		local generation = f.choices().generation
-		devices[1].name = "Renamed Mac"; f.binding(nil, devices); f.flushPanels()
+		devices[1].name = "Renamed Mac"; f.binding({}, devices); f.flushPanels()
 		assert(f.choices().generation ~= generation and f.choices().options[2].label == "Renamed Mac")
 		generation = f.choices().generation
-		devices[1].online = false; f.binding(nil, devices); f.flushPanels()
+		devices[1].online = false; f.binding({}, devices); f.flushPanels()
 		assert(f.choices().generation ~= generation and f.choices().options[2].disabled)
 		generation = f.choices().generation
 		f.poll(); f.flushPanels(); assert(f.choices().generation == generation and #f.binds() == 0)
@@ -2775,7 +2839,7 @@ function run(entry, loadModule)
 		f.warm()
 		local widget = assert(f.widgets.bridge, "Bridge widget was not offered")
 		assert(widget.name == "OMP Bridge" and widget.styles[1] == "text")
-		f.binding(nil, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }, { id = "client-B", name = "Old Mac", online = false, platform = "darwin" } }, 3)
+		f.binding({}, { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }, { id = "client-B", name = "Old Mac", online = false, platform = "darwin" } }, 3)
 		local before = f.ioCount()
 		local view = widget.render({ pane = f.original })
 		assert(f.ioCount() == before, "widget render performed IO")
@@ -2800,7 +2864,7 @@ function run(entry, loadModule)
 		local shown = options()
 		assert(shown["Desk Mac"] and not shown["Old Mac"] and not shown.Unbound, "only online alternatives may be chosen")
 		f.noRequest("/v1/intents")
-		f.binding(nil, { { id = "client-B", name = "Old Mac", online = true, platform = "darwin" } }, 4)
+		f.binding({}, { { id = "client-B", name = "Old Mac", online = true, platform = "darwin" } }, 4)
 		assert(next(options()) == nil, "changed choices left the disclosure open")
 		f.invoke("widget_action", { widget = "bridge", row = shown["Desk Mac"].id, act = "use" })
 		f.noRequest("/v1/intents")
@@ -2844,7 +2908,7 @@ function run(entry, loadModule)
 			{ id = "client-A", name = "Desk Mac", online = true, platform = "darwin" },
 			{ id = "client-B", name = "Old Mac", online = false, platform = "darwin" },
 		}
-		f.binding(nil, devices, 7)
+		f.binding({}, devices, 7)
 		f.invoke("devices")
 		assert(#f.creations == 0 and #f.picks == 1, "device command opened the floating panel")
 		local items = f.picks[1].options.items
@@ -2852,7 +2916,7 @@ function run(entry, loadModule)
 		for _, item in items do assert(item.label ~= "client-A" and item.detail ~= "client-A", "device identity reached the chooser") end
 		f.choose("key", "d2")
 		assert(#f.binds() == 0 and #f.errors == 0, "offline device was bound")
-		f.invoke("devices"); f.binding(nil, devices, 8); f.choose("key", "d1")
+		f.invoke("devices"); f.binding({}, devices, 8); f.choose("key", "d1")
 		assert(#f.binds() == 0 and #f.errors == 1, "stale chooser bound against a changed revision")
 		f.poll(); f.invoke("devices"); f.choose("key", "d1")
 		assert(#f.binds() == 0, "chooser skipped fresh conversation validation")
@@ -2861,7 +2925,7 @@ function run(entry, loadModule)
 		f.poll(); f.invoke("devices"); f.choose("key", "d1")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-B")
 		local bind = f.take("/v1/intents", f.viewId)
-		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 8 and bind.body.draftToken == "draft-B")
+		assert(bind.body.kind == "bind" and table.concat(bind.body.clientIds, ",") == "client-A" and bind.body.expectedRevision == 8 and bind.body.draftToken == "draft-B")
 	end)
 
 	case("legacy panel setting re-enables the floating panel and disabling retires it", function(f)
@@ -2884,7 +2948,7 @@ function run(entry, loadModule)
 		f.warm()
 		local prefix = string.rep("研发", 44)
 		local first, second = prefix .. "甲", prefix .. "乙"
-		f.binding("alpha", { { id = "alpha", name = first, online = true, platform = "linux" },
+		f.binding({ "alpha" }, { { id = "alpha", name = first, online = true, platform = "linux" },
 			{ id = "beta", name = second, online = true, platform = "darwin" } }, 3)
 		local function row(field, value)
 			for _, item in f.widgets.bridge.render({ pane = f.original }).card do if item[field] == value then return item end end
@@ -2892,8 +2956,13 @@ function run(entry, loadModule)
 		end
 		assert(row("id", "agent").text == first, "bound device lost its distinguishing suffix")
 		f.invoke("widget_action", { widget = "bridge", row = "agent", act = "toggle" })
-		assert(not row("label", first).actions and row("label", second).actions[1].id == "use")
+		local other = row("label", second)
+		assert(row("label", first).id ~= other.id, "long device names alias one selection")
 		f.noRequest("/v1/intents")
+		f.invoke("widget_action", { widget = "bridge", row = other.id, act = other.actions[1].id })
+		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
+		local bind = f.take("/v1/intents", f.viewId)
+		assert(bind.body.kind == "bind" and table.concat(bind.body.clientIds, ",") == "alpha,beta", "selection lost or mistook the original member")
 		f.approval("scope", { { id = "one", label = first }, { id = "two", label = second } })
 		local approval = row("label", "Approve client tool?")
 		assert(#approval.actions == 1 and approval.actions[1].id == "review", "truncated approval choices offered directly")
@@ -2909,7 +2978,7 @@ function run(entry, loadModule)
 		f.legacyPanel = nil
 		f.warm()
 		local devices = { { id = "client-A", name = "Desk Mac", online = true, platform = "darwin" }, { id = "client-B", name = "Old Mac", online = false, platform = "darwin" } }
-		f.binding(nil, devices, 5)
+		f.binding({}, devices, 5)
 		local function act(row, action) return f.invoke("widget_action", { widget = "bridge", row = row, act = action }) end
 		local function cardRow(field, value)
 			for _, row in f.widgets.bridge.render({ pane = f.original }).card do if row[field] == value then return row end end
@@ -2941,7 +3010,7 @@ function run(entry, loadModule)
 		assert(cardRow("id", online).actions[1].label:find("Applying", 1, true), "in-flight bind not labelled")
 		f.resolve(f.take("/v1/intents", f.viewId), "session-A", "draft-A")
 		local bind = f.take("/v1/intents", f.viewId)
-		assert(bind.body.kind == "bind" and bind.body.clientId == "client-A" and bind.body.expectedRevision == 5)
+		assert(bind.body.kind == "bind" and table.concat(bind.body.clientIds, ",") == "client-A" and bind.body.expectedRevision == 5)
 		act(online, "use"); f.noRequest("/v1/intents") -- The accepted disclosure was retired.
 		-- Transfer ids beyond Tern's 64-character row id still cancel the right one, once.
 		local long = string.rep("t", 120)

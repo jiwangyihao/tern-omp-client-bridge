@@ -25,7 +25,9 @@ test("status and history distinguish identically named devices, including an off
 	commit(manager, state, description);
 	expect(bindingMessage(manager, state, description)).toBeUndefined();
 	const offline = { ...state, devices: state.devices.map(device => ({ ...device, online: false })) };
-	expect(bindingMessage(manager, offline, bindingDescription(offline))?.content).toContain('client_A ("Twin"; linux; offline)');
+	const update = bindingMessage(manager, offline, bindingDescription(offline));
+	if (!update) throw new Error("An offline member should produce a new model-visible snapshot");
+	expect(normalizeCustomMessagePayload(update).content).toContain('client_A ("Twin"; linux; offline)');
 	const misleading = { ...state, devices: state.devices.map(device => ({ ...device, name: "Twin\u202e_B" })) };
 	expect(bindingDescription(misleading)).toContain('client_A ("Twin\\u202e_B"; linux; online)');
 });

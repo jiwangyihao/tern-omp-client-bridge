@@ -2,7 +2,7 @@
 import path from "node:path";
 import type { BackgroundResult, BrokerApi, DraftChannel, DraftDestination, ServerState, UiClaim } from "./api.ts";
 import { defaultStateDir, readEndpoint, type Endpoint } from "./config.ts";
-import { BridgeError, type ExecutionOptions, type ToolName, type ToolParameters, type ToolResult } from "./protocol.ts";
+import { BridgeError, type ToolName, type ToolParameters, type ToolResult } from "./protocol.ts";
 import { BackgroundResultSchema, DraftDestinationSchema, DraftIntentSchema, IdentifierSchema, ServerStateSchema, ToolResultSchema, UiClaimSchema } from "./schemas.ts";
 import { JsonLineDecoder } from "./wire.ts";
 import { z } from "zod";
@@ -48,7 +48,7 @@ export class BrokerClient implements BrokerApi {
 		return ServerStateSchema.parse(await this.#json(`/v1/state?sessionId=${encodeURIComponent(sessionId)}`));
 	}
 
-	async invoke(sessionId: string, contextId: string, tool: ToolName, params: ToolParameters, options: ExecutionOptions = {}): Promise<ToolResult> {
+	async invoke(sessionId: string, contextId: string, tool: ToolName, params: ToolParameters, options: NonNullable<Parameters<BrokerApi["invoke"]>[4]> = {}): Promise<ToolResult> {
 		const endpoint = await this.#endpoint();
 		const controller = new AbortController();
 		this.#requests.add(controller);
@@ -56,9 +56,10 @@ export class BrokerClient implements BrokerApi {
 		let result: ToolResult | undefined;
 		let remoteError: BridgeError | undefined;
 		try {
-			const response = await fetch(endpoint.url + "/v1/invoke", { method: "POST", headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify({ sessionId, contextId, tool, params }), signal });
+			const response = await fetch(endpoint.url + "/v2/invoke", { method: "POST", headers: { authorization: `Bearer ${endpoint.token}`, "content-type": "application/json" }, body: JSON.stringify({ sessionId, contextId, tool, params, clientId: options.clientId }), signal });
 			if (!response.ok) {
-				const parsed = ErrorResponse.safeParse(await response.json());
+				const parsed = ErrorResponse.safeParse(await response.json().catch(() => undefined));
+				if (!parsed.success && response.status === 404) throw new BridgeError("BROKER_INCOMPATIBLE", "This broker does not support /v2/invoke. Update the broker before invoking client tools; the request was not retried.");
 				throw new BridgeError(parsed.success ? parsed.data.error.code : "BRIDGE_REQUEST_FAILED", parsed.success ? parsed.data.error.message : `Bridge returned HTTP ${response.status}`);
 			}
 			if (!response.body) throw new BridgeError("OUTCOME_UNKNOWN", "Bridge response ended without an execution result");

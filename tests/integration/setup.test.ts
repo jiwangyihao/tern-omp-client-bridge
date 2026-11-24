@@ -457,9 +457,10 @@ test.skipIf(process.platform === "win32")("consented recovery after clean client
 	try {
 		const destination = await destinationReady.promise;
 		const view = await resolveViewer(destination.id);
-		await intent({ kind: "bind", viewId: view.viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientId: installed.client.deviceId, expectedRevision: 0 });
+		await intent({ kind: "bind", viewId: view.viewId, sessionId: view.sessionId, draftToken: view.draftToken, clientIds: [installed.client.deviceId], expectedRevision: 0 });
 		const before = await api.state(sessionId);
 		expect(before.binding.revision).toBe(1);
+		expect(before.binding.clientIds).toEqual([installed.client.deviceId!]);
 		const ownership = RecordSchema.parse(await readOptionalJson(path.join(stateDir, "client.managed.json")));
 		expect(ownership.pid).toBe(endpoint.pid!);
 		expect((await serviceHealth("client", stateDir)).endpoint.pid).toBe(ownership.pid);

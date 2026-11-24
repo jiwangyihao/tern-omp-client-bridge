@@ -10,7 +10,7 @@ export interface ServerState {
 
 export type UiIntentInput =
 	| { readonly kind: "resolve"; readonly viewId: string; readonly destinationId: string }
-	| { readonly kind: "bind"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly clientId: string | null; readonly expectedRevision: number }
+	| { readonly kind: "bind"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly clientIds: readonly string[]; readonly expectedRevision: number }
 	| { readonly kind: "attach"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly transferId: string }
 	| { readonly kind: "paste"; readonly viewId: string; readonly sessionId: string; readonly draftToken: string; readonly text: string };
 
@@ -137,7 +137,7 @@ export interface NativePanelSnapshot {
 
 export interface BrokerApi {
 	state(sessionId: string): Promise<ServerState>;
-	invoke(sessionId: string, contextId: string, tool: ToolName, params: ToolParameters, options?: ExecutionOptions): Promise<ToolResult>;
+	invoke(sessionId: string, contextId: string, tool: ToolName, params: ToolParameters, options?: ExecutionOptions & { readonly clientId?: string }): Promise<ToolResult>;
 	openDraft(sessionId: string, draftToken: string, handlers: { onDestination(destination: DraftDestination | undefined): void; onIntent(intent: DraftIntent): void; onError(error: Error): void }): DraftChannel;
 	claimIntent(id: string, sessionId: string, draftToken: string, destinationId: string): Promise<UiClaim>;
 	finishIntent(id: string, error?: string): Promise<void>;

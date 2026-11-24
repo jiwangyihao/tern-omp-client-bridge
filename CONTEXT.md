@@ -1,8 +1,8 @@
 # Client-bound remote work
 
-A remote OMP session can use capabilities of an explicitly selected Tern client
-without replacing its native GUI. Human transfers originate on the client where
-the user acts, independently of the agent's selected client.
+A remote OMP session can use capabilities on explicitly bound client devices.
+Each agent operation has one target. Human transfers originate on the client
+where the person acts, independently of the session's bound devices.
 
 ## Language
 
@@ -37,21 +37,21 @@ an OMP conversation identity.
 A paired client device manually bound to an OMP session for agent operations.
 Its native Agent safety rules and operating-system permissions still apply.
 
-**Binding**:
-An OMP session's human-selected association with a paired client device that
-authorizes agent operations on that device. A session can also be unbound.
-_Avoid_: last connected client, active window.
+**Session binding**:
+The set of paired client devices a human has authorized for a conversation.
+An empty set means unbound; a set with multiple members has no default member.
+_Avoid_: current machine, last connected client, active window.
 
 **Bound client**:
-The client device selected by a session's binding for agent-initiated client
-operations. It is not necessarily this device.
+A device in the session binding. It need not be online, be the current viewer,
+or be the target of a given invocation.
 
 **Switch actor**:
 The Tern client that originates a human binding change, with its paired identity
 and display name. A shared server-side username does not identify this actor.
 
 **Binding change**:
-A change from one session binding to another, attributable to a switch actor.
+An addition to or removal from a session's bound devices, attributable to the human's Tern client.
 _Avoid_: reconnect, focus change.
 
 **Invocation target**:

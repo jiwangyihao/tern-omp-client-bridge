@@ -150,7 +150,7 @@ async function fixture(options: FixtureOptions = {}) {
 		const { value, response } = await api("/v1/intents", { kind: "resolve", viewId, destinationId });
 		expect(response.ok).toBe(true);
 		const receipt = ReceiptSchema.parse(value);
-		const view = { viewId, resolveIntentId: receipt.id, destinationId, sessionId, draftToken, state: { serverInstance, binding: { sessionId, clientId: null, revision: 0, change: null }, devices: [{ ...identity.device, online: true }] } };
+		const view = { viewId, resolveIntentId: receipt.id, destinationId, sessionId, draftToken, state: { serverInstance, binding: { sessionId, clientIds: [], revision: 0, change: null }, devices: [{ ...identity.device, online: true }] } };
 		if (!activePeer) throw new Error("Fixture connection unavailable");
 		activePeer.notify("view.resolved", view);
 		await activePeer.request("context.close", { contextId: "view-event-barrier" });
@@ -776,7 +776,7 @@ test("registered broker generation rejects retired view/state events and resets 
 	const f = await fixture();
 	const destination = await f.resolveView();
 	const oldView = UiStateSchema.parse((await f.api("/v1/state")).value).views[destination.viewId]!;
-	const selected = { ...oldView.state, binding: { ...oldView.state.binding, clientId: f.identity.device.id, revision: 5 } };
+	const selected = { ...oldView.state, binding: { ...oldView.state.binding, clientIds: [f.identity.device.id], revision: 5 } };
 	f.peer.notify("state", { sessionId: oldView.sessionId, state: selected });
 	await f.peer.request("context.close", { contextId: "selected-state-barrier" });
 	expect(UiStateSchema.parse((await f.api("/v1/state")).value).views[destination.viewId]!.state).toEqual(selected);
@@ -788,13 +788,13 @@ test("registered broker generation rejects retired view/state events and resets 
 	await f.resolveView();
 	const freshView = UiStateSchema.parse((await f.api("/v1/state")).value).views[destination.viewId]!;
 	expect(freshView.state.serverInstance).not.toBe(oldView.state.serverInstance);
-	expect(freshView.state.binding).toMatchObject({ clientId: null, revision: 0 });
+	expect(freshView.state.binding).toMatchObject({ clientIds: [], revision: 0 });
 	// Even a late payload on the current channel must belong to its signed registration.
 	replacement.notify("state", { sessionId: oldView.sessionId, state: selected });
 	replacement.notify("view.resolved", { ...freshView, state: selected });
 	await replacement.request("context.close", { contextId: "retired-generation-barrier" });
 	expect(UiStateSchema.parse((await f.api("/v1/state")).value).views[destination.viewId]).toEqual(freshView);
-	const next = { ...freshView.state, binding: { ...freshView.state.binding, clientId: f.identity.device.id, revision: 1 } };
+	const next = { ...freshView.state, binding: { ...freshView.state.binding, clientIds: [f.identity.device.id], revision: 1 } };
 	replacement.notify("state", { sessionId: freshView.sessionId, state: next });
 	await replacement.request("context.close", { contextId: "replacement-state-barrier" });
 	expect(UiStateSchema.parse((await f.api("/v1/state")).value).views[destination.viewId]!.state).toEqual(next);
@@ -904,7 +904,7 @@ for (const kind of ["bind", "paste"] as const) for (const early of [true, false]
 			await peer.request("context.close", { contextId: "early-outcome-barrier" });
 		} });
 		const view = await f.resolveView();
-		const input = { kind, viewId: view.viewId, sessionId: view.expectedSessionId, draftToken: view.expectedDraftToken, ...(kind === "bind" ? { clientId: null, expectedRevision: 0 } : { text: "never submit" }) };
+		const input = { kind, viewId: view.viewId, sessionId: view.expectedSessionId, draftToken: view.expectedDraftToken, ...(kind === "bind" ? { clientIds: [], expectedRevision: 0 } : { text: "never submit" }) };
 		const receipt = ReceiptSchema.parse((await f.api("/v1/intents", input)).value);
 		if (!early) {
 			f.peer.notify("intent.finished", { id: receipt.id, viewId: "wrong-view", kind, error: "foreign finish" });

@@ -177,7 +177,7 @@ test("a legacy protocol client is rejected before registration while the current
 	socket.addEventListener("message", event => {
 		try {
 			const frame = z.object({ v: z.literal(PROTOCOL_VERSION), kind: z.literal("event"), name: z.string(), body: z.unknown() }).parse(JSON.parse(String(event.data)));
-			if (frame.name === "challenge") socket.send(JSON.stringify({ v: 1, kind: "request", id: "legacy-registration", seq: 1, method: "register", body: { device: identity.device, publicKey: identity.publicKey, signature: signIdentity(Nonce.parse(frame.body).nonce, identity) } }));
+			if (frame.name === "challenge") socket.send(JSON.stringify({ v: PROTOCOL_VERSION - 1, kind: "request", id: "legacy-registration", seq: 1, method: "register", body: { device: identity.device, publicKey: identity.publicKey, signature: signIdentity(Nonce.parse(frame.body).nonce, identity) } }));
 		} catch (error) { closed.reject(error); }
 	});
 	socket.addEventListener("error", () => closed.reject(new Error("Protocol fixture connection failed")));

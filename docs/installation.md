@@ -135,7 +135,7 @@ tern plugin install $PackageRoot
 4. 核对安装目的地与变更范围后，点击侧栏中的 **Install**，单独授权私有运行时、依赖、两端集成与后台服务。身份文件保留；初始化不会修改全局 shell profile、SSH 信任、Tern 快捷键或现有会话绑定。
 5. 查看同一侧栏中的进度或失败原因。关闭侧栏不会取消已经授权的后台安装；重新打开可继续查看。安装目标在选择时已固定，切换标签页不会将安装转移到其他主机。
 6. 安装完成后，在**同一目标主机**新建一个 OMP 会话，使其通过原生扩展加载器加载 Bridge。聚焦该会话并打开 **OMP → Toggle Bridge**，完成真实会话握手。不要为了安装自动重启或关闭正在使用的旧会话。
-7. 确认设备在线后，使用 **OMP: Select agent device** 或 Bridge 菜单的 **Agent device…**，为该会话显式选择设备。新会话默认为 **Unbound**；**This device** 表示当前查看者，不一定是 Agent 已选的执行设备。Tern 0.9.18 起可通过命令面板 **Edit widgets…** 把 **OMP Bridge** widget 放入 widget 栏。
+7. 确认各 Client 已连接同一 Broker 后，在目标会话的 Bridge 设备选择器中分别加入所需设备。新会话没有默认授权；**This device** 仅指当前查看者。Tern 0.9.18 起可通过命令面板 **Edit widgets…** 把 **OMP Bridge** 放入 widget 栏。
 
 绑定决定 Agent 的客户端工具执行目标，授权仍受客户端原生 Agent 策略和操作系统权限限制，**绑定不构成沙箱**。仅使用人工传输时可以保持未绑定。原生文本和图片粘贴保持不变，**Paste to remote** 与 **Upload file** 是单独的人工操作入口。详见[使用说明](usage.md#choose-the-shared-execution-target)与[安全边界](security.md)。
 
@@ -198,6 +198,8 @@ bun src/cli.ts setup \
 ## 7. 升级、回退与安全移除
 
 ### 升级与回退
+
+多 Client 功能使用 **协议 3**，与已发布的单设备 Broker 不可混用。先安排维护窗口，完成或妥善处理在途调用，再用同一版源码/发行包更新共享 Broker、远端 OMP 扩展、Tern 插件及参与的 Client 服务。只更新一台机器不会开启该功能。协议不匹配时不得删去 `clientId` 重试；应完成升级。Broker 重启后新绑定从空名单开始，保留设备身份不等于自动恢复会话授权。
 
 1. 为新版本保留独立下载与解压目录，重新校验其 `SHA256SUMS`，不要覆盖旧的不可变运行包。
 2. 保持原来的身份、状态目录和安装方式，更新本机插件并重载。自动维护会使用已安装插件准备不可变运行包，不会后台拉取尚未安装的其他发行版本，也不要求每次重做 Setup。

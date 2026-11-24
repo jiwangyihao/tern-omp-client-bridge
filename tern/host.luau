@@ -44,7 +44,7 @@ local function snapshot(value, state)
 	local result = {
 		source = text(value.source, "Unknown client"),
 		target = text(value.target, "No remote OMP target"),
-		agent = text(value.agent, "Unbound"),
+		agent = text(value.agent, "Binding unavailable"),
 		connected = value.connected == true,
 		error = text(value.error, nil),
 		approvals = count(value.approvals, 9999),
@@ -96,8 +96,9 @@ end
 local function selection(value, state)
 	if not object(value) or value.owner ~= state.owner or value.panelId ~= state.panelId
 		or not generation(value.generation) or type(value.available) ~= "boolean"
+		or type(value.summary) ~= "string" or type(value.overflow) ~= "boolean"
 		or not object(value.options) or #value.options < 1 or #value.options > MAX_DEVICES + 1 then return nil end
-	local result = { generation = value.generation, available = value.available, current = value.current, options = {} }
+	local result = { generation = value.generation, available = value.available, summary = text(value.summary, "Binding unavailable"), overflow = value.overflow, options = {} }
 	local seen, size = {}, 0
 	for index in value.options do
 		if type(index) ~= "number" or index % 1 ~= 0 or index < 1 or index > #value.options then return nil end
@@ -106,23 +107,23 @@ local function selection(value, state)
 	if size ~= #value.options then return nil end
 	for _, option in value.options do
 		if not object(option) or not choiceKey(option.key) or seen[option.key]
+			or type(option.selected) ~= "boolean"
 			or type(option.label) ~= "string" or type(option.detail) ~= "string" or type(option.disabled) ~= "boolean" then return nil end
 		seen[option.key] = true
 		table.insert(result.options, {
 			key = option.key, label = text(option.label, "Unnamed device"),
-			detail = text(option.detail, ""), disabled = option.disabled,
+			detail = text(option.detail, ""), selected = option.selected, disabled = option.disabled,
 		})
 	end
-	if not seen.none or (not (value.current == "" and not value.available)
-		and (not choiceKey(value.current) or not seen[value.current])) then return nil end
+	if not seen.none then return nil end
 	return result
 end
 
 local function sameSelection(left, right)
-	if left.available ~= right.available or left.current ~= right.current or #left.options ~= #right.options then return false end
+	if left.available ~= right.available or left.summary ~= right.summary or left.overflow ~= right.overflow or #left.options ~= #right.options then return false end
 	for index, option in left.options do
 		local other = right.options[index]
-		if option.key ~= other.key or option.label ~= other.label or option.detail ~= other.detail or option.disabled ~= other.disabled then return false end
+		if option.key ~= other.key or option.label ~= other.label or option.detail ~= other.detail or option.disabled ~= other.disabled or option.selected ~= other.selected then return false end
 	end
 	return true
 end
@@ -231,38 +232,33 @@ end
 local function deviceField(state)
 	local enabled = selectionReady(state)
 	local offer = state.selection
-	local selected = offeredChoice(state, state.pendingChoice or (offer and offer.current))
+	local selected = offeredChoice(state, state.pendingChoice)
 	local options = {}
 	for _, option in offer and offer.options or {} do
 		table.insert(options, { value = option.key, label = option.label, detail = option.detail, disabled = option.disabled })
 	end
-	local apply = { key = "apply", role = "bridge-apply", text = "Use device", aria = "Apply agent device", variant = "default", size = "sm",
-		disabled = "Choose a different online device first." }
+	local verb = selected and (selected.key == "none" and "Clear all" or (selected.selected and "Remove device" or "Add device")) or "Apply"
+	local apply = { key = "apply", role = "bridge-apply", text = verb, aria = verb, variant = "default", size = "sm",
+		disabled = "Choose an action first." }
 	if not enabled then apply.disabled = "Waiting for current device choices from the owning window." end
-	if enabled and selected and not selected.disabled and selected.key ~= offer.current then
+	if enabled and selected and not selected.disabled then
 		apply.disabled = false
 		apply.href = "omp-bridge-panel://" .. state.owner .. "/" .. state.panelId .. "/bind/" .. offer.generation .. "/" .. selected.key
 		apply.actions = { click = "open" }
 	end
 	apply.hidden = apply.disabled ~= false
-	local meta = "Unavailable"
-	if enabled and selected then
-		if selected.key ~= offer.current then meta = "Not applied"
-		elseif selected.key == "none" then meta = "Agent-host only"
-		elseif selected.disabled then meta = "Offline"
-		elseif selected.detail:find(" · This device", 1, true) then meta = "This device"
-		else meta = "Online" end
-	end
-	return ui.node("field", { key = "device", role = "bridge-agent", label = "Agent device" }, {
+	local meta = enabled and offer.summary or "Unavailable"
+	return ui.node("field", { key = "device", role = "bridge-agent", label = "Agent devices" }, {
 		with(muted(meta), { key = "meta", role = "bridge-device-meta" }),
 		ui.node("icon", { key = "icon", role = "bridge-select-icon", name = "monitor", size = 14 }),
-		ui.node("select", { key = "choice-" .. (offer and offer.generation or "waiting"), aria = "Agent device", variant = "field", size = "sm", grow = 1,
+		ui.node("select", { key = "choice-" .. (offer and offer.generation or "waiting"), aria = "Choose a device action", variant = "field", size = "sm", grow = 1,
 			options = options, value = selected and selected.key or nil, open = enabled and state.choiceOpen == true,
-			active = state.choiceActive, placeholder = offer and offer.current == "" and state.snapshot and state.snapshot.agent or "Waiting for device choices",
+			active = state.choiceActive, placeholder = enabled and "Choose a device…" or "Waiting for device choices",
 			min = { w = 0 }, max = { w = 1 },
 			title = selected and (selected.label .. (selected.detail ~= "" and " · " .. selected.detail or "")) or nil,
 			disabled = not enabled and "Waiting for current device choices from the owning window." or false }),
 		ui.node("button", apply),
+		if enabled and offer.overflow then button(state, "moredevices", "Choose from all devices…", true) else nil,
 	})
 end
 
@@ -325,7 +321,7 @@ tern.block.define("panel", {
 			local options = state.selection.options
 			local index = 0
 			for i, option in options do
-				if option.key == (state.choiceActive or state.pendingChoice or state.selection.current) then index = i; break end
+				if option.key == (state.choiceActive or state.pendingChoice) then index = i; break end
 			end
 			local step = k.name == "up" and -1 or 1
 			if index == 0 and step < 0 then index = #options + 1 end
@@ -378,6 +374,8 @@ tern.block.define("panel", {
 			local option = offeredChoice(state, ev.value)
 			if option and not option.disabled then
 				state.pendingChoice, state.choiceActive, state.choiceOpen = option.key, option.key, false
+			else
+				clearChoice(state)
 			end
 		elseif ev.ev == "toggle" and type(ev.open) == "boolean" then
 			state.choiceOpen = ev.open
