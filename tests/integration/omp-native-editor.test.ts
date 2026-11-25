@@ -17,8 +17,7 @@ import { INBOX_REMINDER } from "../../src/inbox-guidance.ts";
 import { CaptureResultSchema, LocalUiStateSchema, TransferStatusSchema, UiIntentReceiptSchema } from "../../src/schemas.ts";
 import { eventually, nativeDraftHost } from "../fixtures/native-draft.ts";
 import { delayedAttachReceiptProxy } from "../fixtures/delayed-attach-receipt.ts";
-import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
-import { NativeAttachmentEditor } from "../../src/omp/native-attachment-editor.ts";
+import { prepareAttachmentEditor } from "../../src/omp/native-attachment-editor.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -385,16 +384,29 @@ describe("OMP native directed composer boundary", () => {
 });
 
 describe("automatic native GUI image paste", () => {
-	async function automaticFixture() {
+	async function automaticFixture(automaticImagePaste = true) {
 		const root = await mkdtemp(join(tmpdir(), "omp-automatic-paste-"));
 		cleanup.push(() => rm(root, { recursive: true, force: true }));
 		await Settings.init({ inMemory: true, cwd: root, agentDir: root, overrides: { "images.autoResize": false } });
-		const native = await nativeDraftHost(SessionManager.inMemory(root), () => new NativeAttachmentEditor(getEditorTheme()));
+		const native = await nativeDraftHost(SessionManager.inMemory(root), automaticImagePaste);
 		cleanup.push(async () => { await Promise.allSettled(native.nativePastes); native.controller.disposeComposerShapes(); });
 		const image = join(root, "image with spaces.png");
 		await writeFile(image, png);
 		return { root, image, native };
 	}
+
+	test("legacy activation declines a textless draft with a pending native image", async () => {
+		const { image, native } = await automaticFixture(false);
+		await native.input.handleImagePathPaste(image);
+		const pending = native.editor.pendingImages[0];
+		expect(pending).toBeDefined();
+		native.editor.setText("");
+		expect(prepareAttachmentEditor(native.ui)).toBe(false);
+		expect(native.notices.at(-1)).toContain("preserve existing draft state");
+		expect(native.editor.pendingImages[0]).toBe(pending);
+		expect(native.ui.getEditorText()).toBe("");
+		expect(native.submitted()).toBe(0);
+	});
 
 	test("direct GUI paste attaches image bytes while prose and the existing draft remain text", async () => {
 		const { image, native } = await automaticFixture();

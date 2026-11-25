@@ -44,4 +44,16 @@ describe("actual installed native policy and context metadata", () => {
 		expect(metadata.bash.approval({ command: "synthetic-child-deny fixture" })).toMatchObject({ policy: "deny", override: true });
 	});
 
+	test("a retained Bash policy uses the current runner Settings rather than the first session", () => {
+		const parent = native.Settings.isolated({ "bash.patterns": [] });
+		const child = parent.overlay({ "bash.patterns": [{ match: "fixture-command *", approval: "deny" }] });
+		let active = parent;
+		const manager = native.SessionManager.inMemory("/tmp");
+		const approval = nativeMetadata({ pi: native }, () => ({ cwd: "/tmp", hasUI: false, model: undefined, sessionManager: manager }), () => active).bash.approval;
+		if (typeof approval !== "function") throw new Error("Missing native approval resolver");
+		expect(approval({ command: "fixture-command example" })).toBe("exec");
+		active = child;
+		expect(approval({ command: "fixture-command example" })).toMatchObject({ policy: "deny", override: true });
+	});
+
 });

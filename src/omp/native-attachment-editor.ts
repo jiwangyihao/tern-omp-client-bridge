@@ -1,52 +1,33 @@
 // SPDX-License-Identifier: MPL-2.0
-import { AsyncLocalStorage } from "node:async_hooks";
-import type { PasteOptions } from "@oh-my-pi/pi-tui";
-import { CustomEditor, extractImagePastePathsFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { resolveTextEdit, type NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
-import { BRACKETED_PASTE_START, BRACKETED_PASTE_END } from "@oh-my-pi/pi-tui/stdin-buffer";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type * as LegacyEditor from "./legacy-attachment-editor.ts";
 
-/** Native GUI pastes use pasteText directly, unlike bracketed terminal input. */
-export class NativeAttachmentEditor extends CustomEditor {
-	readonly #literalPaste = new AsyncLocalStorage<boolean>();
-	readonly #guarded = new WeakSet<object>();
+/** OMP 19 owns one reactive composer; OMP 18 exposes an editor replacement factory instead. */
+export function hasReactiveComposer(ui: object): boolean {
+	return "composer" in ui && typeof ui.composer === "object" && ui.composer !== null
+		&& "addKeyHandler" in ui.composer && typeof ui.composer.addKeyHandler === "function";
+}
 
-	#guard<Args extends unknown[], Result>(handler: (...args: Args) => Result): (...args: Args) => Result {
-		if (this.#guarded.has(handler)) return handler;
-		const guarded = (...args: Args): Result => this.#literalPaste.run(true, () => handler(...args));
-		this.#guarded.add(guarded);
-		return guarded;
+type EditorUi = Pick<ExtensionUIContext, "getEditorText" | "notify" | "pasteToEditor"> & Partial<Pick<ExtensionUIContext, "setEditorComponent">>;
+
+/** Called only for the main interactive editor. Never replace OMP 19's live composer. */
+export function prepareAttachmentEditor(ui: EditorUi): boolean {
+	if (hasReactiveComposer(ui) && typeof ui.pasteToEditor === "function") return true;
+	if (typeof ui.setEditorComponent !== "function") {
+		ui.notify("Client bridge: this OMP host does not expose a supported native composer for automatic image paste", "error");
+		return false;
 	}
-
-	#preparePasteHandlers(): void {
-		// A loader's asynchronous text fallback must not retry the same image.
-		// Async scope, rather than a global busy flag, keeps later human pastes independent.
-		if (this.onPasteImagePath) this.onPasteImagePath = this.#guard(this.onPasteImagePath);
-		if (this.onPasteImage) this.onPasteImage = this.#guard(this.onPasteImage);
-		if (this.onPasteTextRaw) this.onPasteTextRaw = this.#guard(this.onPasteTextRaw);
+	if (ui.getEditorText().length > 0) {
+		ui.notify("Client bridge: automatic native image paste requires a fresh empty composer; the existing draft was not replaced", "info");
+		return false;
 	}
-
-	override handleInput(data: string): void {
-		this.#preparePasteHandlers();
-		super.handleInput(data);
-	}
-
-	override pasteText(text: string, options: PasteOptions = {}): void {
-		if (this.#literalPaste.getStore() || !this.onPasteImagePath || !extractImagePastePathsFromText(text)?.length) {
-			super.pasteText(text, options);
-			return;
-		}
-		this.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
-	}
-
-	override handleNativeEvent(edit: NativeUiEvent): void {
-		if (edit.type !== "edit" || !this.onPasteImagePath || !extractImagePastePathsFromText(edit.text)?.length) {
-			super.handleNativeEvent(edit);
-			return;
-		}
-		const resolved = resolveTextEdit(this.getText(), edit, text => text);
-		if (!resolved) return;
-		// Preserve native selection widening and caret placement before attachment loading.
-		super.handleNativeEvent({ ...edit, text: "", cursor: resolved.from });
-		this.pasteText(edit.text);
+	try {
+		// The removed private TUI paths must not be resolved by a reactive host's extension loader.
+		const legacy: typeof LegacyEditor = require("./legacy-attachment-editor.ts");
+		legacy.installLegacyEditor(ui.setEditorComponent.bind(ui));
+		return true;
+	} catch (error) {
+		ui.notify(`Client bridge: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return false;
 	}
 }

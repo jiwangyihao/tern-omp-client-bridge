@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 import { Container } from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initThemeSync } from "@oh-my-pi/pi-tui/theme";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
@@ -8,6 +9,7 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { prepareAttachmentEditor } from "../../src/omp/native-attachment-editor.ts";
 
 export async function eventually<T>(read: () => T | Promise<T>, accept: (value: T) => boolean): Promise<T> {
 	const signal = AbortSignal.timeout(10_000);
@@ -20,10 +22,9 @@ export async function eventually<T>(read: () => T | Promise<T>, accept: (value: 
 }
 
 /** Installed OMP controllers own widget construction, editor text, image loading and paste. */
-export async function nativeDraftHost(sessionManager: SessionManager, createEditor: () => CustomEditor = () => new CustomEditor(getEditorTheme())) {
+export async function nativeDraftHost(sessionManager: SessionManager, automaticImagePaste = false) {
 	initThemeSync();
-	const editor = createEditor();
-	editor.setSpellingFeatures({ typoDetection: false, autocorrect: false, autocomplete: "off" });
+	let editor = new CustomEditor(getEditorTheme());
 	const above = new Container();
 	const below = new Container();
 	const uiReady = Promise.withResolvers<ExtensionUIContext>();
@@ -31,9 +32,12 @@ export async function nativeDraftHost(sessionManager: SessionManager, createEdit
 	const statuses: string[] = [];
 	const notices: string[] = [];
 	let submitted = 0;
-	editor.onSubmit = () => { submitted++; };
 	const host = {
-		editor, sessionManager, session: {}, syncComposerShape: () => {},
+		get editor() { return editor; }, sessionManager, session: {}, syncComposerShape: () => {},
+		setEditorComponent(factory: Parameters<ExtensionUIContext["setEditorComponent"]>[0]) {
+			if (!factory) throw new Error("Unexpected editor reset");
+			editor = factory(host.ui, getEditorTheme(), KeybindingsManager.inMemory());
+		},
 		hookWidgetContainerAbove: above, hookWidgetContainerBelow: below,
 		setToolUIContext: (ui: ExtensionUIContext) => uiReady.resolve(ui),
 		showStatus: (message: string) => { statuses.push(message); },
@@ -47,15 +51,18 @@ export async function nativeDraftHost(sessionManager: SessionManager, createEdit
 		readText: async () => { throw new Error("Test must not read a real clipboard"); },
 		readMacFileUrls: async () => { throw new Error("Test must not read a real clipboard"); },
 	});
+	const controller = new ExtensionUiController(host);
+	await controller.initHooksAndCustomTools();
+	const nativeUI = await uiReady.promise;
+	const ui: ExtensionUIContext = { ...nativeUI, notify: message => { notices.push(message); } };
+	if (automaticImagePaste && !prepareAttachmentEditor(ui)) throw new Error(notices.join("; "));
+	editor.setSpellingFeatures({ typoDetection: false, autocorrect: false, autocomplete: "off" });
+	editor.onSubmit = () => { submitted++; };
 	editor.onPasteImagePath = path => {
 		const pending = input.handleImagePathPaste(path);
 		nativePastes.push(pending);
 		return pending;
 	};
-	const controller = new ExtensionUiController(host);
-	await controller.initHooksAndCustomTools();
-	const nativeUI = await uiReady.promise;
-	const ui: ExtensionUIContext = { ...nativeUI, notify: message => { notices.push(message); } };
 	const describeContext: DescribeContext = { cols: 100, reduceMotion: true, dark: true, supports: () => true, feature: () => true };
 	function nodes(child: NativeChild): NativeNode[] {
 		const node = "render" in child ? child.describe?.(describeContext) : child;

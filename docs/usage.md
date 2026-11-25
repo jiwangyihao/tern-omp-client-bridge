@@ -33,14 +33,14 @@ An absent entry event is evidence only after the updated plugin's `loaded` event
 is observed and rate limiting is excluded. A successful HTTP response alone does
 not prove native panel creation; inspect `panel.block.result` and `panel.opened`.
 
-The image adapter subclasses OMP's native `CustomEditor`; it does not introduce a
-replacement GUI or a post-drop command. It is installed only into an empty composer
-without pending images/text attachments. Existing working drafts are not hot-swapped;
-open a fresh OMP conversation/view to enable it after upgrading. The host must expose
-the public editor factory. No model selection or model request is needed to attach an image.
-Image loading failures keep the native text fallback without retrying it recursively;
-explicit raw-text paste callbacks remain literal. Paths must be readable by the OMP
-host: a client-only path pasted over SSH is not a file transfer. Tern's native upload
+On OMP 18 the adapter subclasses `CustomEditor` and is installed only in an empty
+composer without pending attachments. OMP 19.2.1 keeps its own reactive composer:
+focus it and paste a readable image path to insert a native image attachment.
+Replacing selected text in Tern is a literal edit, not a paste event. If a directed
+image paste falls back to text (for example, with a modal focused), the Bridge
+reports the failed handoff; inspect the unsent draft before retrying. Existing
+drafts are not hot-swapped. Open a new conversation after upgrading the extension.
+No model request is needed. A client-only path is not a transfer: Tern's native upload
 or the Bridge upload entry must stage those bytes first.
 
 Client and broker releases must also agree on transport liveness probes. The
@@ -197,9 +197,9 @@ Runtime requirements on both machines:
 
 Additionally:
 
-- The agent host needs a native OMP installation exposing the extension lifecycle,
-  native same-name tool delegation, scoped Settings, and interactive editor hooks
-  used by SDK 18.10.4. Load through OMP's native extension loader, not an ad hoc
+- The agent host needs a [compatible OMP version](compatibility.md#version-and-packaging-contract)
+  with native same-name tool delegation, session-scoped Settings and the appropriate
+  interactive editor or composer. Load through OMP's native extension loader, not an ad hoc
   imported extension object. `install-omp` verifies its candidate using the installed
   OMP executable before replacing the owned entry. Same-volume loader imports use
   canonical relative paths so the host can rewrite SDK imports into its own registry;

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { BrokerApi, DraftDestination, DraftIntent, UiClaim } from "../../src/api.ts";
 import { DraftBridge, type DraftContext } from "../../src/omp/draft.ts";
+import { prepareAttachmentEditor } from "../../src/omp/native-attachment-editor.ts";
 import { INBOX_REMINDER } from "../../src/inbox-guidance.ts";
 import type { ExtensionWidgetContent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 
@@ -13,7 +14,7 @@ const state = { serverInstance: "broker-fixture", binding: { sessionId: "session
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 
-function fixture(claim: BrokerApi["claimIntent"], options: { acknowledge?: boolean; context?: Pick<DraftContext, "mode" | "hasUI" | "agent">; supportsEditor?: boolean } = {}) {
+function fixture(claim: BrokerApi["claimIntent"], options: { acknowledge?: boolean; context?: Pick<DraftContext, "mode" | "hasUI" | "agent">; supportsEditor?: boolean; unfocusedReactiveComposer?: boolean } = {}) {
 	let handlers: Parameters<BrokerApi["openDraft"]>[2] | undefined;
 	let sessionId = "session-real";
 	let destinationId = "destination-fixture";
@@ -31,11 +32,15 @@ function fixture(claim: BrokerApi["claimIntent"], options: { acknowledge?: boole
 		...options.context,
 		sessionManager: { getSessionId: () => sessionId },
 		ui: {
+			...(options.unfocusedReactiveComposer ? { composer: { addKeyHandler: () => () => {} } } : {}),
 			supportsEditor: options.supportsEditor ?? true,
 			setWidget: (_key, content) => { widget = content; },
 			getEditorText: () => text,
 			setEditorText: value => { editorWrites.push(value); text = value; },
-			pasteToEditor: value => { imagePastes.push(value); },
+			pasteToEditor: value => {
+				imagePastes.push(value);
+				if (options.unfocusedReactiveComposer) text += value;
+			},
 			notify: (message, type) => { (type === "error" ? errors : notices).push(message); },
 		},
 	};
@@ -64,6 +69,20 @@ function fixture(claim: BrokerApi["claimIntent"], options: { acknowledge?: boole
 }
 
 describe("native directed draft boundary", () => {
+	test("reactive activation leaves the occupied host composer in place; unknown hosts report why they cannot attach", () => {
+		const notices: string[] = [];
+		const ui = {
+			getEditorText: () => { throw new Error("must not inspect or replace the reactive draft"); },
+			pasteToEditor: () => { throw new Error("must not paste during activation"); },
+			notify: (text: string) => { notices.push(text); },
+		};
+		const reactive = { ...ui, composer: { addKeyHandler() {} } };
+		expect(prepareAttachmentEditor(reactive)).toBe(true);
+		expect(notices).toEqual([]);
+		expect(prepareAttachmentEditor(ui)).toBe(false);
+		expect(notices[0]).toContain("supported native composer");
+	});
+
 	test("publishes only after acknowledgement and claims the exact directed identity", async () => {
 		const claims: string[][] = [];
 		const f = fixture(async (id, sessionId, token, destinationId) => {
@@ -138,6 +157,15 @@ describe("native directed draft boundary", () => {
 		f.bridge.close();
 	});
 
+	test("an empty directed paste never signals the native host to read its clipboard", async () => {
+		const f = fixture(async id => ({ id, kind: "paste", state, text: "" }));
+		f.deliver("empty-paste");
+		await f.bridge.settled();
+		expect(f.imagePastes).toEqual([]);
+		expect(f.finished[0]?.error).toContain("cannot insert");
+		f.bridge.close();
+	});
+
 	test("reconnected leases cannot complete old native paste operations", async () => {
 		const pending = Promise.withResolvers<UiClaim>();
 		const f = fixture(() => pending.promise);
@@ -207,6 +235,24 @@ describe("native directed draft boundary", () => {
 		expect(f.editorWrites).toHaveLength(mixed ? 1 : 0);
 		expect(f.notices).toHaveLength(mixed ? 1 : 0);
 		expect(f.finished).toEqual([{ id: "image_attach_00001", error: undefined }]);
+		f.bridge.close();
+	});
+
+	test("a reactive host's literal image fallback is a failed handoff, never replayed or rolled back", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "omp-unfocused-")); dirs.push(dir);
+		const path = join(dir, "thumbnail.png");
+		const ordinary = join(dir, "notes.txt");
+		const files = [path, ordinary].map(path => ({ path, name: path, size: 7, sha256: "verified" }));
+		await Promise.all(files.map(file => writeFile(file.path, "fixture")));
+		const f = fixture(async id => ({ id, kind: "attach", state, files }), { unfocusedReactiveComposer: true });
+		f.deliver("unfocused_image_1");
+		await f.bridge.settled();
+		const literal = JSON.stringify(pathToFileURL(path).href);
+		expect(f.text()).toBe(`existing draft ${literal}`);
+		expect(f.imagePastes).toEqual([literal]);
+		expect(f.editorWrites).toEqual([]);
+		expect(f.finished[0]?.error).toContain("literal text");
+		expect(f.errors).toHaveLength(1);
 		f.bridge.close();
 	});
 

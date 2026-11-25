@@ -16,7 +16,7 @@ The Tern 0.9.9 native UI cutover below is included in **0.5.0-beta.3**. Historic
 | --- | --- |
 | Bridge runtime | Bun **>=1.4.3** on the agent host and client; service startup rejects older versions. |
 | Native dependencies | OMP SDK packages pinned to **18.10.4** in `package.json` and `bun.lock`. |
-| Agent-host OMP | Must expose the compatible native extension lifecycle, same-name tool invocation/metadata, scoped Settings module, and interactive editor hooks. Load probes exercised the installed host and the pinned SDK's bundled CLI, including native execution-target validation; this is not GUI acceptance. |
+| Agent-host OMP | Verified with the pinned 18.10.4 SDK/CLI and the compiled **19.2.1** host. The extension resolves tool metadata, approval settings and UI through the active host. The 19 adapter uses the reactive composer, not the removed `CustomEditor` import. Other 19.x versions are not implied. |
 | Tern | Exported window interfaces checked with **0.9.9**; earlier **0.8.4** evidence remains a historical baseline, not a cross-version guarantee. |
 | Python Eval | Locally installed SDK-supported Python interpreter; no automatic Python provisioning. |
 | SSH | Native `ssh` executable on the client; trusted host key and noninteractive authentication to the agent host. |

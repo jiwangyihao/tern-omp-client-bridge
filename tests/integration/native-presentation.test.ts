@@ -14,7 +14,9 @@ import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { BrokerApi } from "../../src/api.ts";
 import { installClientBridge } from "../../src/omp/extension.ts";
-import { nativePresentations, type NativePresentation } from "../../src/omp/native-presentation.ts";
+import { nativePresentations } from "../../src/omp/native-presentation.ts";
+import type { NativePresentation } from "../../src/omp/native-presentation-18.ts";
+import { reactivePresentation } from "../../src/omp/native-presentation-19.ts";
 
 // Actual native registration/wrapping and native components, without execution.
 // These are equal-input presentation tests: injected Edit preview frames/modes
@@ -311,4 +313,25 @@ describe("client-owned media reads preview the returned bytes", () => {
 			});
 		}
 	}
+});
+
+describe("OMP 19 reactive presentation", () => {
+	test("terminal rows render real call and result data; Tern retains the base presenter", () => {
+		const hooks = reactivePresentation("bash");
+		const args = { command: "printf sample", i: "Printing sample", target: "client", clientId: "device_A" };
+		expect(hooks.mergeCallAndResult).toBe(true);
+		expect(hooks.renderCall(args).render(80)).toEqual(["bash [client: device_A]: printf sample"]);
+		const result = hooks.renderResult({ content: text("first\nsecond"), details: {} }, { expanded: true }, undefined, args);
+		if (typeof result === "string") throw new Error("Unexpected replacement of a native Tern body");
+		expect(result.render(80).join("\n")).toContain("first\nsecond");
+	});
+
+	test("only a historic client mediaPath replaces the path-backed body; OMP appends the image blocks", () => {
+		const hooks = reactivePresentation("read");
+		const client = imageRead({ mediaPath: "/client/only.png", clientBridge: {} });
+		expect(hooks.renderResult(client, { expanded: false })).toBe("Read image file [image/png]");
+		expect(client.content[1]).toEqual({ type: "image", data: png, mimeType: "image/png" });
+		const agent = imageRead({ mediaPath: "/agent/local.png" });
+		expect(typeof hooks.renderResult(agent, { expanded: false })).toBe("object");
+	});
 });

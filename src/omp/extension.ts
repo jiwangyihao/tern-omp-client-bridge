@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { BrokerApi, ServerState } from "../api.ts";
 import { BrokerClient } from "../broker-client.ts";
 import { BridgeError, type ToolName, type ToolResult } from "../protocol.ts";
@@ -9,8 +10,7 @@ import { parameters, routeTool, withClientRouting } from "./routing.ts";
 import { nativeMetadata, type NativeMetadata } from "./native-metadata.ts";
 import { nativePresentations } from "./native-presentation.ts";
 import { BackgroundDelivery } from "./background.ts";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { NativeAttachmentEditor } from "./native-attachment-editor.ts";
+import { prepareAttachmentEditor } from "./native-attachment-editor.ts";
 import { bindingMessage } from "./binding-history.ts";
 
 const TOOL_NAMES: Record<ToolName, true> = { eval: true, bash: true, read: true, write: true, edit: true, grep: true, glob: true };
@@ -62,6 +62,25 @@ export function bindingDescription(state: ServerState): string {
 	return `Client target: ${target}${actor}; revision ${state.binding.revision}.${selection} Agent host remains the default for eval/bash. Client resources use client:///absolute/path; copy complete snapshot headers verbatim, including provenance query and hash.`;
 }
 
+/** 19.2.1 dispatches pure tool-command lines before the replacement's execute. */
+function clientBashTransport(api: ExtensionAPI, settings: () => Settings): ((command: string) => boolean) | undefined {
+	if (!("servesToolCommandLine" in api.pi.BashTool.prototype)) return undefined;
+	// The public enabled list includes every mounted name. Reserve its superset:
+	// a false rejection is preferable to executing on the wrong machine. The
+	// host classifier supplies its own shell grammar and special commands.
+	const classifierSession = {
+		get settings() { return settings(); },
+		get toolCommands() { return { mountedNames: api.getActiveTools() }; },
+		isToolActive: (name: string) => name === "bash",
+	};
+	const source: Partial<ToolSession> = classifierSession;
+	const bash = new api.pi.BashTool(source as ToolSession);
+	if (!("servesToolCommandLine" in bash) || typeof bash.servesToolCommandLine !== "function") {
+		throw new BridgeError("host_dispatch_unavailable", "Cannot guard client Bash against the host tool-command dispatcher");
+	}
+	return bash.servesToolCommandLine.bind(bash);
+}
+
 /** Public factory is also the DI seam for isolated SDK sessions and transport tests. */
 export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void {
 	if (Settings !== api.pi.Settings) {
@@ -83,6 +102,13 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	let closed = false;
 	let attachmentEditorInstalled = false;
 	let sessionPolicy: { sessionId: string; settings: Settings } | undefined;
+	const policySettings = () => {
+		if (!sessionPolicy || sessionPolicy.sessionId !== activeContext?.sessionManager.getSessionId()) {
+			throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
+		}
+		return sessionPolicy.settings;
+	};
+	const clientToolCommand = clientBashTransport(api, policySettings);
 	const background = new BackgroundDelivery(api, () => closed ? undefined : activeIdentity, owned);
 
 	function stateChanged(state: ServerState): void {
@@ -130,7 +156,8 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 					const identity = executionIdentity(ctx);
 					owned.set(identity.contextId, identity);
 					// No agent cwd is copied to the client. Broker captures binding once per call.
-					return withoutDeviceMediaPath(await broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate, clientId: route.clientId }));
+					const update = onUpdate && ((result: ToolResult) => onUpdate(withoutDeviceMediaPath(result)));
+					return withoutDeviceMediaPath(await broker.invoke(identity.sessionId, identity.contextId, name, route.params, { signal, onUpdate: update, clientId: route.clientId }));
 				},
 			};
 			// Tern uses the official semantic hooks; ANSI keeps its existing fallback.
@@ -145,33 +172,15 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 		const acceptState = (state: ServerState) => { if (owner === activation) stateChanged(state); };
 		activeContext = ctx;
 		if (!attachmentEditorInstalled && ctx.mode === "tui" && ctx.hasUI && ctx.agent.kind === "main" && ctx.ui.supportsEditor) {
-			if (ctx.ui.getEditorText().length > 0) {
-				ctx.ui.notify("Client bridge: automatic native image paste requires a fresh empty composer; the existing draft was not replaced", "info");
-			} else if (typeof ctx.ui.setEditorComponent === "function") {
-				try {
-					ctx.ui.setEditorComponent((tui, theme) => {
-						const previous = tui.getFocused();
-						if (!(previous instanceof CustomEditor) || previous.getText().length > 0 || previous.pendingImages.length > 0 || previous.pendingTexts.length > 0) {
-							throw new Error("Automatic image paste was not installed: open a fresh empty OMP composer to preserve existing draft state");
-						}
-						return new NativeAttachmentEditor(theme);
-					});
-					attachmentEditorInstalled = true;
-				} catch (error) {
-					ctx.ui.notify(`Client bridge: ${error instanceof Error ? error.message : String(error)}`, "error");
-				}
-			} else {
-				ctx.ui.notify("Client bridge: this OMP host does not expose the native editor factory required for automatic image paste", "error");
-			}
+			attachmentEditorInstalled = prepareAttachmentEditor(ctx.ui);
 		}
 		// The native runner wraps lifecycle handlers in withActiveSettings. Resolve once
 		// HERE: outside that scope this SDK's cwd lookup merely selects the latest sibling.
 		const settings = findScopedSettings(ctx.cwd);
 		sessionPolicy = settings ? { sessionId: ctx.sessionManager.getSessionId(), settings } : undefined;
 		if (sessionPolicy) {
-			// Native approval belongs to this runner's Settings object, not the broker's
-			// conversation lease. Keep its live policy even during a conversation transition.
-			metadata ??= nativeMetadata(api, () => activeContext!, sessionPolicy.settings);
+			// The registered tools outlive a session switch; never keep the first session's policy.
+			metadata ??= nativeMetadata(api, () => activeContext!, policySettings);
 			registerOverrides();
 		}
 		lastState = undefined;
@@ -202,8 +211,13 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	api.on("session_switch", (_event, ctx) => activate(ctx));
 	api.on("session_branch", (_event, ctx) => activate(ctx));
 	api.on("tool_call", (event, ctx) => {
-		if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId() && Object.hasOwn(TOOL_NAMES, event.toolName) && routeTool(event.toolName as ToolName, parameters(event.input)).client) {
+		if (!Object.hasOwn(TOOL_NAMES, event.toolName)) return;
+		const input = parameters(event.input);
+		if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId() && routeTool(event.toolName as ToolName, input).client) {
 			return { block: true, reason: MISSING_SESSION_POLICY };
+		}
+		if (event.toolName === "bash" && input.target === "client" && typeof input.command === "string" && clientToolCommand?.(input.command)) {
+			return { block: true, reason: "This Bash line is reserved for OMP host tools and cannot be dispatched to a client. Use the client-targeted tool directly or an explicit client program path." };
 		}
 	});
 	api.on("input", (event, ctx) => {

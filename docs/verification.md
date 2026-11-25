@@ -20,6 +20,12 @@ The broader original specification remains open for platform/GUI acceptance;
 the limited Windows setup-sidebar check below does not establish three physical
 clients, complete remote Windows GUI behavior, or attached-device ADB acceptance.
 
+## v0.6.2：远端 OMP 19.2.1 扩展加载与附件
+
+- 在 Linux x64 官方 `omp` 19.2.1 中用独立配置、Broker 和原生交互会话验证：七个工具已注册，会话的 Bash 拒绝规则生效；客户端文件不复用主机文件的记忆授权，点名客户端的纯工具命令不会转到主机执行。
+- 通过宿主的 TSP 帧核对草稿：普通粘贴保留文本，替换选中文字保持字面值，聚焦时粘贴 PNG 路径产生字节一致的图片附件。定向上传一张图和一个普通文件后，原有图片仍在，新增图片与文件引用均在同一份未发送的草稿中。
+- `tests/host-19/acceptance.py` 校验官方可执行文件的 SHA-256。默认模式测试隔离的完整传输；`--installed-loader` 直接加载已部署入口，仅核对新会话、工具和草稿内的 PNG，不绑定真实设备。两者均不提交提示词，不代表物理剪贴板或所有 19.x 版本已通过验收。
+
 ## v0.6.1：设备选择兼容 Tern 解码的数组
 
 路由回归用例给解码后的已绑定设备 ID 数组设置受保护的元表，并检查加入设备时提交的完整成员列表与绑定版本。该用例执行实际 `window.luau`，不代表跨设备 GUI 验收。

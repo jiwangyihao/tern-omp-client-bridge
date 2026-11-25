@@ -1,61 +1,26 @@
 // SPDX-License-Identifier: MPL-2.0
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { toolRenderers, type RenderResultContextOptions, type ToolRenderer } from "@oh-my-pi/pi-tui/tools";
 import { VERSION } from "@oh-my-pi/pi-utils";
 import { BridgeError, type ToolName } from "../protocol.ts";
+import type { NativeEditMode } from "./native-presentation-18.ts";
+import { reactivePresentation } from "./native-presentation-19.ts";
 
-const TOOL_NAMES: readonly ToolName[] = ["bash", "edit", "read", "write", "eval", "grep", "glob"];
-const HOOKS = ["describeCall", "describeResult"] as const;
+// Resolve the old registry only on the host that supplies it. Never evaluate
+// the Bridge package's pinned TUI in a reactive host process.
+const legacy = VERSION.startsWith("18.") ? await import("./native-presentation-18.ts") : undefined;
 
-/** Only semantic hooks: adding ANSI hooks would change the existing terminal path. */
-export type NativePresentation = Required<Pick<ToolRenderer, typeof HOOKS[number]>> & Pick<ToolRenderer, "mergeCallAndResult">;
-export type NativeEditMode = InstanceType<ExtensionAPI["pi"]["EditTool"]>["mode"];
-
-/**
- * Use the active host's public renderer registry, never a package-local copy.
- * OMP's supported extension loader rewrites these static public imports to its
- * bundled modules; a filesystem resolution path is not evidence of that binding.
- */
-export function nativePresentations(api: Pick<ExtensionAPI, "pi">, editMode?: () => NativeEditMode | undefined): Record<ToolName, NativePresentation> {
-	if (VERSION !== api.pi.VERSION || !toolRenderers.ask || api.pi.askToolRenderer !== toolRenderers.ask) {
-		throw new BridgeError("host_renderer_mismatch", "Client bridge did not load the active OMP host's public renderer registry. Load the extension through OMP's native extension loader; refusing package-local renderer fallback.");
+// Only the merge flag is common to both ABIs. Each host's object is spread
+// into registerTool unchanged; reactive renders are not OMP 18 Components.
+export function nativePresentations(api: Pick<ExtensionAPI, "pi">, editMode?: () => NativeEditMode | undefined): Record<ToolName, { mergeCallAndResult?: boolean }> {
+	if (api.pi.VERSION !== VERSION) {
+		throw new BridgeError("host_renderer_mismatch", "Client bridge did not load the active OMP host's SDK; refusing package-local presentation.");
 	}
-	for (const name of TOOL_NAMES) {
-		const renderer = toolRenderers[name];
-		if (!renderer || HOOKS.some(hook => typeof renderer[hook] !== "function")) {
-			throw new BridgeError("host_renderer_unavailable", `OMP does not expose the native TSP presentation hooks required for ${name}. Use an OMP host with public describeCall/describeResult support and reload the extension; no client bridge tool overrides were installed.`);
-		}
+	if (legacy) return legacy.nativePresentations(api, editMode);
+	if (VERSION !== "19.2.1" || !("askPresenter" in api.pi)) {
+		throw new BridgeError("host_renderer_unavailable", `Unsupported OMP presentation API (${VERSION}); no client bridge tool overrides were installed.`);
 	}
-	function editOptions(options: RenderResultContextOptions): RenderResultContextOptions {
-		if (options.renderContext?.editMode !== undefined) return options;
-		const mode = editMode?.();
-		if (mode === undefined) return options;
-		// Semantic-only context: tool.mode would enable host preview waiting even
-		// though this bridge does not install the resource-bearing openArgStream.
-		return { ...options, renderContext: { ...options.renderContext, editMode: mode } };
-	}
-	// `media` lets a renderer name a file the host opens by path, on the agent
-	// host. Paths of a client-owned result exist only on its device, so only the
-	// returned bytes are a correct preview on a tool card. This does not reach
-	// grouped reads: OMP shows their images by `details.mediaPath` outside tool
-	// presentation, so client results reaching OMP carry no `mediaPath` at all.
-	function resultOptions(name: ToolName, details: unknown, options: RenderResultContextOptions): RenderResultContextOptions {
-		const base = name === "edit" ? editOptions(options) : options;
-		return base.media && typeof details === "object" && details !== null && "clientBridge" in details ? { ...base, media: false } : base;
-	}
-
-	const presentations = {} as Record<ToolName, NativePresentation>;
-	for (const name of TOOL_NAMES) {
-		const renderer = toolRenderers[name]!;
-		// Keep the host's TSP merge policy without opting into its ANSI renderer path.
-		// Bind to the official renderer so its receiver semantics remain intact.
-		presentations[name] = {
-			describeCall: name === "edit"
-				? (args, options) => renderer.describeCall!(args, editOptions(options))
-				: renderer.describeCall!.bind(renderer),
-			describeResult: (result, options, args) => renderer.describeResult!(result, resultOptions(name, result.details, options), args),
-			mergeCallAndResult: renderer.mergeCallAndResult,
-		};
-	}
-	return presentations;
+	return {
+		bash: reactivePresentation("bash"), edit: reactivePresentation("edit"), read: reactivePresentation("read"),
+		write: reactivePresentation("write"), eval: reactivePresentation("eval"), grep: reactivePresentation("grep"), glob: reactivePresentation("glob"),
+	};
 }

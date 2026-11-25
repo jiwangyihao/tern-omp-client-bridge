@@ -4,7 +4,8 @@ import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { BrokerApi, DraftChannel, DraftDestination, DraftIntent, ImportedFile, ServerState } from "../api.ts";
-import { destinationWidget, DESTINATION_WIDGET_KEY } from "./destination-widget.ts";
+import { setDestinationWidget } from "./destination-widget.ts";
+import { hasReactiveComposer } from "./native-attachment-editor.ts";
 import { INBOX_REMINDER } from "../inbox-guidance.ts";
 import { BridgeError } from "../protocol.ts";
 import { isImageAttachment } from "../transfers/policy.ts";
@@ -69,9 +70,7 @@ export class DraftBridge {
 		this.#destination = destination?.draftToken === this.#identity.token
 			&& this.ctx.sessionManager.getSessionId() === this.#identity.sessionId ? destination : undefined;
 		if (previous === this.#destination) return;
-		this.ctx.ui.setWidget(DESTINATION_WIDGET_KEY,
-			this.#destination ? destinationWidget(this.#destination.id) : undefined,
-			{ placement: "aboveEditor" });
+		setDestinationWidget(this.ctx.ui, this.#destination?.id);
 	}
 
 	#receive(intent: DraftIntent): void {
@@ -111,7 +110,7 @@ export class DraftBridge {
 					if (!claim.files?.length) throw new BridgeError("empty_attachment", "The verified transfer contains no files");
 					await this.#attach(claim.files, identity, destination);
 				} else {
-					if (typeof claim.text !== "string" || typeof this.ctx.ui.pasteToEditor !== "function") {
+					if (typeof claim.text !== "string" || !claim.text.length || typeof this.ctx.ui.pasteToEditor !== "function") {
 						throw new BridgeError("paste_unavailable", "This OMP host cannot insert the requested native paste");
 					}
 					this.#assertCurrent(identity, destination);
@@ -153,6 +152,22 @@ export class DraftBridge {
 			throw new BridgeError("image_paste_unavailable", "This OMP host does not expose native image paste; the draft was not changed");
 		}
 		this.#assertCurrent(identity, destination);
+		const imagePaste = images.map(path => JSON.stringify(pathToFileURL(path).href)).join(" ");
+		const reactive = hasReactiveComposer(this.ctx.ui);
+		if (imagePaste && reactive) {
+			// 19.2.1 routes a focused paste through the native loader; without focus it
+			// inserts the exact payload as literal text. No focus/attachment query is exposed.
+			if (this.ctx.ui.getEditorText().includes(imagePaste)) {
+				throw new BridgeError("image_paste_unavailable", "The image paste path is already literal text in this draft; its native handoff could not be distinguished. The draft was not changed.");
+			}
+			this.ctx.ui.pasteToEditor(imagePaste);
+			this.#assertCurrent(identity, destination);
+			if (this.ctx.ui.getEditorText().includes(imagePaste)) {
+				// Leave the user's selection, undo history and attachments alone. Do not
+				// append ordinary members of a mixed batch after a failed image handoff.
+				throw new BridgeError("image_paste_unavailable", "OMP inserted the image path as literal text, not an attachment. Review the unsent draft and focus the composer before retrying.");
+			}
+		}
 		if (ordinary.length) {
 			// Read the latest text after validation, preserving any existing native image atoms.
 			const before = this.ctx.ui.getEditorText();
@@ -165,11 +180,11 @@ export class DraftBridge {
 				throw new BridgeError("editor_update_failed", "OMP did not retain the transferred file references in the original draft");
 			}
 		}
-		if (images.length) {
+		if (imagePaste && !reactive) {
 			this.#assertCurrent(identity, destination);
-			// An image-only paste enters OMP's native attachment loader, never quoted-path prose.
-			// This void API acknowledges handoff, not asynchronous preview completion. Do not replay.
-			this.ctx.ui.pasteToEditor(images.map(path => JSON.stringify(pathToFileURL(path).href)).join(" "));
+			// 18 always dispatches a bracketed paste. A receipt acknowledges handoff,
+			// not asynchronous preview completion, on either host. Never replay it.
+			this.ctx.ui.pasteToEditor(imagePaste);
 		}
 		if (ordinary.length) this.ctx.ui.notify(`Client bridge: ${INBOX_REMINDER}`, "info");
 	}

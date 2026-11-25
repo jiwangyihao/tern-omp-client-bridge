@@ -42,3 +42,23 @@ jobs:
         run: bun dist/src/cli.ts --help
       # These runners exercise real native SDK execution and filesystem/ACL behavior.
       # They do not claim Tern GUI, real clipboard, desktop/browser or remote-device acceptance.
+
+  omp-19-host:
+    name: Compiled OMP 19.2.1 host (Linux x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Install the pinned 18.10.4 bridge dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Exercise released OMP 19.2.1 with isolated native input
+        run: |
+          curl --fail --location --silent --show-error --retry 2 \
+            https://github.com/can1357/oh-my-pi/releases/download/v19.2.1/omp-linux-x64 \
+            --output "$RUNNER_TEMP/omp-19.2.1"
+          chmod 700 "$RUNNER_TEMP/omp-19.2.1"
+          # Driver verifies the pinned release SHA-256 before launching any process.
+          python3 tests/host-19/acceptance.py "$RUNNER_TEMP/omp-19.2.1"
