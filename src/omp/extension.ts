@@ -101,12 +101,12 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	let activation = 0;
 	let closed = false;
 	let attachmentEditorInstalled = false;
-	let sessionPolicy: { sessionId: string; settings: Settings } | undefined;
+	// Host approval belongs to this runner; client authorization belongs to one conversation.
+	let runnerSettings: Settings | undefined;
+	let clientPolicySessionId: string | undefined;
 	const policySettings = () => {
-		if (!sessionPolicy || sessionPolicy.sessionId !== activeContext?.sessionManager.getSessionId()) {
-			throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
-		}
-		return sessionPolicy.settings;
+		if (!runnerSettings) throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
+		return runnerSettings;
 	};
 	const clientToolCommand = clientBashTransport(api, policySettings);
 	const background = new BackgroundDelivery(api, () => closed ? undefined : activeIdentity, owned);
@@ -152,7 +152,7 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 						// Native same-name dispatch retains provider metadata, bookkeeping, signals, progress.
 						return ctx.invokeTool(route.params, { signal, onUpdate });
 					}
-					if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId()) throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
+					if (clientPolicySessionId !== ctx.sessionManager.getSessionId()) throw new BridgeError("session_policy_unavailable", MISSING_SESSION_POLICY);
 					const identity = executionIdentity(ctx);
 					owned.set(identity.contextId, identity);
 					// No agent cwd is copied to the client. Broker captures binding once per call.
@@ -177,9 +177,9 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 		// The native runner wraps lifecycle handlers in withActiveSettings. Resolve once
 		// HERE: outside that scope this SDK's cwd lookup merely selects the latest sibling.
 		const settings = findScopedSettings(ctx.cwd);
-		sessionPolicy = settings ? { sessionId: ctx.sessionManager.getSessionId(), settings } : undefined;
-		if (sessionPolicy) {
-			// The registered tools outlive a session switch; never keep the first session's policy.
+		clientPolicySessionId = settings ? ctx.sessionManager.getSessionId() : undefined;
+		if (settings) {
+			runnerSettings = settings;
 			metadata ??= nativeMetadata(api, () => activeContext!, policySettings);
 			registerOverrides();
 		}
@@ -213,7 +213,7 @@ export function installClientBridge(api: ExtensionAPI, broker: BrokerApi): void 
 	api.on("tool_call", (event, ctx) => {
 		if (!Object.hasOwn(TOOL_NAMES, event.toolName)) return;
 		const input = parameters(event.input);
-		if (sessionPolicy?.sessionId !== ctx.sessionManager.getSessionId() && routeTool(event.toolName as ToolName, input).client) {
+		if (clientPolicySessionId !== ctx.sessionManager.getSessionId() && routeTool(event.toolName as ToolName, input).client) {
 			return { block: true, reason: MISSING_SESSION_POLICY };
 		}
 		if (event.toolName === "bash" && input.target === "client" && typeof input.command === "string" && clientToolCommand?.(input.command)) {
